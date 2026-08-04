@@ -120,3 +120,44 @@ export interface Intent {
   distress?: boolean;
   reason?: string;
 }
+
+/**
+ * What the database ACTUALLY did — not what the router asked for. Every
+ * user-facing claim is derived from one of these, which is what makes
+ * "I saved it" impossible to say when nothing was saved.
+ */
+export type Effect =
+  | { kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule; requiresProof: boolean; altHour?: number }
+  | { kind: 'reminder_captured'; id: number; title: string }
+  | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
+  | { kind: 'reminder_retimed'; id: number; title: string; at: number }
+  | { kind: 'reminder_deleted'; id: number; title: string }
+  | { kind: 'instance_done'; id: number; title: string; streak: number }
+  | { kind: 'instance_skipped'; id: number; title: string }
+  | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }
+  | { kind: 'goal_created'; id: number; title: string; why: string | null }
+  | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
+  | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
+  | { kind: 'checkins_set'; enabled: boolean; perDay: number | null }
+  | { kind: 'muted'; until: number; hours: number }
+  | { kind: 'intensity_set'; level: number }
+  | { kind: 'listed_reminders'; rows: Reminder[]; openCount: number }
+  | { kind: 'listed_goals'; rows: Goal[] }
+  | { kind: 'listed_inbox'; rows: Reminder[] }
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean }
+  | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
+  | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
+  | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
+  | { kind: 'photo_accepted'; instanceId: number; title: string; reason: string; streak: number }
+  | { kind: 'photo_rejected'; instanceId: number; title: string; reason: string }
+  | { kind: 'distress'; text: string }
+  /** Nothing was written. `why` selects the deterministic wording. */
+  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };
+
+/** True when this effect wrote something the bot is allowed to confirm. */
+export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
+  'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
+  'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
+  'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
+  'intensity_set', 'photo_accepted',
+]);
