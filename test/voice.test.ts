@@ -38,6 +38,7 @@ const samples: Effect[] = [
   { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
   { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
   { kind: 'distress', text: 'אני שבור' },
+  { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
   { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },
   { kind: 'nothing', why: 'past_time', userText: 'תזכיר לי אתמול' },
   { kind: 'nothing', why: 'bad_time', userText: 'תזכיר לי ב-99' },
@@ -60,6 +61,17 @@ check('a done report states the streak',
 check('nothing-effects never claim a write', (() => {
   const claims = /רשמתי|קבעתי|שמתי|נקבע|נשמר/;
   return samples.filter((e) => e.kind === 'nothing').every((e) => !claims.test(render(e)));
+})());
+check('a mute states the exact hours, not some other field',
+  render(samples[12]).includes('ל-4 שעות'));
+check('a snooze states the exact minutes, not the target clock time',
+  render(samples[7]).includes('ב-10 דקות'));
+check('intensity states the exact level',
+  render(samples[13]).includes('רמת עוקצנות 3'));
+check('goal_closed renders "done" and "dropped" differently', (() => {
+  const doneText = render(samples[10]);
+  const droppedText = render({ ...samples[10], status: 'dropped' } as Effect);
+  return doneText !== droppedText && doneText.includes('סגור') && droppedText.includes('הורדתי');
 })());
 
 section('multiple effects join into one message');
