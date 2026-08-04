@@ -1,11 +1,13 @@
 import * as db from './db';
-import { applyIntent, handleSlash, type Outcome } from './commands';
+import { applyIntent } from './effects';
+import { handleSlash } from './slash';
 import { judgePhoto, route, speak, type Context } from './brain';
 import { CHECKIN_GENERAL, CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
 import { quickParse } from './quickparse';
 import { getPhotoBase64, sendBurst, sendChatAction, sendMessage } from './telegram';
 import { afterQuietHours, computeNext, formatLocal, isQuietHour, nextCheckinTime } from './time';
-import type { Env, Schedule } from './types';
+import { renderBaseline } from './voice';
+import type { Effect, Env, Schedule } from './types';
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -133,19 +135,15 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     } else {
       // Applied in order, so "סיימתי, ותזכיר לי עוד שעה" closes the task before
       // the new reminder is written.
-      const outcomes: Outcome[] = [];
+      const effects: Effect[] = [];
       for (const intent of intents) {
-        outcomes.push(await applyIntent(env, chatId, ctx, intent, text));
+        effects.push(...(await applyIntent(env, chatId, ctx, intent, text)));
       }
-      if (outcomes.length === 1) {
-        situation = outcomes[0].situation;
-        toneNote = outcomes[0].toneNote;
-      } else {
-        situation = outcomes.map((o, i) => `(${i + 1}) ${o.situation}`).join('\n\n');
-        toneNote =
-          'קרו כמה דברים בבת אחת. תתייחס לכולם בתשובה אחת קצרה, בלי לחזור על עצמך. ' +
-          'לכל תזכורת שנוצרה — ציין את השעה המדויקת שרשומה למעלה.';
-      }
+      // Task 6 adds the model rewrite and the validator on top of this. Until
+      // then the deterministic text goes out on its own, which is correct if
+      // plain — never raw JSON, never a placeholder.
+      situation = renderBaseline(effects, ctx.settings.tz);
+      toneNote = undefined;
     }
   } catch (err) {
     console.error('route/apply', err);

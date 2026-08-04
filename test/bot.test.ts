@@ -12,6 +12,8 @@ import { wallToUtc } from '../src/time';
 import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 import type { Settings, Stats } from '../src/types';
 import * as db from '../src/db';
+import { applyIntent } from '../src/effects';
+import type { Context } from '../src/brain';
 
 const CHAT = '12345';
 const TZ = 'Asia/Jerusalem';
@@ -69,6 +71,17 @@ function seedReminder(rig: Rig, title: string, dueAt: number, schedule = '{"type
 
 function reminders(rig: Rig): { id: number; title: string; schedule: string; next_fire_at: number | null; active: number }[] {
   return rig.db.prepare('SELECT id, title, schedule, next_fire_at, active FROM reminders').all() as any;
+}
+
+async function buildTestContext(rig: Rig): Promise<Context> {
+  const [settings, stats, rems, goals, open] = await Promise.all([
+    db.getSettings(rig.env, CHAT),
+    db.stats(rig.env, CHAT),
+    db.listReminders(rig.env, CHAT),
+    db.listGoals(rig.env, CHAT),
+    db.openInstances(rig.env, CHAT),
+  ]);
+  return { settings, stats, reminders: rems, goals, open, nowLabel: 'עכשיו' };
 }
 
 // ===========================================================================
@@ -165,12 +178,24 @@ async function main() {
   {
     const rig = createRig();
     seedSettings(rig);
-    // The router recognises the request but pins no time, so nothing is written.
+    // The router recognises the request but pins no time. It is no longer
+    // dropped — it is captured to the inbox, never left scheduled or lost.
     rig.routerQueue.push({ actions: [{ action: 'create_reminder', title: 'לקנות חלב' }] });
-    rig.speakQueue.push('מתי?');
+    rig.speakQueue.push('תפסתי, בלי שעה.');
     await runWebhook(rig, 'תזכיר לי לקנות חלב מתישהו');
 
-    eq('no reminder row was created', reminders(rig).length, 0);
+    const inboxItems = await db.listInbox(rig.env, CHAT);
+    eq(
+      'the request was captured to the inbox instead of being lost',
+      inboxItems.map((i) => i.title),
+      ['לקנות חלב'],
+    );
+    const row = reminders(rig)[0];
+    check(
+      'the capture is not scheduled to fire',
+      row !== undefined && row.next_fire_at === null,
+      `row=${JSON.stringify(row)}`,
+    );
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
     check(
       'the persona is told in the situation that nothing was created',
@@ -287,6 +312,32 @@ async function main() {
     await db.scheduleInboxItem(rig.env, id, at, JSON.stringify({ type: 'once', at: '2099-01-01T10:00' }));
     eq('the inbox is empty once scheduled', (await db.listInbox(rig.env, CHAT)).length, 0);
     eq('and it is now due-able', (await db.dueReminders(rig.env, at)).length, 1);
+    rig.restore();
+  }
+
+  section('effects — what comes back is what the database did');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const ctx = await buildTestContext(rig);
+
+    const created = await applyIntent(rig.env, CHAT, ctx, {
+      action: 'create_reminder', title: 'לרוץ', schedule_type: 'once', in_minutes: 30,
+    }, 'תזכיר לי עוד חצי שעה לרוץ');
+    eq('one effect', created.length, 1);
+    eq('kind', created[0].kind, 'reminder_created');
+    check('carries the real row id', created[0].kind === 'reminder_created' && created[0].id > 0);
+
+    const row = reminders(rig)[0];
+    check(
+      'the effect time matches the stored row exactly',
+      created[0].kind === 'reminder_created' && created[0].at === row.next_fire_at,
+    );
+
+    const nothing = await applyIntent(rig.env, CHAT, ctx, {
+      action: 'create_reminder', title: 'משהו',
+    }, 'תזכיר לי משהו');
+    eq('a timeless create captures to the inbox', nothing[0].kind, 'reminder_captured');
     rig.restore();
   }
 
