@@ -11,6 +11,7 @@ import { buildSystemPrompt } from '../src/persona';
 import { wallToUtc } from '../src/time';
 import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 import type { Settings, Stats } from '../src/types';
+import * as db from '../src/db';
 
 const CHAT = '12345';
 const TZ = 'Asia/Jerusalem';
@@ -59,8 +60,8 @@ function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
 function seedReminder(rig: Rig, title: string, dueAt: number, schedule = '{"type":"once","at":"2099-01-01T07:05"}'): number {
   const r = rig.db
     .prepare(
-      `INSERT INTO reminders (chat_id, title, schedule, tz, next_fire_at, active, created_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`,
+      `INSERT INTO reminders (chat_id, title, schedule, tz, next_fire_at, status, active, created_at)
+       VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
     )
     .run(CHAT, title, schedule, TZ, dueAt, Date.now());
   return Number(r.lastInsertRowid);
@@ -267,6 +268,37 @@ async function main() {
     const row = reminders(rig)[0];
     eq('it rescheduled itself for tomorrow', row.next_fire_at, wallToUtc(2026, 8, 6, 7, 5, TZ));
     eq('and stayed active', row.active, 1);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('inbox — a captured item with no time is never lost');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const id = await db.addInboxItem(rig.env, CHAT, 'לקנות חלב', TZ);
+    const items = await db.listInbox(rig.env, CHAT);
+    eq('the item is in the inbox', items.map((i) => i.title), ['לקנות חלב']);
+
+    const due = await db.dueReminders(rig.env, Date.now() + 86_400_000);
+    eq('inbox items never fire', due.length, 0);
+
+    const at = Date.now() + 3_600_000;
+    await db.scheduleInboxItem(rig.env, id, at, JSON.stringify({ type: 'once', at: '2099-01-01T10:00' }));
+    eq('the inbox is empty once scheduled', (await db.listInbox(rig.env, CHAT)).length, 0);
+    eq('and it is now due-able', (await db.dueReminders(rig.env, at)).length, 1);
+    rig.restore();
+  }
+
+  section('usage — per-model call counting');
+  {
+    const rig = createRig();
+    await db.recordUsage(rig.env, 'gemini-2.5-flash');
+    await db.recordUsage(rig.env, 'gemini-2.5-flash');
+    await db.recordUsage(rig.env, 'gemini-2.5-flash-lite');
+    eq('flash counted twice', await db.usageToday(rig.env, 'gemini-2.5-flash'), 2);
+    eq('flash-lite counted once', await db.usageToday(rig.env, 'gemini-2.5-flash-lite'), 1);
+    eq('unknown model is zero', await db.usageToday(rig.env, 'nope'), 0);
     rig.restore();
   }
 

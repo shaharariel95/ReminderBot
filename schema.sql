@@ -18,10 +18,14 @@ CREATE TABLE reminders (
   nag_interval_min INTEGER NOT NULL DEFAULT 20,
   max_nags         INTEGER NOT NULL DEFAULT 3,
   next_fire_at     INTEGER,                        -- epoch ms; NULL = never again
+  -- scheduled | inbox | done | cancelled. `active` is derived and kept only so a
+  -- half-migrated database still reads; status is the source of truth.
+  status           TEXT    NOT NULL DEFAULT 'scheduled',
   active           INTEGER NOT NULL DEFAULT 1,
   created_at       INTEGER NOT NULL
 );
-CREATE INDEX idx_reminders_due ON reminders(active, next_fire_at);
+CREATE INDEX idx_reminders_due ON reminders(status, next_fire_at);
+CREATE INDEX idx_reminders_chat ON reminders(chat_id, status);
 
 -- One row per firing. This table is what makes nagging, streaks and
 -- "you flaked three times this week" possible at all.
@@ -77,4 +81,12 @@ CREATE TABLE settings (
   quiet_start_hour INTEGER NOT NULL DEFAULT 23,    -- no check-ins or nags from here...
   quiet_end_hour   INTEGER NOT NULL DEFAULT 8,     -- ...until here (local time)
   next_checkin_at  INTEGER
+);
+
+-- One row per model per day. Small, and it lets /diag tell the truth about quota.
+CREATE TABLE usage (
+  day   TEXT    NOT NULL,                          -- "2026-08-04" UTC
+  model TEXT    NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, model)
 );

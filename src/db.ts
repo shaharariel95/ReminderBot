@@ -161,13 +161,13 @@ export async function setIntensity(env: Env, chatId: string, level: number): Pro
 
 export async function addReminder(
   env: Env,
-  r: Omit<Reminder, 'id' | 'created_at' | 'active'>,
+  r: Omit<Reminder, 'id' | 'created_at' | 'status' | 'active'>,
 ): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO reminders
        (chat_id, title, notes, schedule, tz, requires_proof, proof_type,
-        nag_interval_min, max_nags, next_fire_at, active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        nag_interval_min, max_nags, next_fire_at, status, active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
   )
     .bind(
       r.chat_id,
@@ -188,7 +188,7 @@ export async function addReminder(
 
 export async function listReminders(env: Env, chatId: string): Promise<Reminder[]> {
   const res = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE chat_id = ? AND active = 1 ORDER BY next_fire_at IS NULL, next_fire_at',
+    "SELECT * FROM reminders WHERE chat_id = ? AND status = 'scheduled' ORDER BY next_fire_at IS NULL, next_fire_at",
   )
     .bind(chatId)
     .all<Reminder>();
@@ -197,7 +197,7 @@ export async function listReminders(env: Env, chatId: string): Promise<Reminder[
 
 export async function deleteReminder(env: Env, chatId: string, id: number): Promise<boolean> {
   const res = await env.DB.prepare(
-    'UPDATE reminders SET active = 0, next_fire_at = NULL WHERE id = ? AND chat_id = ?',
+    "UPDATE reminders SET status = 'cancelled', active = 0, next_fire_at = NULL WHERE id = ? AND chat_id = ?",
   )
     .bind(id, chatId)
     .run();
@@ -209,10 +209,10 @@ export async function deleteReminder(env: Env, chatId: string, id: number): Prom
   return (res.meta.changes ?? 0) > 0;
 }
 
-/** Reminders whose next_fire_at has arrived. */
+/** Reminders whose next_fire_at has arrived. Inbox items are excluded by status. */
 export async function dueReminders(env: Env, now: number): Promise<Reminder[]> {
   const res = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE active = 1 AND next_fire_at IS NOT NULL AND next_fire_at <= ? LIMIT 25',
+    "SELECT * FROM reminders WHERE status = 'scheduled' AND next_fire_at IS NOT NULL AND next_fire_at <= ? LIMIT 25",
   )
     .bind(now)
     .all<Reminder>();
@@ -220,8 +220,10 @@ export async function dueReminders(env: Env, now: number): Promise<Reminder[]> {
 }
 
 export async function setNextFire(env: Env, id: number, next: number | null): Promise<void> {
-  await env.DB.prepare('UPDATE reminders SET next_fire_at = ?, active = ? WHERE id = ?')
-    .bind(next, next === null ? 0 : 1, id)
+  await env.DB.prepare(
+    "UPDATE reminders SET next_fire_at = ?, status = ?, active = ? WHERE id = ?",
+  )
+    .bind(next, next === null ? 'done' : 'scheduled', next === null ? 0 : 1, id)
     .run();
 }
 
@@ -362,4 +364,68 @@ export async function stats(env: Env, chatId: string): Promise<Stats> {
     failed30: row?.failed30 ?? 0,
     currentStreak: streak,
   };
+}
+
+// -------------------------------------------------------------------- inbox
+
+/** Capture with no time. The whole point: this can never fail for lack of a schedule. */
+export async function addInboxItem(
+  env: Env,
+  chatId: string,
+  title: string,
+  tz: string,
+): Promise<number> {
+  const res = await env.DB.prepare(
+    `INSERT INTO reminders
+       (chat_id, title, notes, schedule, tz, requires_proof, proof_type,
+        nag_interval_min, max_nags, next_fire_at, status, active, created_at)
+     VALUES (?, ?, NULL, '', ?, 0, 'any', 20, 3, NULL, 'inbox', 1, ?)`,
+  )
+    .bind(chatId, title.slice(0, 200), tz, Date.now())
+    .run();
+  return Number(res.meta.last_row_id);
+}
+
+export async function listInbox(env: Env, chatId: string): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM reminders WHERE chat_id = ? AND status = 'inbox' ORDER BY created_at",
+  )
+    .bind(chatId)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
+/** Promote an inbox item to a real scheduled reminder. */
+export async function scheduleInboxItem(
+  env: Env,
+  id: number,
+  at: number,
+  schedule: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE reminders SET status = 'scheduled', next_fire_at = ?, schedule = ? WHERE id = ? AND status = 'inbox'",
+  )
+    .bind(at, schedule, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+// -------------------------------------------------------------------- usage
+
+const utcDay = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+
+export async function recordUsage(env: Env, model: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO usage (day, model, calls) VALUES (?, ?, 1)
+     ON CONFLICT(day, model) DO UPDATE SET calls = calls + 1`,
+  )
+    .bind(utcDay(Date.now()), model)
+    .run();
+}
+
+export async function usageToday(env: Env, model: string): Promise<number> {
+  const row = await env.DB.prepare('SELECT calls FROM usage WHERE day = ? AND model = ?')
+    .bind(utcDay(Date.now()), model)
+    .first<{ calls: number }>();
+  return row?.calls ?? 0;
 }

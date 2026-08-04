@@ -15,6 +15,9 @@ export type Schedule =
   | { type: 'weekly'; time: string; days: number[] }  // days: 0=Sunday .. 6=Saturday
   | { type: 'interval'; minutes: number };
 
+/** `inbox` = captured with no time. Never fires, never nags, waits in /inbox. */
+export type ReminderStatus = 'scheduled' | 'inbox' | 'done' | 'cancelled';
+
 export interface Reminder {
   id: number;
   chat_id: string;
@@ -27,6 +30,7 @@ export interface Reminder {
   nag_interval_min: number;
   max_nags: number;
   next_fire_at: number | null;
+  status: ReminderStatus;
   active: number;
   created_at: number;
 }
