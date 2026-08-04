@@ -1,0 +1,12 @@
+{
+  // The tests run under Node (tsx), the Worker runs on workerd. Keeping the two
+  // type sets in separate projects stops Node's globals from leaking into src/,
+  // where they would typecheck fine and then not exist at runtime.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

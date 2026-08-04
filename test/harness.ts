@@ -1,0 +1,206 @@
+/**
+ * In-memory test rig: a real SQLite behind a D1-shaped facade, plus fetch stubs
+ * for Gemini and Telegram. Lets the tick and webhook paths run end to end so a
+ * bug like "the reminder never arrived" can be reproduced instead of argued about.
+ */
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+// ------------------------------------------------------------------ D1 shim
+
+function shim(sqlite: DatabaseSync) {
+  const norm = (v: unknown) =>
+    typeof v === 'boolean' ? (v ? 1 : 0) : typeof v === 'bigint' ? Number(v) : v;
+  const out = (row: any) => {
+    if (!row) return null;
+    const o: any = {};
+    for (const k of Object.keys(row)) o[k] = typeof row[k] === 'bigint' ? Number(row[k]) : row[k];
+    return o;
+  };
+
+  return {
+    prepare(sql: string) {
+      const stmt = sqlite.prepare(sql);
+      const bound: unknown[] = [];
+      const api = {
+        bind(...args: unknown[]) {
+          bound.length = 0;
+          bound.push(...args.map(norm));
+          return api;
+        },
+        async first<T>(): Promise<T | null> {
+          return out(stmt.get(...(bound as any))) as T | null;
+        },
+        async all<T>(): Promise<{ results: T[] }> {
+          return { results: (stmt.all(...(bound as any)) as any[]).map(out) as T[] };
+        },
+        async run() {
+          const r = stmt.run(...(bound as any));
+          return { meta: { last_row_id: Number(r.lastInsertRowid), changes: Number(r.changes) } };
+        },
+      };
+      return api;
+    },
+  };
+}
+
+// --------------------------------------------------------------- fetch stub
+
+export interface Sent {
+  method: string;
+  chat_id?: string;
+  text?: string;
+}
+
+export interface GeminiCall {
+  kind: 'router' | 'speak';
+  /** The systemInstruction text — this is where the model's ground truth lives. */
+  system: string;
+}
+
+export interface Rig {
+  env: any;
+  db: DatabaseSync;
+  /** Every Telegram sendMessage that actually went out. */
+  sent: Sent[];
+  /** Every Gemini call, so a test can assert what the model was actually told. */
+  geminiCalls: GeminiCall[];
+  /** Plain text of the messages the user would have seen, in order. */
+  texts(): string[];
+  /** Router JSON responses, consumed in order. */
+  routerQueue: unknown[];
+  /** speak() text responses, consumed in order. Strings, or Error to throw. */
+  speakQueue: (string | Error)[];
+  /** Set true to make every Gemini call fail, simulating a rate limit. */
+  geminiDown: boolean;
+  restore(): void;
+}
+
+export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
+  const chatId = opts.chatId ?? '12345';
+  const sqlite = new DatabaseSync(':memory:');
+  const schema = readFileSync(join(HERE, '..', 'schema.sql'), 'utf8');
+  sqlite.exec(schema);
+
+  const rig: Rig = {
+    env: {
+      DB: shim(sqlite),
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_WEBHOOK_SECRET: 'test-secret',
+      GEMINI_API_KEY: 'test-key',
+      OWNER_CHAT_ID: chatId,
+      GEMINI_MODEL: 'gemini-3.5-flash-lite',
+      DEFAULT_TZ: opts.tz ?? 'Asia/Jerusalem',
+    },
+    db: sqlite,
+    sent: [],
+    geminiCalls: [],
+    texts: () => rig.sent.filter((s) => s.method === 'sendMessage').map((s) => s.text ?? ''),
+    routerQueue: [],
+    speakQueue: [],
+    geminiDown: false,
+    restore: () => {
+      globalThis.fetch = realFetch;
+    },
+  };
+
+  const realFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(init.body) : {};
+
+    if (url.includes('api.telegram.org')) {
+      const method = url.split('/').pop()!;
+      rig.sent.push({ method, chat_id: body.chat_id, text: body.text });
+      return json({ ok: true, result: {} });
+    }
+
+    if (url.includes('generativelanguage.googleapis.com')) {
+      if (rig.geminiDown) {
+        return new Response('{"error":{"code":429,"message":"rate limit"}}', { status: 429 });
+      }
+      // The router is the call that pins a responseSchema; everything else is speak().
+      const isRouter = !!body?.generationConfig?.responseSchema;
+      rig.geminiCalls.push({
+        kind: isRouter ? 'router' : 'speak',
+        system: body?.systemInstruction?.parts?.[0]?.text ?? '',
+      });
+      const queue = isRouter ? rig.routerQueue : rig.speakQueue;
+      if (!queue.length) {
+        throw new Error(
+          `test rig: unexpected ${isRouter ? 'router' : 'speak'} call, queue empty`,
+        );
+      }
+      const next = queue.shift()!;
+      if (next instanceof Error) throw next;
+      const text = isRouter ? JSON.stringify(next) : String(next);
+      return json({
+        candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
+        usageMetadata: {},
+      });
+    }
+
+    throw new Error(`test rig: unexpected fetch to ${url}`);
+  }) as any;
+
+  return rig;
+}
+
+function json(obj: unknown): Response {
+  return new Response(JSON.stringify(obj), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+// ------------------------------------------------------------------ asserts
+
+let failures = 0;
+let currentSection = '';
+
+export function section(name: string): void {
+  currentSection = name;
+  console.log(`\n--- ${name} ---`);
+}
+
+export function check(label: string, ok: boolean, detail?: string): void {
+  if (!ok) {
+    failures++;
+    console.log(`FAIL  ${label}`);
+    if (detail) console.log(`        ${detail}`);
+  } else {
+    console.log(`PASS  ${label}`);
+  }
+}
+
+export function eq(label: string, actual: unknown, expected: unknown): void {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  check(label, a === e, `expected ${e}\n        actual   ${a}`);
+}
+
+export function done(): void {
+  console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
+  if (failures > 0) (globalThis as any).process?.exit?.(1);
+}
+
+/** Run `fn` with the wall clock pinned to `ms`, so a tick can be tested at 07:05. */
+export async function withNow<T>(ms: number, fn: () => Promise<T>): Promise<T> {
+  const real = Date.now;
+  Date.now = () => ms;
+  try {
+    return await fn();
+  } finally {
+    Date.now = real;
+  }
+}
+
+/** A Telegram update carrying a text message from the owner. */
+export function textUpdate(chatId: string, text: string): unknown {
+  return { message: { chat: { id: Number(chatId) }, text } };
+}

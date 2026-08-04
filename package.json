@@ -1,0 +1,23 @@
+{
+  "name": "nu-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "db:init": "wrangler d1 execute nu-bot --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute nu-bot --local --file=./schema.sql",
+    "test:time": "npx tsx test/time.test.ts",
+    "test:parse": "npx tsx test/quickparse.test.ts",
+    "test:bot": "npx tsx test/bot.test.ts",
+    "test": "npm run test:time && npm run test:parse && npm run test:bot"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/node": "^26.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.99.0"
+  }
+}

@@ -1,0 +1,308 @@
+import { generate, generateJson, type Part, type Turn } from './gemini';
+import { buildSystemPrompt } from './persona';
+import type { Env, Goal, Instance, Intent, Reminder, Settings, Stats } from './types';
+import { describeSchedule, formatLocal, wallString } from './time';
+
+/**
+ * Two-stage brain, on purpose:
+ *   route()  — temperature 0, structured JSON, decides WHAT happens. Deterministic-ish.
+ *   speak()  — temperature 1, decides HOW it is said. Never touches the database.
+ * Keeping them apart means the personality can never accidentally delete a reminder,
+ * and the scheduler can never accidentally sound like a form letter.
+ */
+
+const ACTION_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    action: {
+      type: 'STRING',
+      enum: [
+        'create_reminder',
+        'complete',
+        'snooze',
+        'list',
+        'delete',
+        'set_intensity',
+        'chill',
+        'create_goal',
+        'goal_progress',
+        'complete_goal',
+        'drop_goal',
+        'list_goals',
+        'set_checkins',
+        'chat',
+      ],
+    },
+    title: { type: 'STRING' },
+    why: { type: 'STRING' },
+    goal_id: { type: 'INTEGER' },
+    checkins_enabled: { type: 'BOOLEAN' },
+    checkin_per_day: { type: 'INTEGER' },
+    schedule_type: { type: 'STRING', enum: ['once', 'daily', 'weekly', 'interval'] },
+    time: { type: 'STRING' },
+    days: { type: 'ARRAY', items: { type: 'INTEGER' } },
+    interval_minutes: { type: 'INTEGER' },
+    once_at: { type: 'STRING' },
+    in_minutes: { type: 'INTEGER' },
+    requires_proof: { type: 'BOOLEAN' },
+    proof_type: { type: 'STRING', enum: ['text', 'photo', 'any'] },
+    target_id: { type: 'INTEGER' },
+    snooze_minutes: { type: 'INTEGER' },
+    chill_hours: { type: 'INTEGER' },
+    intensity: { type: 'INTEGER' },
+    distress: { type: 'BOOLEAN' },
+    reason: { type: 'STRING' },
+  },
+  required: ['action'],
+} as const;
+
+/**
+ * One message can ask for more than one thing — "תזכיר לי ב-7 לקום ובערב
+ * להתקשר לאמא" is two reminders, not one. The router therefore always returns a
+ * list, even when it has a single entry.
+ */
+const ROUTER_SCHEMA = {
+  type: 'OBJECT',
+  properties: { actions: { type: 'ARRAY', items: ACTION_SCHEMA } },
+  required: ['actions'],
+} as const;
+
+/** More than this in one message is a misparse, not a request. */
+const MAX_ACTIONS = 5;
+
+export interface Context {
+  settings: Settings;
+  stats: Stats;
+  reminders: Reminder[];
+  goals: Goal[];
+  open: Instance[];
+  nowLabel: string;
+}
+
+/**
+ * These three renderers are shared between the router and the persona on
+ * purpose. They used to exist only for the router, which meant speak() was
+ * asked to "only mention tasks from the list" while never being shown a list —
+ * so it invented them.
+ */
+export function remindersSummary(ctx: Context): string {
+  if (!ctx.reminders.length) return '  (אין)';
+  return ctx.reminders
+    .map((r) => {
+      let sched = r.schedule;
+      try {
+        sched = describeSchedule(JSON.parse(r.schedule));
+      } catch {
+        /* keep raw */
+      }
+      const next = r.next_fire_at ? formatLocal(r.next_fire_at, r.tz) : 'לא מתוזמן';
+      return `  #${r.id} "${r.title}" — ${sched} — הבא: ${next}${
+        r.requires_proof ? ' — דורש הוכחה' : ''
+      }`;
+    })
+    .join('\n');
+}
+
+export function openSummary(ctx: Context): string {
+  if (!ctx.open.length) return '  (אין)';
+  return ctx.open
+    .map(
+      (i) =>
+        `  instance ${i.id} → "${i.title}" (נשלח ${formatLocal(i.fired_at, ctx.settings.tz)}, ${
+          i.nag_count
+        } נדנודים)`,
+    )
+    .join('\n');
+}
+
+export function goalsSummary(ctx: Context): string {
+  if (!ctx.goals.length) return '  (אין)';
+  return ctx.goals
+    .map((g) => {
+      const prog = g.last_progress
+        ? ` — עדכון אחרון: "${g.last_progress}" (${formatLocal(
+            g.last_progress_at ?? g.created_at,
+            ctx.settings.tz,
+          )})`
+        : ' — אין עדיין התקדמות';
+      return `  goal:${g.id} "${g.title}"${g.why ? ` (למה: ${g.why})` : ''}${prog}`;
+    })
+    .join('\n');
+}
+
+function contextBlock(ctx: Context): string {
+  return `תזכורות פעילות (מתוזמנות לשעה):\n${remindersSummary(
+    ctx,
+  )}\n\nמטרות מתמשכות (בלי שעה — אתה מעלה אותן ביוזמתך):\n${goalsSummary(
+    ctx,
+  )}\n\nמשימות פתוחות שמחכות לדיווח:\n${openSummary(ctx)}`;
+}
+
+export async function route(
+  env: Env,
+  ctx: Context,
+  userText: string,
+  history: { role: 'user' | 'bot'; text: string }[] = [],
+  image?: { data: string; mimeType: string },
+): Promise<Intent[]> {
+  // Without this, a bare "כן" is unroutable: the router can't see that the
+  // previous turn was "לשים לך תזכורת ל-11?" and the reminder is silently lost.
+  const convo = history
+    .slice(-6)
+    .map((m) => `${m.role === 'user' ? 'הוא' : 'אתה'}: ${m.text.replace(/\n+/g, ' ')}`)
+    .join('\n');
+  const system = `אתה מנתב כוונות של בוט תזכורות. אתה לא מדבר עם המשתמש — אתה רק מחזיר JSON.
+
+השעה עכשיו, בפורמט שאתה אמור להשתמש בו: ${wallString(Date.now(), ctx.settings.tz)}
+במילים: ${ctx.nowLabel} (אזור זמן ${ctx.settings.tz})
+
+${contextBlock(ctx)}
+
+${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא זו שאתה מנתב עכשיו):\n${convo}\n` : ''}
+אם ההודעה הנוכחית היא אישור קצר ("כן", "יאללה", "בטח", "תן", "אוקיי") — תסתכל למעלה מה אתה הצעת לו בהודעה הקודמת, ותחזיר את הפעולה שהוא מאשר, כולל כל הפרטים מההצעה שלך. אל תחזיר "chat" על אישור.
+
+כללי החלטה:
+- "complete" — המשתמש מדווח שביצע משימה, או שולח תמונה כהוכחה. חובה target_id = ה-instance id הרלוונטי מהרשימה למעלה. אם אין משימה פתוחה מתאימה, החזר "chat".
+- "create_reminder" — הוא מבקש תזכורת/משימה חדשה. חלץ title קצר בלשון המשתמש.
+  אם אין לו כותרת ברורה (למשל "תזכיר לי עוד 5 דקות" בלי לומר על מה) — תן title כללי כמו "תזכורת" ותמשיך. אל תחזיר "chat" רק בגלל שחסרה כותרת.
+
+  איך לבחור schedule_type:
+  * "עוד X דקות/שעות", "בעוד רבע שעה", "תוך שעה" → schedule_type="once" + **in_minutes** (מספר דקות בלבד).
+    אל תחשב בעצמך תאריך ושעה — פשוט תחזיר את מספר הדקות ואני אחשב. "עוד 3 דקות" → in_minutes=3. "עוד שעתיים" → in_minutes=120.
+  * שעה מפורשת היום/מחר ("ב-22:36", "מחר ב-9") → schedule_type="once" + once_at="YYYY-MM-DDTHH:MM" לפי השעון שקיבלת למעלה.
+  * "כל יום ב-X" → "daily" + time.
+  * "כל שני ורביעי ב-X" → "weekly" + time + days (0=ראשון..6=שבת).
+  * "כל X דקות שוב ושוב" (חזרתי!) → "interval" + interval_minutes.
+    שים לב: "עוד 20 דקות" זה once עם in_minutes=20, ולא interval. interval זה רק כשהוא רוצה שזה יחזור על עצמו בלי סוף.
+
+  requires_proof=true אם הוא ביקש שתדרוש הוכחה או אם זו משימה פיזית שקל לשקר לגביה.
+- "snooze" — דחייה. target_id = instance id, snooze_minutes.
+- "delete" — ביטול תזכורת. target_id = reminder id.
+- "list" — הוא שואל מה יש לו (תזכורות).
+
+הבחנה חשובה בין תזכורת למטרה:
+- **תזכורת** = משהו עם שעה. "תזכיר לי ב-7 לרוץ". → create_reminder.
+- **מטרה** = שאיפה מתמשכת בלי שעה. "אני רוצה לפתוח תיק מסחר", "אני לומד בבא בתרא", "אני רוצה לחזור לחדר כושר". → create_goal (+why אם הוא אמר למה זה חשוב לו).
+  אם הוא מתאר שאיפה בלי זמן — זו מטרה, לא תזכורת. אל תמציא לו שעה.
+- "goal_progress" — הוא מספר משהו על מטרה קיימת (התקדם, נתקע, שינה כיוון). goal_id + reason = מה שהוא אמר, בקצרה.
+- "complete_goal" / "drop_goal" — הוא סיים או ויתר על מטרה. goal_id.
+- "list_goals" — הוא שואל מה המטרות שלו.
+- "set_checkins" — הוא מבקש שתפסיק/תתחיל ליזום שיחות, או שתעשה את זה יותר/פחות. checkins_enabled, checkin_per_day.
+- "chill" — הוא מבקש שתפסיק לנדנד לזמן מה. chill_hours (ברירת מחדל 4).
+- "set_intensity" — הוא מבקש שתהיה יותר/פחות נודניק. intensity: 1 רך, 2 רגיל, 3 אגרסיבי.
+- "chat" — כל השאר.
+- distress=true אם הוא נשמע באמת במצוקה, שחוק, חולה, אבל, או מתאר משהו כבד. זה גובר על הכל.
+- אל תמציא target_id או goal_id שלא מופיעים ברשימה למעלה. target_id מתייחס ל-instance או reminder; goal_id רק למטרות.
+
+פורמט הפלט: תמיד אובייקט עם המפתח "actions" שהוא **מערך**.
+הודעה אחת יכולה לבקש כמה דברים. כל בקשה נפרדת = איבר נפרד במערך, לפי הסדר שבו הוא אמר אותן.
+- "תזכיר לי ב-7 לקום וגם ב-9 להתקשר לרופא" → שני איברים, כל אחד create_reminder עם השעה שלו.
+- "סיימתי את הכביסה, ותזכיר לי עוד שעה לתלות" → שני איברים: complete, ואז create_reminder.
+- בקשה אחת = מערך עם איבר אחד. אל תפצל בקשה אחת לשניים, ואל תאחד שתי בקשות לאחת.
+- אל תחזור על אותה פעולה פעמיים. מקסימום ${MAX_ACTIONS} איברים.`;
+
+  const parts: Part[] = [];
+  if (image) parts.push({ inline_data: { mime_type: image.mimeType, data: image.data } });
+  parts.push({ text: userText || '(שלח תמונה בלי טקסט)' });
+
+  const raw = await generateJson<{ actions?: Intent[] } | Intent>(env, {
+    system,
+    contents: [{ role: 'user', parts }],
+    jsonSchema: ROUTER_SCHEMA as unknown as Record<string, unknown>,
+    maxOutputTokens: 2000,
+  });
+
+  // Models drop the wrapper occasionally. A bare action object is still a valid
+  // answer and losing it would mean losing a reminder.
+  const list = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { actions?: Intent[] }).actions)
+      ? (raw as { actions: Intent[] }).actions
+      : (raw as Intent).action
+        ? [raw as Intent]
+        : [];
+
+  const actions = list.filter((a) => a && typeof a.action === 'string').slice(0, MAX_ACTIONS);
+  return actions.length ? actions : [{ action: 'chat' }];
+}
+
+/**
+ * Judge a photo against a task. Deliberately lenient: the point is friction,
+ * not forensics, and a bot that rejects real proof gets uninstalled.
+ */
+export async function judgePhoto(
+  env: Env,
+  title: string,
+  image: { data: string; mimeType: string },
+  caption: string,
+): Promise<{ verdict: 'accepted' | 'rejected'; reason: string }> {
+  const schema = {
+    type: 'OBJECT',
+    properties: {
+      verdict: { type: 'STRING', enum: ['accepted', 'rejected'] },
+      reason: { type: 'STRING' },
+    },
+    required: ['verdict', 'reason'],
+  };
+  try {
+    return await generateJson<{ verdict: 'accepted' | 'rejected'; reason: string }>(env, {
+      system: `אתה בודק הוכחות. המשימה: "${title}".
+תקבל תמונה. השאלה היחידה: האם התמונה מתיישבת באופן סביר עם זה שהמשימה בוצעה?
+היה סלחני — אם זה יכול להיות הוכחה סבירה, קבל. דחה רק אם התמונה בבירור לא קשורה בכלל.
+reason: משפט אחד קצר בעברית שמתאר מה רואים בתמונה.`,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inline_data: { mime_type: image.mimeType, data: image.data } },
+            { text: caption || '(בלי כיתוב)' },
+          ],
+        },
+      ],
+      jsonSchema: schema as unknown as Record<string, unknown>,
+      maxOutputTokens: 1500,
+    });
+  } catch (err) {
+    console.error('judgePhoto', err);
+    return { verdict: 'accepted', reason: 'לא הצלחתי לנתח את התמונה' };
+  }
+}
+
+/**
+ * Voice a situation in character. `situation` is a factual note produced by
+ * deterministic code — the model dresses it, it does not decide it.
+ */
+export async function speak(
+  env: Env,
+  ctx: Context,
+  history: { role: 'user' | 'bot'; text: string }[],
+  situation: string,
+  toneNote?: string,
+): Promise<string> {
+  const system =
+    buildSystemPrompt(
+      ctx.settings,
+      ctx.stats,
+      ctx.nowLabel,
+      remindersSummary(ctx),
+      goalsSummary(ctx),
+      openSummary(ctx),
+    ) +
+    `\n\n## המצב עכשיו\n${situation}` +
+    (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
+    `\n\nכתוב את התגובה שלך כ-2-3 הודעות קצרות, מופרדות בשורה ריקה. רק את ההודעות עצמן — בלי הקדמות, בלי מרכאות, בלי הסברים.`;
+
+  const contents: Turn[] = history.map((m) => ({
+    role: m.role === 'user' ? ('user' as const) : ('model' as const),
+    parts: [{ text: m.text }],
+  }));
+  // Gemini requires the conversation to start with a user turn.
+  while (contents.length && contents[0].role === 'model') contents.shift();
+  if (!contents.length || contents[contents.length - 1].role === 'model') {
+    contents.push({ role: 'user', parts: [{ text: '(המשך)' }] });
+  }
+
+  // Gemini 3 can't switch reasoning off entirely, and those tokens come out of
+  // this budget before any visible text — hence the headroom for a 3-line reply.
+  return generate(env, { system, contents, temperature: 1.05, maxOutputTokens: 2000 });
+}
