@@ -198,9 +198,9 @@ async function main() {
     );
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
     check(
-      'the persona is told in the situation that nothing was created',
-      !!speakCall && speakCall.system.includes('לא נוצרה'),
-      `speak system prompt: ${speakCall?.system.slice(-400)}`,
+      'the situation says it was captured, not scheduled',
+      !!speakCall && speakCall.system.includes('תפסתי') && !speakCall.system.includes('קבעתי'),
+      `speak system prompt tail: ${speakCall?.system.slice(-400)}`,
     );
     rig.restore();
   }
