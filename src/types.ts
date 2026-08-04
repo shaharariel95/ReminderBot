@@ -161,3 +161,23 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted',
 ]);
+
+/**
+ * Everything the model is permitted to assert this turn. `times` and `titles`
+ * are the allow-lists the validator checks output against.
+ */
+export interface Facts {
+  effects: Effect[];
+  reminders: Reminder[];
+  open: Instance[];
+  goals: Goal[];
+  settings: Settings;
+  stats: Stats;
+  nowLabel: string;
+  /** Every clock time the model may say, as "HH:MM". */
+  times: string[];
+  /** Every task or goal title the model may quote. */
+  titles: string[];
+  /** True when at least one effect wrote to the database. */
+  wrote: boolean;
+}
