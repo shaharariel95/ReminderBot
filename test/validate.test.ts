@@ -5,7 +5,7 @@ import { renderBaseline } from '../src/voice';
 import { wallToUtc } from '../src/time';
 import { check, done, section } from './harness';
 import type { Context } from '../src/brain';
-import type { Effect, Settings, Stats } from '../src/types';
+import type { Effect, Reminder, Settings, Stats } from '../src/types';
 
 const TZ = 'Asia/Jerusalem';
 
@@ -88,9 +88,60 @@ check('a quoted span that only exists in the baseline is allowed when the model 
 check('but a quoted span absent from BOTH facts and baseline is still rejected',
   !validate('הערה: "פגישה מומצאת" בוטלה.', facts([NOTHING]), base([NOTHING])).ok);
 
+section('rule 3 (quotable) — the model may truthfully quote prose that is not a title');
+{
+  const rejected: Effect = { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' };
+  check('quoting the photo_rejected reason passes (voice.ts never quotes it, so the baseline union alone cannot cover this)',
+    validate('יש שם "חתול" בתמונה, לא אתה.', facts([rejected]), base([rejected])).ok);
+}
+{
+  const checkin: Effect = {
+    kind: 'checkin_goal', id: 3, title: 'לפתוח תיק מסחר', why: null,
+    lastProgress: 'מילאתי טפסים', lastProgressAt: null, lastCheckinAt: null,
+  };
+  check('quoting the checkin_goal progress note passes',
+    validate('אז אמרת "מילאתי טפסים" בפעם שעברה?', facts([checkin]), base([checkin])).ok);
+}
+{
+  const chat: Effect = { kind: 'nothing', why: 'chat', userText: 'אני ממש עייף היום' };
+  check('quoting the user\'s own words back passes',
+    validate('אמרת "אני ממש עייף היום" — מה קרה?', facts([chat]), base([chat])).ok);
+}
+check('a quote present in neither titles, quotable, nor the baseline is still rejected — rule 3 keeps its teeth', (() => {
+  const rejected: Effect = { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' };
+  return !validate('יש שם "כלב ענק שרץ מהר מאוד" בתמונה.', facts([rejected]), base([rejected])).ok;
+})());
+check('quotable is one-directional: a long quote that merely CONTAINS a short reason is still rejected, not treated as a wildcard match', (() => {
+  const rejected: Effect = { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' };
+  // If this were bidirectional (as titles are), "חתול".includes(quoted) is false but
+  // quoted.includes("חתול") is true — a bidirectional `some` would wrongly accept it.
+  return !validate('יש שם "חתול ענק שאכל את הדוח" בתמונה.', facts([rejected]), base([rejected])).ok;
+})());
+
+section('facts.ts — listed_reminders rows contribute their schedule time, not just next_fire_at');
+check('the recurring time is in facts.times directly, independent of validate()\'s own baseline union', (() => {
+  const row: Reminder = {
+    id: 21, chat_id: '1', title: 'לשתות מים', notes: null,
+    schedule: '{"type":"daily","time":"16:45"}', tz: TZ, requires_proof: 0,
+    proof_type: 'any', nag_interval_min: 20, max_nags: 3,
+    next_fire_at: null, status: 'scheduled', active: 1, created_at: 0,
+  };
+  // next_fire_at is null on purpose: the only way "16:45" reaches facts.times is
+  // through the schedule JSON on the effect's own row, not the reminder's next fire.
+  const f = facts([{ kind: 'listed_reminders', rows: [row], openCount: 1 }]);
+  return f.times.includes('16:45');
+})());
+
 section('the baseline is always true by construction — every effect survives its own validator');
 {
   const AT = wallToUtc(2026, 8, 5, 7, 5, TZ);
+
+  const dailyRow: Reminder = {
+    id: 11, chat_id: '1', title: 'להוציא זבל', notes: null,
+    schedule: '{"type":"daily","time":"09:00"}', tz: TZ, requires_proof: 0,
+    proof_type: 'any', nag_interval_min: 20, max_nags: 3,
+    next_fire_at: AT, status: 'scheduled', active: 1, created_at: 0,
+  };
 
   const samples: Effect[] = [
     { kind: 'reminder_created', id: 1, title: 'לרוץ', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false },
@@ -107,7 +158,7 @@ section('the baseline is always true by construction — every effect survives i
     { kind: 'checkins_set', enabled: false, perDay: null },
     { kind: 'muted', until: AT, hours: 4 },
     { kind: 'intensity_set', level: 3 },
-    { kind: 'listed_reminders', rows: [], openCount: 0 },
+    { kind: 'listed_reminders', rows: [dailyRow], openCount: 1 },
     { kind: 'listed_goals', rows: [] },
     { kind: 'listed_inbox', rows: [] },
     { kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false },

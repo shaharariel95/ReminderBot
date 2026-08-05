@@ -178,6 +178,12 @@ export interface Facts {
   times: string[];
   /** Every task or goal title the model may quote. */
   titles: string[];
+  /**
+   * Human-readable prose the effects carry — reasons, progress notes, the user's
+   * own words. The model may quote any of it truthfully, but unlike a title it is
+   * never shortened or paraphrased, so it is matched in one direction only.
+   */
+  quotable: string[];
   /** True when at least one effect wrote to the database. */
   wrote: boolean;
 }

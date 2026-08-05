@@ -15,6 +15,11 @@ function clock(ts: number, tz: string): string | null {
 export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   const times = new Set<string>();
   const titles = new Set<string>();
+  const quotable = new Set<string>();
+
+  const addQuotable = (s: string | null | undefined) => {
+    if (typeof s === 'string' && s.trim().length > 0) quotable.add(s.trim());
+  };
 
   const addTime = (ts: number | null | undefined) => {
     if (typeof ts === 'number') {
@@ -50,11 +55,25 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       for (const r of e.rows) {
         titles.add(r.title);
         addTime(r.next_fire_at);
+        try {
+          const s = JSON.parse(r.schedule);
+          if (typeof s?.time === 'string') times.add(s.time);
+        } catch {
+          /* raw schedule, nothing to extract */
+        }
       }
     }
     if (e.kind === 'listed_goals' || e.kind === 'listed_inbox') {
       for (const r of e.rows) titles.add(r.title);
     }
+    if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
+    if (e.kind === 'checkin_goal') addQuotable(e.lastProgress);
+    if (e.kind === 'goal_progress') {
+      addQuotable(e.note);
+      addQuotable(e.previous);
+    }
+    if (e.kind === 'goal_created') addQuotable(e.why);
+    if (e.kind === 'nothing') addQuotable(e.userText);
   }
 
   return {
@@ -67,6 +86,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     nowLabel: ctx.nowLabel,
     times: [...times],
     titles: [...titles],
+    quotable: [...quotable],
     wrote: effects.some((e) => WROTE.has(e.kind)),
   };
 }

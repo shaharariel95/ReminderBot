@@ -62,8 +62,13 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
 
   for (const m of text.matchAll(QUOTED)) {
     const quoted = m[1].trim();
-    const known = allowedTitles.some((t) => t.includes(quoted) || quoted.includes(t));
-    if (!known) return { ok: false, reason: `invented task "${quoted}"` };
+    // Titles: bidirectional, because the model legitimately shortens/lengthens them.
+    const knownTitle = allowedTitles.some((t) => t.includes(quoted) || quoted.includes(t));
+    // Prose (reasons, notes, the user's own words): one direction only. These are
+    // never paraphrased, so letting `quoted` be the longer side would turn a short
+    // entry like reason = "חתול" into a wildcard that swallows any longer quote.
+    const knownProse = facts.quotable.some((q) => q.includes(quoted));
+    if (!knownTitle && !knownProse) return { ok: false, reason: `invented task "${quoted}"` };
   }
 
   return { ok: true };
