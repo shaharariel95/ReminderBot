@@ -73,6 +73,20 @@ function reminders(rig: Rig): { id: number; title: string; schedule: string; nex
   return rig.db.prepare('SELECT id, title, schedule, next_fire_at, active FROM reminders').all() as any;
 }
 
+/** An already-open instance, so a 'complete' intent has something to close. */
+function seedInstance(rig: Rig, reminderId: number, title: string, firedAt: number): number {
+  const r = rig.db
+    .prepare(
+      `INSERT INTO instances (reminder_id, chat_id, title, fired_at, status) VALUES (?, ?, ?, ?, 'open')`,
+    )
+    .run(reminderId, CHAT, title, firedAt);
+  return Number(r.lastInsertRowid);
+}
+
+function instances(rig: Rig): { id: number; status: string }[] {
+  return rig.db.prepare('SELECT id, status FROM instances').all() as any;
+}
+
 async function buildTestContext(rig: Rig): Promise<Context> {
   const [settings, stats, rems, goals, open] = await Promise.all([
     db.getSettings(rig.env, CHAT),
@@ -162,16 +176,31 @@ async function main() {
     seedSettings(rig, { checkins_enabled: 1, next_checkin_at: Date.now() - 1000, quiet_start_hour: 0, quiet_end_hour: 0 });
     await db.addGoal(rig.env, CHAT, 'לפתוח תיק מסחר', null);
 
-    rig.speakQueue.push('נו?');
+    // The fake speak() response echoes the goal, so a check on the sent text
+    // is a real assertion, not a tautology — it fails if the real title never
+    // made it into what was queued/sent.
+    rig.speakQueue.push('נו, מה איתה עם לפתוח תיק מסחר?');
     await runCron(rig);
 
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
     check('an unprompted check-in was attempted', !!speakCall);
+    // The system prompt is persona+context (buildSystemPrompt) followed by
+    // "## מה שקרה עכשיו" (this turn's baseline). The checkin_goal baseline
+    // itself quotes the goal title too, so checking the whole system string
+    // would still pass even if goalsSummary(ctx) stopped listing goals
+    // entirely — exactly the "told to use only what's listed, but nothing is
+    // listed" bug this block is named after. Isolate the persona/context
+    // portion the router and persona actually see.
+    const personaSection = speakCall?.system.split('## מה שקרה עכשיו')[0] ?? '';
     check(
-      'the persona is shown the actual goal, so it cannot invent one',
-      !!speakCall && speakCall.system.includes('לפתוח תיק מסחר'),
-      'the goal never reaches speak(); the model is told "only use what is listed" ' +
-        'while nothing is listed, so it makes something up',
+      'the persona context lists the actual goal, so it cannot invent one',
+      personaSection.includes('לפתוח תיק מסחר'),
+      `the goal never reaches the persona's goal list; persona section: ${personaSection.slice(-400)}`,
+    );
+    check(
+      'the sent message is grounded in the real goal',
+      rig.texts().join('\n').includes('לפתוח תיק מסחר'),
+      `sent=${JSON.stringify(rig.texts())}`,
     );
     rig.restore();
   }
@@ -384,8 +413,20 @@ async function main() {
     for (const c of cases) {
       const rig = createRig();
       seedSettings(rig);
-      rig.geminiDown = true;
+      if (c.router) rig.routerQueue.push(c.router);
+      // The router (when used) succeeds and the write it triggers actually
+      // happens — the failure is specifically in *voicing* the result.
+      // rig.geminiDown would 429 the router too and never touch routerQueue,
+      // which tests the wrong thing: the router-driven cases would take the
+      // same "broken router" fallback path as a genuinely down router,
+      // instead of exercising route()'s success path with speak() down.
+      rig.speakQueue.push(new Error('rate limited'));
       await runWebhook(rig, c.send);
+      if (c.router) {
+        check(`${c.label}: the router was actually consulted`,
+          rig.geminiCalls.some((g) => g.kind === 'router'),
+          `router never called; geminiCalls=${JSON.stringify(rig.geminiCalls.map((g) => g.kind))}`);
+      }
       check(`${c.label}: something correct was sent`, rig.texts().join('').trim().length > 0,
         `sent nothing. texts=${JSON.stringify(rig.texts())}`);
       rig.restore();
@@ -421,6 +462,89 @@ async function main() {
     check('"רשמתי" never reaches the user when nothing was written',
       !out.includes('רשמתי'), `sent: ${out}`);
     eq('and nothing was written', reminders(rig).length, 0);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('a Telegram failure on one send must not abort the rest of the tick');
+  {
+    // sendOutcome's actual send used to sit outside its own try. One 429 on
+    // the first due reminder threw out of sendOutcome, out of the `for` loop
+    // in tick, and out of tick itself — after setNextFire/createInstance for
+    // that reminder had already committed. Every remaining due reminder that
+    // tick, nag, give-up, and check-in got skipped, silently, for one send
+    // failure that had nothing to do with them.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'משימה א', Date.now() - 2000);
+    seedReminder(rig, 'משימה ב', Date.now() - 1000);
+    rig.telegramDown = true;
+
+    await runCron(rig);
+
+    check(
+      'both due reminders got an instance — the loop did not abort after the first send failed',
+      instances(rig).length === 2,
+      `instances=${JSON.stringify(instances(rig))}`,
+    );
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('effects already committed survive a later write failing');
+  {
+    // The old catch block OVERWROTE `effects` with a generic capture whenever
+    // an intent threw partway through a multi-intent turn — discarding
+    // whatever had already committed (here: closing the open instance) and
+    // telling the user only about the fallback capture. That is a false
+    // account of what the database did, from the one function whose entire
+    // job is to prevent exactly that.
+    const rig = createRig();
+    seedSettings(rig);
+    const reminderId = seedReminder(rig, 'לקפל כביסה', Date.now() + 3_600_000);
+    const instId = seedInstance(rig, reminderId, 'לקפל כביסה', Date.now() - 1000);
+
+    rig.routerQueue.push({
+      actions: [
+        { action: 'complete', target_id: instId },
+        { action: 'create_reminder', title: 'לתלות', schedule_type: 'once', in_minutes: 60 },
+      ],
+    });
+    // D1 writes in order: 1 = addMessage (user turn), 2 = closeInstance (the
+    // complete intent), 3 = addReminder (the create intent) — force exactly
+    // that third one to fail, so the first intent's write has already landed.
+    rig.dbFailIn = 3;
+
+    // No relative/absolute time phrase quickparse recognises, so this falls
+    // through to the (mocked) router above instead of being fast-pathed.
+    const text = 'סיימתי, ותזכיר לי כמו תמיד';
+    await runWebhook(rig, text);
+
+    const closed = instances(rig).find((i) => i.id === instId);
+    check(
+      'the instance closed by the first intent is not rolled back or hidden',
+      closed?.status === 'done',
+      `instance=${JSON.stringify(closed)}`,
+    );
+    check(
+      'no reminder row was created for the intent whose write failed',
+      !reminders(rig).some((r) => r.title === 'לתלות'),
+      `reminders=${JSON.stringify(reminders(rig))}`,
+    );
+    const inbox = await db.listInbox(rig.env, CHAT);
+    eq(
+      'the whole message was captured to the inbox as a fallback, once',
+      inbox.map((i) => i.title),
+      [text],
+    );
+
+    const out = rig.texts().join('\n');
+    check(
+      'the user is told about the real completion, not only the fallback capture',
+      out.includes('נסגר') && out.includes('לקפל כביסה'),
+      `sent: ${out}`,
+    );
+    check('the fallback capture is also mentioned', out.includes('תפסתי'), `sent: ${out}`);
     rig.restore();
   }
 

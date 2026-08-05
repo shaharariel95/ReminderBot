@@ -132,10 +132,15 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     console.error('route/apply', err);
     // A capture must survive a broken router. Anything that looks like a
     // reminder request lands in the inbox rather than being lost to an error.
+    // Effects already committed earlier in this turn (e.g. the first half of
+    // "סיימתי, ותזכיר לי עוד שעה" before the second intent threw) are kept,
+    // never overwritten — losing a real write here would be the exact "the
+    // bot claims something it didn't do" bug this whole pipeline exists to
+    // prevent.
     if (/תזכיר|תזכורת|תנדנד|remind/i.test(text)) {
       const id = await db.addInboxItem(env, chatId, text.slice(0, 200), ctx.settings.tz);
-      effects = [{ kind: 'reminder_captured', id, title: text.slice(0, 200) }];
-    } else {
+      effects.push({ kind: 'reminder_captured', id, title: text.slice(0, 200) });
+    } else if (effects.length === 0) {
       effects = [{ kind: 'nothing', why: 'chat', userText: text }];
     }
   }
@@ -179,6 +184,14 @@ async function applyPhoto(
  * baseline → model rewrite → validation → send. Every branch ends in something
  * being sent: a rejected or failed rewrite falls back to the baseline, which is
  * correct by construction.
+ *
+ * Returns whether the send actually reached Telegram. The send itself is
+ * inside its own try: a 429 or network error here must not propagate — this
+ * is called once per due reminder/nag/give-up inside a loop in `tick`, and an
+ * uncaught throw here used to abort every remaining item in that tick, after
+ * their state mutations (closeInstance, bumpNag) had already committed. That
+ * is a reminder marked delivered that the user never received — the original
+ * bug this project exists to fix.
  */
 async function sendOutcome(
   env: Env,
@@ -186,10 +199,16 @@ async function sendOutcome(
   ctx: Context,
   effects: Effect[],
   toneNote?: string,
-): Promise<void> {
+): Promise<boolean> {
   const facts = buildFacts(ctx, effects, ctx.settings.tz);
   const baseline = renderBaseline(effects, ctx.settings.tz);
-  if (!baseline.trim()) return;
+  if (!baseline.trim()) {
+    // Every known effect kind renders non-empty text (see voice.ts); this is
+    // defence against a future kind that doesn't, so the silence leaves a
+    // trace instead of vanishing.
+    console.warn('sendOutcome: empty baseline', JSON.stringify(effects));
+    return false;
+  }
 
   let text = baseline;
   try {
@@ -208,8 +227,14 @@ async function sendOutcome(
     console.error('speak', err);
   }
 
-  const sent = await sendBurst(env, chatId, text);
-  if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
+  try {
+    const sent = await sendBurst(env, chatId, text);
+    if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
+    return sent.length > 0;
+  } catch (err) {
+    console.error('send', err);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------- cron tick
@@ -278,10 +303,12 @@ async function tick(env: Env): Promise<void> {
     const instanceId = await db.createInstance(env, r, now);
     if (muted) continue;
 
-    await sendOutcome(env, chatId, ctx,
+    const delivered = await sendOutcome(env, chatId, ctx,
       [{ kind: 'reminder_fired', id: r.id, title: r.title, instanceId, requiresProof: r.requires_proof === 1 }],
       NAG_LADDER[0]);
-    console.log(`fired reminder ${r.id} → instance ${instanceId}`);
+    console.log(
+      `fired reminder ${r.id} → instance ${instanceId}${delivered ? '' : ' (DELIVERY FAILED)'}`,
+    );
   }
 
   if (muted) return;

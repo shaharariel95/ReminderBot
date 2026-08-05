@@ -12,7 +12,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 // ------------------------------------------------------------------ D1 shim
 
-function shim(sqlite: DatabaseSync) {
+/**
+ * `state.dbFailIn` counts down D1 `.run()` calls (INSERT/UPDATE/DELETE — never
+ * `.first`/`.all`, which are reads). When the countdown hits exactly 1, that
+ * write throws instead of executing, simulating a transient D1 failure in the
+ * middle of a multi-write turn. 0 (the default) never fails.
+ */
+function shim(sqlite: DatabaseSync, state: { dbFailIn: number }) {
   const norm = (v: unknown) =>
     typeof v === 'boolean' ? (v ? 1 : 0) : typeof v === 'bigint' ? Number(v) : v;
   const out = (row: any) => {
@@ -39,6 +45,10 @@ function shim(sqlite: DatabaseSync) {
           return { results: (stmt.all(...(bound as any)) as any[]).map(out) as T[] };
         },
         async run() {
+          if (state.dbFailIn > 0) {
+            state.dbFailIn--;
+            if (state.dbFailIn === 0) throw new Error('test rig: simulated D1 write failure');
+          }
           const r = stmt.run(...(bound as any));
           return { meta: { last_row_id: Number(r.lastInsertRowid), changes: Number(r.changes) } };
         },
@@ -77,6 +87,14 @@ export interface Rig {
   speakQueue: (string | Error)[];
   /** Set true to make every Gemini call fail, simulating a rate limit. */
   geminiDown: boolean;
+  /** Set true to make every Telegram sendMessage fail, simulating an outage. */
+  telegramDown: boolean;
+  /**
+   * Counts down D1 `.run()` (write) calls; the one where this hits exactly 1
+   * throws instead of executing. 0 (default) never fails. Lets a test force a
+   * write mid-turn to fail without touching Gemini or Telegram.
+   */
+  dbFailIn: number;
   restore(): void;
 }
 
@@ -85,10 +103,11 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
   const sqlite = new DatabaseSync(':memory:');
   const schema = readFileSync(join(HERE, '..', 'schema.sql'), 'utf8');
   sqlite.exec(schema);
+  const dbState = { dbFailIn: 0 };
 
   const rig: Rig = {
     env: {
-      DB: shim(sqlite),
+      DB: shim(sqlite, dbState),
       TELEGRAM_BOT_TOKEN: 'test-token',
       TELEGRAM_WEBHOOK_SECRET: 'test-secret',
       GEMINI_API_KEY: 'test-key',
@@ -103,6 +122,13 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     routerQueue: [],
     speakQueue: [],
     geminiDown: false,
+    get dbFailIn() {
+      return dbState.dbFailIn;
+    },
+    set dbFailIn(v: number) {
+      dbState.dbFailIn = v;
+    },
+    telegramDown: false,
     restore: () => {
       globalThis.fetch = realFetch;
     },
@@ -116,6 +142,12 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
 
     if (url.includes('api.telegram.org')) {
       const method = url.split('/').pop()!;
+      // Only sendMessage simulates the outage — sendChatAction already
+      // swallows its own errors in telegram.ts, so failing it too would not
+      // exercise anything new.
+      if (rig.telegramDown && method === 'sendMessage') {
+        return json({ ok: false, description: 'test rig: telegram down' });
+      }
       rig.sent.push({ method, chat_id: body.chat_id, text: body.text });
       return json({ ok: true, result: {} });
     }
