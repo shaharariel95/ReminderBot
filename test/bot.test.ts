@@ -139,10 +139,28 @@ async function main() {
   // ------------------------------------------------------------------------
   section('BUG 4 — unprompted messages must be grounded in real reminders');
   {
+    // Check-ins on and due right now, no goals on file, only a reminder. The
+    // general check-in (Task 6, Step 6) is gone on purpose: with nothing to
+    // ask about, the bot stays silent instead of manufacturing a topic out of
+    // a reminder that already has its own alarm.
     const rig = createRig();
-    // Check-ins on and due right now, no goals on file, one real reminder.
     seedSettings(rig, { checkins_enabled: 1, next_checkin_at: Date.now() - 1000, quiet_start_hour: 0, quiet_end_hour: 0 });
     seedReminder(rig, 'להתקשר לרואה חשבון', Date.now() + 86_400_000);
+
+    await runCron(rig);
+
+    check(
+      'no goal means no unprompted message, even with a reminder on file',
+      rig.texts().length === 0,
+      `sent=${JSON.stringify(rig.texts())}`,
+    );
+    rig.restore();
+  }
+  {
+    // With a real goal on file, the check-in fires and is grounded in it.
+    const rig = createRig();
+    seedSettings(rig, { checkins_enabled: 1, next_checkin_at: Date.now() - 1000, quiet_start_hour: 0, quiet_end_hour: 0 });
+    await db.addGoal(rig.env, CHAT, 'לפתוח תיק מסחר', null);
 
     rig.speakQueue.push('נו?');
     await runCron(rig);
@@ -150,9 +168,9 @@ async function main() {
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
     check('an unprompted check-in was attempted', !!speakCall);
     check(
-      'the persona is shown his actual reminders, so it cannot invent a task',
-      !!speakCall && speakCall.system.includes('להתקשר לרואה חשבון'),
-      'the reminder list never reaches speak(); the model is told "only use what is listed" ' +
+      'the persona is shown the actual goal, so it cannot invent one',
+      !!speakCall && speakCall.system.includes('לפתוח תיק מסחר'),
+      'the goal never reaches speak(); the model is told "only use what is listed" ' +
         'while nothing is listed, so it makes something up',
     );
     rig.restore();
@@ -350,6 +368,59 @@ async function main() {
     eq('flash counted twice', await db.usageToday(rig.env, 'gemini-2.5-flash'), 2);
     eq('flash-lite counted once', await db.usageToday(rig.env, 'gemini-2.5-flash-lite'), 1);
     eq('unknown model is zero', await db.usageToday(rig.env, 'nope'), 0);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('THE INVARIANT — model down, user still gets a correct message');
+  {
+    const cases: { label: string; send: string; router?: unknown }[] = [
+      { label: 'a timed reminder', send: 'תזכיר לי עוד 5 דקות לאכול' },
+      { label: 'a timeless capture', send: 'תזכיר לי לקנות חלב',
+        router: { actions: [{ action: 'create_reminder', title: 'לקנות חלב' }] } },
+      { label: 'plain chat', send: 'מה קורה',
+        router: { actions: [{ action: 'chat' }] } },
+    ];
+    for (const c of cases) {
+      const rig = createRig();
+      seedSettings(rig);
+      rig.geminiDown = true;
+      await runWebhook(rig, c.send);
+      check(`${c.label}: something correct was sent`, rig.texts().join('').trim().length > 0,
+        `sent nothing. texts=${JSON.stringify(rig.texts())}`);
+      rig.restore();
+    }
+  }
+
+  section('a lying model is discarded, the truth ships');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    // The clock is pinned so "5 minutes from now" is 14:05 and can never
+    // coincide with the invented time below. Without this the test flakes once
+    // a day, at 23:42.
+    await withNow(wallToUtc(2026, 8, 4, 14, 0, TZ), async () => {
+      // quickparse bypasses the router; speak invents a time that never existed.
+      rig.speakQueue.push('קבעתי לך ל-23:47, אל תתלונן.');
+      await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+    });
+    const out = rig.texts().join('\n');
+    check('the invented time never reaches the user', !out.includes('23:47'), `sent: ${out}`);
+    check('the real confirmation does', out.includes('לאכול'), `sent: ${out}`);
+    rig.restore();
+  }
+
+  section('a phantom confirmation is discarded');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('רשמתי לך, סגור.');
+    await runWebhook(rig, 'מה קורה');
+    const out = rig.texts().join('\n');
+    check('"רשמתי" never reaches the user when nothing was written',
+      !out.includes('רשמתי'), `sent: ${out}`);
+    eq('and nothing was written', reminders(rig).length, 0);
     rig.restore();
   }
 

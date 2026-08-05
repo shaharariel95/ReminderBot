@@ -2,12 +2,14 @@ import * as db from './db';
 import { applyIntent } from './effects';
 import { handleSlash } from './slash';
 import { judgePhoto, route, speak, type Context } from './brain';
-import { CHECKIN_GENERAL, CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
+import { buildFacts } from './facts';
+import { validate } from './validate';
+import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
 import { quickParse } from './quickparse';
 import { getPhotoBase64, sendBurst, sendChatAction, sendMessage } from './telegram';
 import { afterQuietHours, computeNext, formatLocal, isQuietHour, nextCheckinTime } from './time';
 import { renderBaseline } from './voice';
-import type { Effect, Env, Schedule } from './types';
+import type { Effect, Env, Intent, Schedule } from './types';
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -95,14 +97,15 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
   await db.addMessage(env, chatId, 'user', image ? `${text} [תמונה]`.trim() : text);
   const history = await db.recentMessages(env, chatId);
 
-  let situation: string;
+  let effects: Effect[] = [];
   let toneNote: string | undefined;
 
   try {
     // Common reminder phrasings never touch the router — see quickparse.ts.
     const fast = image ? null : quickParse(text, Date.now(), ctx.settings.tz);
-    const intents =
-      fast ? [fast] : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
+    const intents = fast
+      ? [fast]
+      : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
     // Visible in `wrangler tail`. When the bot claims it did something it
     // didn't, this line is what tells you whether the router or the persona lied.
     console.log(`intent${fast ? ' (quickparse)' : ''}`, JSON.stringify(intents));
@@ -110,62 +113,103 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     const photoComplete = image ? intents.find((i) => i.action === 'complete') : undefined;
 
     if (intents.some((i) => i.distress)) {
-      situation = `הוא כתב: "${text}". הוא נשמע במצוקה אמיתית.`;
+      effects = [{ kind: 'distress', text }];
       toneNote =
-        'עקיפת מצוקה. תוריד את הדמות לגמרי. בלי עוקצנות, בלי רצפים, בלי משימות. תהיה בנאדם.';
+        'עקיפת מצוקה. תוריד את הדמות לגמרי. בלי עוקצנות, בלי משימות. תהיה בנאדם.';
     } else if (image && photoComplete) {
-      const inst =
-        ctx.open.find((i) => i.id === photoComplete.target_id) ??
-        (ctx.open.length ? ctx.open[0] : null);
-      if (!inst) {
-        situation = `הוא שלח תמונה אבל אין משימה פתוחה שהיא יכולה להוכיח.`;
-        toneNote = 'תשאל אותו בציניות מה זה אמור להיות.';
-      } else {
-        const verdict = await judgePhoto(env, inst.title, image, text);
-        if (verdict.verdict === 'accepted') {
-          await db.closeInstance(env, inst.id, 'done', `תמונה: ${verdict.reason}`);
-          const fresh = await db.stats(env, chatId);
-          situation = `הוא שלח הוכחה מצולמת ל-"${inst.title}" והיא התקבלה (${verdict.reason}). הרצף שלו עכשיו ${fresh.currentStreak}.`;
-          toneNote = 'תן קרדיט אמיתי וקצר. הוא טרח לצלם, שזה ייחשב לו.';
-        } else {
-          situation = `הוא שלח תמונה כהוכחה ל-"${inst.title}", אבל היא לא קשורה (${verdict.reason}). המשימה נשארת פתוחה.`;
-          toneNote = 'תעיר לו על הניסיון, בעוקצנות. המשימה עדיין פתוחה ושניכם יודעים את זה.';
-        }
-      }
+      effects = await applyPhoto(env, chatId, ctx, photoComplete, image, text);
     } else {
       // Applied in order, so "סיימתי, ותזכיר לי עוד שעה" closes the task before
       // the new reminder is written.
-      const effects: Effect[] = [];
       for (const intent of intents) {
         effects.push(...(await applyIntent(env, chatId, ctx, intent, text)));
       }
-      // Task 6 adds the model rewrite and the validator on top of this. Until
-      // then the deterministic text goes out on its own, which is correct if
-      // plain — never raw JSON, never a placeholder.
-      situation = renderBaseline(effects, ctx.settings.tz);
-      toneNote = undefined;
+      if (effects.length > 1) {
+        toneNote = 'קרו כמה דברים. תתייחס לכולם בתשובה אחת קצרה, בלי לחזור על עצמך.';
+      }
     }
   } catch (err) {
     console.error('route/apply', err);
-    situation = `הוא כתב: "${text}". משהו אצלך בפנים נתקע ולא הצלחת להבין מה הוא רוצה.`;
-    toneNote = 'תגיד לו בכנות ובקצרה שמשהו נתקע ושינסה שוב. בלי להתפלסף.';
+    // A capture must survive a broken router. Anything that looks like a
+    // reminder request lands in the inbox rather than being lost to an error.
+    if (/תזכיר|תזכורת|תנדנד|remind/i.test(text)) {
+      const id = await db.addInboxItem(env, chatId, text.slice(0, 200), ctx.settings.tz);
+      effects = [{ kind: 'reminder_captured', id, title: text.slice(0, 200) }];
+    } else {
+      effects = [{ kind: 'nothing', why: 'chat', userText: text }];
+    }
   }
 
-  let reply: string;
+  await sendOutcome(env, chatId, ctx, effects, toneNote);
+  await db.pruneMessages(env, chatId);
+}
+
+/** Judge a submitted photo against the open instance it is meant to prove. */
+async function applyPhoto(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  intent: Intent,
+  image: { data: string; mimeType: string },
+  caption: string,
+): Promise<Effect[]> {
+  const inst =
+    ctx.open.find((i) => i.id === intent.target_id) ?? (ctx.open.length ? ctx.open[0] : null);
+  if (!inst) return [{ kind: 'nothing', why: 'no_open_task', userText: caption }];
+
+  const verdict = await judgePhoto(env, inst.title, image, caption);
+  if (verdict.verdict !== 'accepted') {
+    return [
+      { kind: 'photo_rejected', instanceId: inst.id, title: inst.title, reason: verdict.reason },
+    ];
+  }
+  await db.closeInstance(env, inst.id, 'done', `תמונה: ${verdict.reason}`);
+  const fresh = await db.stats(env, chatId);
+  return [
+    {
+      kind: 'photo_accepted', instanceId: inst.id, title: inst.title,
+      reason: verdict.reason, streak: fresh.currentStreak,
+    },
+  ];
+}
+
+/**
+ * The only way a message reaches the user.
+ *
+ * baseline → model rewrite → validation → send. Every branch ends in something
+ * being sent: a rejected or failed rewrite falls back to the baseline, which is
+ * correct by construction.
+ */
+async function sendOutcome(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  effects: Effect[],
+  toneNote?: string,
+): Promise<void> {
+  const facts = buildFacts(ctx, effects, ctx.settings.tz);
+  const baseline = renderBaseline(effects, ctx.settings.tz);
+  if (!baseline.trim()) return;
+
+  let text = baseline;
   try {
-    reply = await speak(env, ctx, history, situation, toneNote);
+    const history = await db.recentMessages(env, chatId, 8);
+    const dressed = await speak(env, facts, history, baseline, toneNote);
+    // Same-turn baseline, never a cached or recomputed one — it's what the
+    // validator's allow-lists are built from and what speak() just saw.
+    const verdict = validate(dressed, facts, baseline);
+    if (verdict.ok) {
+      text = dressed;
+    } else {
+      console.warn(`validator rejected the rewrite: ${verdict.reason}`);
+      await db.recordRejection(env);
+    }
   } catch (err) {
     console.error('speak', err);
-    // Single-user bot: the owner is the only reader, so show him the real
-    // error rather than a shrug. The API key travels in a header, never in
-    // the URL, so it can't turn up in an error body.
-    reply = `המוח שלי נפל לרגע.\n\n${String(err).slice(0, 900)}`;
   }
 
-  const sent = await sendBurst(env, chatId, reply);
-  // Store the burst as one turn so the model sees its own rhythm next time.
+  const sent = await sendBurst(env, chatId, text);
   if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
-  await db.pruneMessages(env, chatId);
 }
 
 // ---------------------------------------------------------------- cron tick
@@ -234,20 +278,10 @@ async function tick(env: Env): Promise<void> {
     const instanceId = await db.createInstance(env, r, now);
     if (muted) continue;
 
-    const situation = `הגיע הזמן של "${r.title}".${
-      r.requires_proof ? ' המשימה הזאת דורשת הוכחה — הוא צריך לשלוח תמונה או לדווח.' : ''
-    } זו התזכורת הראשונה.`;
-    const delivered = await say(
-      env,
-      ctx,
-      chatId,
-      situation,
-      NAG_LADDER[0],
-      `נו? ${r.title}.${r.requires_proof ? '\n\nותשלח תמונה.' : ''}`,
-    );
-    console.log(
-      `fired reminder ${r.id} → instance ${instanceId}${delivered ? '' : ' (DELIVERY FAILED)'}`,
-    );
+    await sendOutcome(env, chatId, ctx,
+      [{ kind: 'reminder_fired', id: r.id, title: r.title, instanceId, requiresProof: r.requires_proof === 1 }],
+      NAG_LADDER[0]);
+    console.log(`fired reminder ${r.id} → instance ${instanceId}`);
   }
 
   if (muted) return;
@@ -271,27 +305,17 @@ async function tick(env: Env): Promise<void> {
 
     if (inst.nag_count >= maxNags) {
       await db.closeInstance(env, inst.id, 'failed');
-      await say(
-        env,
-        ctx,
-        chatId,
-        `הוא התעלם מ-"${inst.title}" ${inst.nag_count} פעמים. אתה סוגר את זה ככישלון.`,
-        GIVE_UP,
-        `סגרתי את "${inst.title}" ככישלון להיום.`,
-      );
+      await sendOutcome(env, chatId, ctx,
+        [{ kind: 'gave_up', instanceId: inst.id, title: inst.title, rounds: inst.nag_count }],
+        GIVE_UP);
       continue;
     }
 
     const level = Math.min(3, inst.nag_count + 1);
     await db.bumpNag(env, inst.id, now + interval * 60_000);
-    await say(
-      env,
-      ctx,
-      chatId,
-      `"${inst.title}" עדיין פתוחה מאז ${formatLocal(inst.fired_at, ctx.settings.tz)} והוא לא דיווח כלום.`,
-      NAG_LADDER[level] ?? NAG_LADDER[3],
-      `נו? "${inst.title}" עדיין פתוחה.`,
-    );
+    await sendOutcome(env, chatId, ctx,
+      [{ kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at, round: level }],
+      NAG_LADDER[level] ?? NAG_LADDER[3]);
   }
 
   if (checkinDue) await maybeCheckIn(env, ctx, chatId, now, quiet, due.length + nags.length > 0);
@@ -325,72 +349,20 @@ async function maybeCheckIn(
 
   const goal = await db.stalestGoal(env, chatId);
 
+  // No goal means nothing real to ask about. Staying silent beats manufacturing
+  // a topic — an unprompted "what's on your plate?" with nothing behind it is
+  // exactly what reads as a broken bot.
   if (!goal) {
-    // Nothing to ask about. Stay silent rather than manufacture a topic.
-    if (!ctx.reminders.length) {
-      await reschedule(now);
-      return;
-    }
-    await say(env, ctx, chatId, `אתה פותח שיחה מיוזמתך. אין לו מטרות רשומות, רק תזכורות.`, CHECKIN_GENERAL);
-    await reschedule(Date.now());
+    await reschedule(now);
     return;
   }
 
-  const lastSeen = goal.last_progress_at
-    ? `בפעם האחרונה שדיברתם על זה (${formatLocal(goal.last_progress_at, s.tz)}) הוא אמר: "${goal.last_progress}"`
-    : 'הוא עוד לא דיווח על שום התקדמות במטרה הזאת';
-  const since = goal.last_checkin_at
-    ? `שאלת על זה לאחרונה ב-${formatLocal(goal.last_checkin_at, s.tz)}`
-    : 'עוד לא שאלת על זה מעולם';
-
-  await say(
-    env,
-    ctx,
-    chatId,
-    `אתה פותח שיחה מיוזמתך על המטרה "${goal.title}"${goal.why ? ` (הסיבה שלו: ${goal.why})` : ''}.
-${lastSeen}. ${since}.`,
-    CHECKIN_GOAL,
-  );
+  await sendOutcome(env, chatId, ctx,
+    [{ kind: 'checkin_goal', id: goal.id, title: goal.title, why: goal.why,
+       lastProgress: goal.last_progress, lastProgressAt: goal.last_progress_at,
+       lastCheckinAt: goal.last_checkin_at }],
+    CHECKIN_GOAL);
 
   await db.markGoalCheckin(env, goal.id);
   await reschedule(Date.now());
-}
-
-/**
- * Voice a situation and send it.
- *
- * `fallback` is the whole point of this function's shape. Wording a reminder is
- * the model's job, but *delivering* it is not allowed to depend on the model
- * being reachable: Gemini's free tier rate-limits, and this used to swallow the
- * error, leaving a reminder that had already been marked as fired and a user
- * who was never told anything. Pass a fallback for anything the user is owed;
- * omit it for messages nobody asked for, where silence is the better failure.
- */
-async function say(
-  env: Env,
-  ctx: Context,
-  chatId: string,
-  situation: string,
-  toneNote: string,
-  fallback?: string,
-): Promise<boolean> {
-  let text: string;
-  try {
-    const history = await db.recentMessages(env, chatId, 8);
-    text = await speak(env, ctx, history, situation, toneNote);
-  } catch (err) {
-    console.error('say/speak', err);
-    if (!fallback) return false;
-    console.warn('say: delivering plain fallback instead');
-    text = fallback;
-  }
-
-  try {
-    const sent = await sendBurst(env, chatId, text);
-    if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
-    return sent.length > 0;
-  } catch (err) {
-    console.error('say/send', err);
-    return false;
-  }
 }

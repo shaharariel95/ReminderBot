@@ -429,3 +429,8 @@ export async function usageToday(env: Env, model: string): Promise<number> {
     .first<{ calls: number }>();
   return row?.calls ?? 0;
 }
+
+/** Counts validator rejections so /diag can report how often the model lies. */
+export async function recordRejection(env: Env): Promise<void> {
+  await recordUsage(env, '_rejections');
+}

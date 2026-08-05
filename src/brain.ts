@@ -1,6 +1,6 @@
 import { generate, generateJson, type Part, type Turn } from './gemini';
 import { buildSystemPrompt } from './persona';
-import type { Env, Goal, Instance, Intent, Reminder, Settings, Stats } from './types';
+import type { Env, Facts, Goal, Instance, Intent, Reminder, Settings, Stats } from './types';
 import { describeSchedule, formatLocal, wallString } from './time';
 
 /**
@@ -269,40 +269,44 @@ reason: משפט אחד קצר בעברית שמתאר מה רואים בתמו�
 }
 
 /**
- * Voice a situation in character. `situation` is a factual note produced by
- * deterministic code — the model dresses it, it does not decide it.
+ * Rewrite a already-correct message in character.
+ *
+ * `baseline` is the deterministic text from voice.ts. The model's only job is to
+ * make it sound like נו? — it is explicitly not allowed to add facts, because
+ * anything it adds is unverifiable and validate.ts will throw the whole reply
+ * away for it.
  */
 export async function speak(
   env: Env,
-  ctx: Context,
+  facts: Facts,
   history: { role: 'user' | 'bot'; text: string }[],
-  situation: string,
+  baseline: string,
   toneNote?: string,
 ): Promise<string> {
+  const ctx: Context = {
+    settings: facts.settings, stats: facts.stats, reminders: facts.reminders,
+    goals: facts.goals, open: facts.open, nowLabel: facts.nowLabel,
+  };
   const system =
     buildSystemPrompt(
-      ctx.settings,
-      ctx.stats,
-      ctx.nowLabel,
-      remindersSummary(ctx),
-      goalsSummary(ctx),
-      openSummary(ctx),
+      facts.settings, facts.stats, facts.nowLabel,
+      remindersSummary(ctx), goalsSummary(ctx), openSummary(ctx),
     ) +
-    `\n\n## המצב עכשיו\n${situation}` +
+    `\n\n## מה שקרה עכשיו — זו האמת, אל תוסיף עליה\n${baseline}` +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
-    `\n\nכתוב את התגובה שלך כ-2-3 הודעות קצרות, מופרדות בשורה ריקה. רק את ההודעות עצמן — בלי הקדמות, בלי מרכאות, בלי הסברים.`;
+    `\n\nכתוב מחדש את מה שכתוב ב"מה שקרה עכשיו" בקול שלך.
+מותר לך לשנות ניסוח, להוסיף עוקץ, ולפצל לשתיים-שלוש הודעות קצרות מופרדות בשורה ריקה.
+אסור לך להוסיף שעה, תאריך, שם משימה, או מספר שלא מופיעים שם. אם תוסיף — כל התשובה שלך תיזרק.
+רק את ההודעות עצמן, בלי הקדמות ובלי מרכאות מסביב.`;
 
   const contents: Turn[] = history.map((m) => ({
     role: m.role === 'user' ? ('user' as const) : ('model' as const),
     parts: [{ text: m.text }],
   }));
-  // Gemini requires the conversation to start with a user turn.
   while (contents.length && contents[0].role === 'model') contents.shift();
   if (!contents.length || contents[contents.length - 1].role === 'model') {
     contents.push({ role: 'user', parts: [{ text: '(המשך)' }] });
   }
 
-  // Gemini 3 can't switch reasoning off entirely, and those tokens come out of
-  // this budget before any visible text — hence the headroom for a 3-line reply.
   return generate(env, { system, contents, temperature: 1.05, maxOutputTokens: 2000 });
 }
