@@ -291,8 +291,18 @@ section('duplicateOf.title — the nested-title trap, proven with a genuine roun
   // rejected as an invented task. A lean, hand-written baseline (rather than
   // the real baseline) proves the allow-list comes from facts.ts's sweep, not
   // from validate()'s baseline fold.
+  //
+  // The own title and duplicateOf's title are deliberately chosen so NEITHER
+  // is a substring of the other ("...לים" vs "...לחוף" — they diverge on the
+  // last word). validate.ts's title matching is bidirectional-by-containment,
+  // so if the two titles overlapped as substrings, the paraphrase could pass
+  // via the top-level title alone (already swept generically) even with the
+  // duplicateOf sweep deleted — masking exactly the bug this test exists to
+  // catch. This was caught by actually deleting the facts.ts sweep line and
+  // re-running: with overlapping titles the check below still passed
+  // (false confidence); with these titles it correctly failed.
   const created: Effect = {
-    kind: 'reminder_created', id: 2, title: 'לקחת בגד ים',
+    kind: 'reminder_created', id: 2, title: 'לקחת בגד ים לים',
     at: new Date('2026-08-05T04:05:00Z').getTime(),   // 07:05 Asia/Jerusalem
     schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
     duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
