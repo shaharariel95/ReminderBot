@@ -316,17 +316,21 @@ export async function getInstance(env: Env, id: number): Promise<Instance | null
   return env.DB.prepare('SELECT * FROM instances WHERE id = ?').bind(id).first<Instance>();
 }
 
+/** Re-arm a reminder's next fire time. Returns false if the reminder was
+ *  cancelled — the guard that stops a stale retime button from un-cancelling
+ *  and re-arming a reminder the user deliberately deleted. */
 export async function retimeReminder(
   env: Env,
   id: number,
   at: number,
   schedule: string,
-): Promise<void> {
-  await env.DB.prepare(
-    "UPDATE reminders SET next_fire_at = ?, schedule = ?, status = 'scheduled', active = 1 WHERE id = ?",
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE reminders SET next_fire_at = ?, schedule = ?, status = 'scheduled', active = 1 WHERE id = ? AND status != 'cancelled'",
   )
     .bind(at, schedule, id)
     .run();
+  return (res.meta.changes ?? 0) > 0;
 }
 
 export async function addMessage(

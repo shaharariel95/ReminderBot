@@ -199,82 +199,94 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   await answerCallback(env, q.id);
 
   const cb = decode(String(q.data ?? ''));
-  if (!cb) {
-    console.warn(`undecodable callback_data: ${q.data}`);
-    return;
-  }
-
-  const ctx = await buildContext(env, chatId);
   const effects: Effect[] = [];
 
-  switch (cb.t) {
-    case 'done': {
-      const inst = await db.getInstance(env, cb.instance);
-      if (inst && (await db.closeIfOpen(env, cb.instance, 'done', 'כפתור'))) {
-        const fresh = await db.stats(env, chatId);
-        effects.push({ kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak });
+  // An undecodable payload still needs its keyboard settled — it isn't
+  // exempt from "always settle," it's just the one case with nothing to do.
+  if (!cb) {
+    console.warn(`undecodable callback_data: ${q.data}`);
+  } else {
+    switch (cb.t) {
+      case 'done': {
+        const inst = await db.getInstance(env, cb.instance);
+        if (inst && (await db.closeIfOpen(env, cb.instance, 'done', 'כפתור'))) {
+          const fresh = await db.stats(env, chatId);
+          effects.push({ kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak });
+        }
+        break;
       }
-      break;
-    }
-    case 'skip': {
-      const inst = await db.getInstance(env, cb.instance);
-      if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'כפתור'))) {
-        effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+      case 'skip': {
+        const inst = await db.getInstance(env, cb.instance);
+        if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'כפתור'))) {
+          effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+        }
+        break;
       }
-      break;
-    }
-    case 'snooze': {
-      const inst = await db.getInstance(env, cb.instance);
-      if (inst && inst.status === 'open') {
-        const minutes = clampSnooze(cb.minutes);
-        await db.snoozeInstance(env, cb.instance, minutes);
-        effects.push({
-          kind: 'instance_snoozed', id: inst.id, title: inst.title,
-          until: Date.now() + minutes * 60_000, minutes,
-        });
+      case 'snooze': {
+        const inst = await db.getInstance(env, cb.instance);
+        if (inst && inst.status === 'open') {
+          const minutes = clampSnooze(cb.minutes);
+          await db.snoozeInstance(env, cb.instance, minutes);
+          effects.push({
+            kind: 'instance_snoozed', id: inst.id, title: inst.title,
+            until: Date.now() + minutes * 60_000, minutes,
+          });
+        }
+        break;
       }
-      break;
-    }
-    case 'retime': {
-      const rem = await db.getReminder(env, cb.reminder);
-      if (rem) {
-        const p = wallParts(Date.now(), rem.tz);
-        let at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
-        if (at <= Date.now()) at += 86_400_000;
-        const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
-        await db.retimeReminder(env, rem.id, at, JSON.stringify(schedule));
-        effects.push({ kind: 'reminder_retimed', id: rem.id, title: rem.title, at });
-      }
-      break;
-    }
-    case 'plan': {
-      const rem = await db.getReminder(env, cb.reminder);
-      if (rem && rem.status === 'inbox') {
-        if (cb.slot === 'none') {
-          effects.push({ kind: 'listed_inbox', rows: await db.listInbox(env, chatId) });
-        } else {
-          const at = slotToInstant(cb.slot, rem.tz);
+      case 'retime': {
+        const rem = await db.getReminder(env, cb.reminder);
+        if (rem) {
+          const p = wallParts(Date.now(), rem.tz);
+          let at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
+          if (at <= Date.now()) at += 86_400_000;
           const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
-          if (await db.scheduleInboxItem(env, rem.id, at, JSON.stringify(schedule))) {
-            effects.push({ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at });
+          // Gated on status inside the query, same as the other branches — a
+          // retime tapped after the reminder was deleted must not un-cancel it.
+          if (await db.retimeReminder(env, rem.id, at, JSON.stringify(schedule))) {
+            effects.push({ kind: 'reminder_retimed', id: rem.id, title: rem.title, at });
           }
         }
+        break;
       }
-      break;
+      case 'plan': {
+        const rem = await db.getReminder(env, cb.reminder);
+        if (rem && rem.status === 'inbox') {
+          if (cb.slot === 'none') {
+            effects.push({ kind: 'listed_inbox', rows: await db.listInbox(env, chatId) });
+          } else {
+            const at = slotToInstant(cb.slot, rem.tz);
+            const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+            if (await db.scheduleInboxItem(env, rem.id, at, JSON.stringify(schedule))) {
+              effects.push({ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at });
+            }
+          }
+        }
+        break;
+      }
     }
   }
 
   // Always settle, even when the tap produced no effect (already closed,
-  // stale data): the user must see the tap registered either way.
+  // stale data, undecodable payload): the user must see the tap registered
+  // either way.
   await settleButtons(
     env, chatId, Number(q.message.message_id),
     String(q.message.text ?? ''),
     effects.length ? '✓' : '—',
   );
-  // priority 'skip' — the effect and its Hebrew wording are already known
-  // (voice.ts), so the whole point of a button is that it never touches the
-  // model. This is what keeps a tap free of both latency and quota.
-  if (effects.length) await sendOutcome(env, chatId, ctx, effects, undefined, 'skip');
+  if (effects.length) {
+    // Context is only built now, after the writes: building it up front (as a
+    // no-effect tap used to) wasted four D1 reads on the common case, and
+    // building it before the switch made ctx.stats/ctx.open stale by the time
+    // sendOutcome saw them — the instance this same tap just closed would
+    // still read as open. priority 'none' — the effect and its Hebrew wording
+    // are already known (voice.ts), so the whole point of a button is that it
+    // never touches the model. This is what keeps a tap free of both latency
+    // and quota.
+    const ctx = await buildContext(env, chatId);
+    await sendOutcome(env, chatId, ctx, effects, undefined, 'none');
+  }
 }
 
 /** Inbox quick-schedule slots, resolved in the reminder's own timezone. */
@@ -339,7 +351,7 @@ async function sendOutcome(
   ctx: Context,
   effects: Effect[],
   toneNote?: string,
-  priority: 'high' | 'low' | 'skip' = 'high',
+  priority: 'high' | 'low' | 'none' = 'high',
 ): Promise<boolean> {
   const facts = buildFacts(ctx, effects, ctx.settings.tz);
   const baseline = renderBaseline(effects, ctx.settings.tz);
@@ -384,12 +396,12 @@ async function sendOutcome(
  * Reminders always get the model. Unprompted check-ins are the first thing to
  * degrade when the daily budget is running down — they are the least important
  * message the user receives, and a blunt one is no worse than none. Button taps
- * ('skip') never get the model at all: the effect and its Hebrew are already
+ * ('none') never get the model at all: the effect and its Hebrew are already
  * fully known, so there is nothing for a rewrite to add — only latency and
  * quota to spend.
  */
-async function modelAllowed(env: Env, priority: 'high' | 'low' | 'skip'): Promise<boolean> {
-  if (priority === 'skip') return false;
+async function modelAllowed(env: Env, priority: 'high' | 'low' | 'none'): Promise<boolean> {
+  if (priority === 'none') return false;
   if (priority === 'high') return true;
   const limit = Number(env.GEMINI_SOFT_LIMIT ?? '200');
   if (!Number.isFinite(limit) || limit <= 0) return true;

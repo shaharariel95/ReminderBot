@@ -639,9 +639,19 @@ async function main() {
 
     await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
     const streakAfterFirst = (await db.stats(rig.env, CHAT)).currentStreak;
+    // Pins the absolute value: a no-op handleCallback would leave this at 0
+    // on both reads and the comparison below would pass vacuously.
+    eq('the first tap actually moved the streak', streakAfterFirst, 1);
+
+    const messagesBeforeSecondTap = rig.methods().filter((m) => m === 'sendMessage').length;
     await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
     eq('streak did not move on the second tap',
       (await db.stats(rig.env, CHAT)).currentStreak, streakAfterFirst);
+    // "No double count" and "no second reply" are separate guarantees — an
+    // ungated closeInstance would still show streak=1 (same row, same
+    // consecutive-done count) but would send a second confirmation message.
+    eq('the second tap sent no message',
+      rig.methods().filter((m) => m === 'sendMessage').length, messagesBeforeSecondTap);
     rig.restore();
   }
 
@@ -654,9 +664,38 @@ async function main() {
     await runCron(rig);
     const inst = rig.db.prepare("SELECT id FROM instances WHERE status='open'").get() as any;
 
+    const textsBefore = rig.texts().length;
     await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`, '99999'));
     const row = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
     eq('a stranger cannot close a task', row.status, 'open');
+    check('no spinner answer to a stranger', !rig.methods().includes('answerCallbackQuery'));
+    eq('no message sent to a stranger tap', rig.texts().length, textsBefore);
+
+    // The from.id check and the chat.id check are independent clauses —
+    // varying only fromId (above) leaves an unchecked chat.id clause green.
+    // A foreign chat.id with the owner's own from.id must be rejected too.
+    await runUpdate(rig, callbackUpdate('77777', `d:${inst.id}`, CHAT));
+    const row2 = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
+    eq('a foreign chat_id cannot close a task even with the owner\'s from_id', row2.status, 'open');
+    rig.restore();
+  }
+
+  section('buttons — retime does not resurrect a cancelled reminder');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const rid = seedReminder(rig, 'לשלם ארנונה', Date.now() + 3_600_000);
+    await db.deleteReminder(rig.env, CHAT, rid);
+    const before = rig.db.prepare('SELECT status, active, next_fire_at FROM reminders WHERE id = ?').get(rid) as any;
+    eq('the reminder is cancelled before the tap', before.status, 'cancelled');
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${rid}:09:00`));
+
+    const after = rig.db.prepare('SELECT status, active, next_fire_at FROM reminders WHERE id = ?').get(rid) as any;
+    eq('a stale retime button does not un-cancel the reminder', after.status, 'cancelled');
+    eq('and does not re-arm it', after.active, 0);
+    check('no confirmation is sent for a no-op retime', rig.texts().length === 0,
+      `sent=${JSON.stringify(rig.texts())}`);
     rig.restore();
   }
 
