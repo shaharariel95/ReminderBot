@@ -20,16 +20,18 @@ below.
 ## How it works
 
 ```
-Telegram ──webhook──> Worker /tg ──┬─ message ────> route()      (Gemini, temp 0, JSON)  → decides WHAT
-                                    │                applyIntent() (plain TS, effects.ts)  → touches the DB, returns Effect[]
-                                    └─ callback_query> (buttons.ts decode)                  → touches the DB, returns Effect[]
-                                                                                              — no model call at all
+Telegram ──webhook──> Worker /tg
+    ├─ message ────────> route() (Gemini, temp 0, JSON) → decides WHAT
+    │                    applyIntent() (plain TS, effects.ts) → touches the DB → Effect[]
+    └─ callback_query ─> buttons.ts decode() → touches the DB → Effect[]
+                          (no model call — the effect and its Hebrew are already known)
 
-Effect[] ──> buildFacts()   (facts.ts)     → allow-lists of times/titles the reply may mention
-        └─> renderBaseline() (voice.ts)    → correct, blunt Hebrew — always shippable on its own
-              └─> speak()    (Gemini, temp 1.05) → rewrites the baseline in character
-                    └─> validate()  (validate.ts) → throws the rewrite away if it strays from the facts
-                          └─> send: rewrite if it passed, baseline otherwise
+Effect[]
+  → buildFacts()      (facts.ts)     allow-lists of times/titles the reply may mention
+  → renderBaseline()  (voice.ts)     correct, blunt Hebrew — shippable on its own, no model needed
+  → speak()           (Gemini, temp 1.05) rewrites the baseline in character
+  → validate()        (validate.ts) throws the rewrite away if it strays from the facts
+  → send: the rewrite if it passed validation, the baseline otherwise
 
 cron * * * * * ──> tick() ──> fire due reminders
                           ├─> nag open instances, escalating each round
