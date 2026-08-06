@@ -73,6 +73,28 @@ section('duplicateOf.title — the trap: a nested title must still reach facts.t
   );
 }
 
+section('reminder_renamed — the same trap, twice: neither title sits under `title`');
+{
+  // A rename carries `from` and `to`, so the generic `'title' in e` sweep finds
+  // NEITHER. Without the explicit line in facts.ts, the one sentence the bot
+  // most needs to say here — "X is now Y" — cites two titles the validator has
+  // never heard of and gets thrown away, falling back to the baseline.
+  const renamed: Effect = { kind: 'reminder_renamed', id: 3, from: 'לקנות חלב', to: 'לקנות לחם' };
+  const f = buildFacts(ctx(), [renamed], TZ);
+  check('the OLD title is quotable', f.titles.includes('לקנות חלב'), `titles: ${JSON.stringify(f.titles)}`);
+  check('the NEW title is quotable', f.titles.includes('לקנות לחם'), `titles: ${JSON.stringify(f.titles)}`);
+}
+
+section('needs_reminder_choice — the candidates it lists must be quotable');
+{
+  const rows = [daily, { ...daily, id: 8, title: 'לרוץ' }];
+  const f = buildFacts(ctx(), [{ kind: 'needs_reminder_choice', action: 'reschedule', rows }], TZ);
+  check('the first candidate is allowed', f.titles.includes('להתקשר לרואה חשבון'));
+  check('the second candidate is allowed', f.titles.includes('לרוץ'));
+  eq('and asking a question is not a write',
+    buildFacts(ctx(), [{ kind: 'needs_reminder_choice', action: 'rename', rows: [] }], TZ).wrote, false);
+}
+
 section('needs_task_choice — instance titles come from ctx.open, already swept');
 {
   const openInstances = [

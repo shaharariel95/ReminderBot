@@ -34,6 +34,8 @@ function one(e: Effect, tz: string): string {
       return `"${e.title}" — נקבע ל-${when(e.at, tz)}.`;
     case 'reminder_retimed':
       return `שיניתי. "${e.title}" ב-${when(e.at, tz)}.`;
+    case 'reminder_renamed':
+      return `עכשיו זה "${e.to}" במקום "${e.from}". השעה לא זזה.`;
     case 'reminder_deleted':
       return `ביטלתי את "${e.title}".`;
     case 'instance_done':
@@ -44,6 +46,8 @@ function one(e: Effect, tz: string): string {
       return `דחיתי את "${e.title}" ב-${e.minutes} דקות — ${hhmm(e.until, tz)}.`;
     case 'needs_task_choice':
       return `איזו מהן? ${e.open.map((i) => `#${i.id} "${i.title}"`).join(' · ')}`;
+    case 'needs_reminder_choice':
+      return `איזו תזכורת? ${e.rows.map((r) => `#${r.id} "${r.title}"`).join(' · ')}`;
     case 'goal_created':
       return `רשמתי מטרה: "${e.title}".${e.why ? ` (${e.why})` : ''} אין לה שעה — אני אעלה אותה לבד.`;
     case 'goal_progress':

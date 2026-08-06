@@ -356,6 +356,18 @@ export async function retimeReminder(
   return (res.meta.changes ?? 0) > 0;
 }
 
+/** Change a reminder's wording, leaving its schedule alone. Cancelled reminders
+ *  are excluded for the same reason retimeReminder excludes them: renaming one
+ *  would resurrect it in every listing that reads by title. */
+export async function renameReminder(env: Env, id: number, title: string): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE reminders SET title = ? WHERE id = ? AND status != 'cancelled'",
+  )
+    .bind(title, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 export async function addMessage(
   env: Env,
   chatId: string,

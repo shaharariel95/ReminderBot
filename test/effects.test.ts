@@ -63,6 +63,23 @@ function seedInstance(rig: Rig, title: string, firedAt: number): number {
   return Number(i.lastInsertRowid);
 }
 
+/** A plain scheduled reminder with no instance attached. */
+function seedReminder(rig: Rig, title: string, fireAt: number, chatId = CHAT): number {
+  const r = rig.db
+    .prepare(
+      `INSERT INTO reminders (chat_id, title, schedule, tz, next_fire_at, status, active, created_at)
+       VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
+    )
+    .run(chatId, title, JSON.stringify({ type: 'once', at: '2099-01-01T07:00' }), TZ, fireAt, Date.now());
+  return Number(r.lastInsertRowid);
+}
+
+function rowById(rig: Rig, id: number): { title: string; next_fire_at: number | null; status: string } {
+  return rig.db
+    .prepare('SELECT title, next_fire_at, status FROM reminders WHERE id = ?')
+    .get(id) as any;
+}
+
 async function main() {
   // =========================================================================
   section('duplicate detection — exact title match within the 60s window');
@@ -394,6 +411,214 @@ async function main() {
     const result = await applyIntent(rig.env, CHAT, ctx, { action: 'complete' }, 'סיימתי');
     eq('the genuinely-empty case keeps its existing message', result[0].kind, 'nothing');
     check('with the right reason', result[0].kind === 'nothing' && result[0].why === 'no_open_task');
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('reschedule — moves an existing reminder instead of creating a second one');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לרוץ', base);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', target_id: id, schedule_type: 'once', once_at: '2026-08-07T21:00' },
+        'תעביר את הריצה ל-21:00',
+      );
+      eq('the effect reports a retime, not a creation', result[0].kind, 'reminder_retimed');
+      check('and names the reminder it moved',
+        result[0].kind === 'reminder_retimed' && result[0].id === id && result[0].title === 'לרוץ',
+        `got: ${JSON.stringify(result[0])}`);
+    });
+
+    eq('no second reminder was inserted', reminderRows(rig).length, 1);
+    eq('the row actually moved', rowById(rig, id).next_fire_at, wallToUtc(2026, 8, 7, 21, 0, TZ));
+    rig.restore();
+  }
+
+  section('reschedule — an inbox capture (no fire time) becomes scheduled');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+
+    await withNow(base - 3_600_000, async () => {
+      // Inbox items are excluded from listReminders, so this only works because
+      // resolveReminder reads by id rather than searching ctx.reminders.
+      const id = await db.addInboxItem(rig.env, CHAT, 'לקנות מתנה', TZ);
+      eq('the capture starts with no fire time', rowById(rig, id).next_fire_at, null);
+
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', target_id: id, schedule_type: 'once', in_minutes: 60 },
+        'תזכיר לי את זה עוד שעה',
+      );
+      eq('the capture is retimed', result[0].kind, 'reminder_retimed');
+      eq('and is now scheduled rather than sitting in the inbox', rowById(rig, id).status, 'scheduled');
+    });
+    rig.restore();
+  }
+
+  section('reschedule — two candidates and no target_id asks which, and moves nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const a = seedReminder(rig, 'לרוץ', base);
+    const b = seedReminder(rig, 'להתקשר לאמא', base + 7_200_000);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', schedule_type: 'once', once_at: '2026-08-07T21:00' },
+        'תעביר את זה ל-21:00',
+      );
+      eq('it asks which reminder', result[0].kind, 'needs_reminder_choice');
+      if (result[0].kind === 'needs_reminder_choice') {
+        eq('carrying the action it was going to perform', result[0].action, 'reschedule');
+        eq('and both candidates', result[0].rows.map((r) => r.id).sort(), [a, b].sort());
+      }
+    });
+
+    eq('neither reminder was moved', rowById(rig, a).next_fire_at, base);
+    eq('nor the other one', rowById(rig, b).next_fire_at, base + 7_200_000);
+    rig.restore();
+  }
+
+  section('reschedule — a lone reminder resolves without a target_id');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לרוץ', base);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', schedule_type: 'once', once_at: '2026-08-07T21:00' },
+        'תעביר את זה ל-21:00',
+      );
+      eq('"תעביר את זה" with one reminder on file is unambiguous', result[0].kind, 'reminder_retimed');
+    });
+    eq('and it moved', rowById(rig, id).next_fire_at, wallToUtc(2026, 8, 7, 21, 0, TZ));
+    rig.restore();
+  }
+
+  section('reschedule — no new time given writes nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לרוץ', base);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', target_id: id },
+        'תעביר את זה',
+      );
+      eq('it asks for a time', result[0].kind, 'nothing');
+      check('with the no_time reason', result[0].kind === 'nothing' && result[0].why === 'no_time');
+    });
+    eq('the reminder is untouched', rowById(rig, id).next_fire_at, base);
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('rename — changes the wording and leaves the schedule alone');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לקנות חלב', base);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'rename', target_id: id, title: 'לקנות לחם' },
+        'זה לא חלב זה לחם',
+      );
+      eq('a rename effect comes back', result[0].kind, 'reminder_renamed');
+      check('carrying BOTH the old and the new wording — the reply has to name each',
+        result[0].kind === 'reminder_renamed' && result[0].from === 'לקנות חלב' && result[0].to === 'לקנות לחם',
+        `got: ${JSON.stringify(result[0])}`);
+    });
+
+    eq('the row was actually renamed', rowById(rig, id).title, 'לקנות לחם');
+    eq('and its fire time did not move', rowById(rig, id).next_fire_at, base);
+    rig.restore();
+  }
+
+  section('rename — renaming to the identical title reports no change');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לקנות חלב', base);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'rename', target_id: id, title: 'לקנות חלב' },
+        'תקרא לזה לקנות חלב',
+      );
+      // reminder_renamed is in WROTE, so returning it here would licence
+      // "שיניתי" for a turn in which nothing changed.
+      eq('no write is claimed when the title is already that', result[0].kind, 'nothing');
+    });
+    rig.restore();
+  }
+
+  section('rename/reschedule — a target_id belonging to another chat is refused');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    // db.getReminder looks up by primary key alone — without the chat_id check
+    // in resolveReminder, a hallucinated target_id could reach across chats.
+    const foreign = seedReminder(rig, 'משהו של מישהו אחר', base, '99999');
+
+    await withNow(base - 3_600_000, async () => {
+      const renamed = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'rename', target_id: foreign, title: 'נחטף' },
+        'x',
+      );
+      eq('rename refuses', renamed[0].kind, 'nothing');
+
+      const moved = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'reschedule', target_id: foreign, schedule_type: 'once', once_at: '2026-08-07T21:00' },
+        'x',
+      );
+      eq('reschedule refuses too', moved[0].kind, 'nothing');
+    });
+
+    eq("the other chat's title is intact", rowById(rig, foreign).title, 'משהו של מישהו אחר');
+    eq('and its schedule is intact', rowById(rig, foreign).next_fire_at, base);
+    rig.restore();
+  }
+
+  section('rename — a cancelled reminder cannot be renamed back into the listings');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+    const id = seedReminder(rig, 'לרוץ', base);
+    await db.deleteReminder(rig.env, CHAT, id);
+
+    await withNow(base - 3_600_000, async () => {
+      const result = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'rename', target_id: id, title: 'לרוץ שוב' },
+        'x',
+      );
+      eq('a cancelled reminder is not a rename target', result[0].kind, 'nothing');
+    });
+    eq('its title is unchanged', rowById(rig, id).title, 'לרוץ');
     rig.restore();
   }
 

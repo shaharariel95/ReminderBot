@@ -100,6 +100,11 @@ export interface Intent {
     | 'snooze'
     | 'list'
     | 'delete'
+    /** Move an existing reminder to a different time. Distinct from `snooze`,
+     *  which pushes an instance that has ALREADY fired. */
+    | 'reschedule'
+    /** Fix the wording of an existing reminder without touching its schedule. */
+    | 'rename'
     | 'set_intensity'
     | 'chill'
     | 'create_goal'
@@ -156,6 +161,13 @@ export type Effect =
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
+  /**
+   * Both titles are carried because the reply has to name the one that is
+   * gone as well as the one that replaced it. Neither sits at the top level
+   * under the key `title`, so facts.ts must sweep them explicitly — same trap
+   * as `duplicateOf` above.
+   */
+  | { kind: 'reminder_renamed'; id: number; from: string; to: string }
   | { kind: 'reminder_deleted'; id: number; title: string }
   /**
    * An EXACT duplicate (same normalised title, within the dedup window) was
@@ -173,6 +185,11 @@ export type Effect =
    * empty case) would be false.
    */
   | { kind: 'needs_task_choice'; action: 'complete' | 'snooze'; open: Instance[] }
+  /**
+   * The reminder-side twin of the above: reschedule/rename knew what to do but
+   * not to which reminder, and there was more than one candidate.
+   */
+  | { kind: 'needs_reminder_choice'; action: 'reschedule' | 'rename'; rows: Reminder[] }
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
@@ -195,7 +212,7 @@ export type Effect =
 /** True when this effect wrote something the bot is allowed to confirm. */
 export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
-  'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
+  'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted',
 ]);

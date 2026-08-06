@@ -53,6 +53,18 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     // needs an explicit sweep — otherwise a truthful mention of the existing
     // similar reminder gets discarded by validate.ts as an invented task.
     if (e.kind === 'reminder_created' && e.duplicateOf) titles.add(e.duplicateOf.title);
+    // Same reason: a rename carries `from`/`to`, never `title`, so without this
+    // the model gets discarded for naming either side of a change it just made.
+    if (e.kind === 'reminder_renamed') {
+      titles.add(e.from);
+      titles.add(e.to);
+    }
+    if (e.kind === 'needs_reminder_choice') {
+      for (const r of e.rows) {
+        titles.add(r.title);
+        addTime(r.next_fire_at);
+      }
+    }
     if ('at' in e) addTime(e.at);
     if ('until' in e) addTime(e.until);
     if ('since' in e) addTime(e.since);
