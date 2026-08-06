@@ -262,10 +262,19 @@ async function main() {
       `row=${JSON.stringify(row)}`,
     );
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    // Scoped to the baseline half of the system prompt, not the whole thing —
+    // the persona half is static and now names "קבעתי" explicitly (rule 2 of
+    // "אמת לפני אופי"), so an unscoped .system.includes('קבעתי') would fail on
+    // that static text regardless of what this turn's baseline actually says.
+    // A missing marker (baselineSection undefined) must fail loudly, not pass
+    // through an `?? ''` that vacuously satisfies the negative half.
+    const baselineSection = speakCall?.system.split('## מה שקרה עכשיו')[1];
     check(
       'the situation says it was captured, not scheduled',
-      !!speakCall && speakCall.system.includes('תפסתי') && !speakCall.system.includes('קבעתי'),
-      `speak system prompt tail: ${speakCall?.system.slice(-400)}`,
+      baselineSection !== undefined &&
+        baselineSection.includes('תפסתי') &&
+        !baselineSection.includes('קבעתי'),
+      `baseline section: ${baselineSection?.slice(0, 400) ?? '(no "## מה שקרה עכשיו" marker found)'}`,
     );
     rig.restore();
   }
