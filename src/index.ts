@@ -199,6 +199,7 @@ async function sendOutcome(
   ctx: Context,
   effects: Effect[],
   toneNote?: string,
+  priority: 'high' | 'low' = 'high',
 ): Promise<boolean> {
   const facts = buildFacts(ctx, effects, ctx.settings.tz);
   const baseline = renderBaseline(effects, ctx.settings.tz);
@@ -211,20 +212,22 @@ async function sendOutcome(
   }
 
   let text = baseline;
-  try {
-    const history = await db.recentMessages(env, chatId, 8);
-    const dressed = await speak(env, facts, history, baseline, toneNote);
-    // Same-turn baseline, never a cached or recomputed one — it's what the
-    // validator's allow-lists are built from and what speak() just saw.
-    const verdict = validate(dressed, facts, baseline);
-    if (verdict.ok) {
-      text = dressed;
-    } else {
-      console.warn(`validator rejected the rewrite: ${verdict.reason}`);
-      await db.recordRejection(env);
+  if (await modelAllowed(env, priority)) {
+    try {
+      const history = await db.recentMessages(env, chatId, 8);
+      const dressed = await speak(env, facts, history, baseline, toneNote);
+      // Same-turn baseline, never a cached or recomputed one — it's what the
+      // validator's allow-lists are built from and what speak() just saw.
+      const verdict = validate(dressed, facts, baseline);
+      if (verdict.ok) {
+        text = dressed;
+      } else {
+        console.warn(`validator rejected the rewrite: ${verdict.reason}`);
+        await db.recordRejection(env);
+      }
+    } catch (err) {
+      console.error('speak', err);
     }
-  } catch (err) {
-    console.error('speak', err);
   }
 
   try {
@@ -234,6 +237,26 @@ async function sendOutcome(
   } catch (err) {
     console.error('send', err);
     return false;
+  }
+}
+
+/**
+ * Reminders always get the model. Unprompted check-ins are the first thing to
+ * degrade when the daily budget is running down — they are the least important
+ * message the user receives, and a blunt one is no worse than none.
+ */
+async function modelAllowed(env: Env, priority: 'high' | 'low'): Promise<boolean> {
+  if (priority === 'high') return true;
+  const limit = Number(env.GEMINI_SOFT_LIMIT ?? '200');
+  if (!Number.isFinite(limit) || limit <= 0) return true;
+  // Fail open: if the usage query throws, a check-in still gets the model
+  // rather than being silently suppressed forever by a broken read.
+  try {
+    const used = await db.usageToday(env, env.GEMINI_MODEL ?? 'gemini-3.5-flash');
+    return used < limit;
+  } catch (err) {
+    console.error('modelAllowed: usageToday failed, allowing', err);
+    return true;
   }
 }
 
@@ -388,7 +411,7 @@ async function maybeCheckIn(
     [{ kind: 'checkin_goal', id: goal.id, title: goal.title, why: goal.why,
        lastProgress: goal.last_progress, lastProgressAt: goal.last_progress_at,
        lastCheckinAt: goal.last_checkin_at }],
-    CHECKIN_GOAL);
+    CHECKIN_GOAL, 'low');
 
   await db.markGoalCheckin(env, goal.id);
   await reschedule(Date.now());

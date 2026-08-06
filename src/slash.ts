@@ -44,12 +44,19 @@ export async function handleSlash(
       ].join('\n');
 
     case '/diag': {
-      const model = env.GEMINI_MODEL ?? 'gemini-2.5-flash-lite';
+      const model = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
       const lines = [
         `model: ${model}`,
         `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} תווים)` : 'חסר!'}`,
         `OWNER_CHAT_ID: ${env.OWNER_CHAT_ID || 'חסר!'}`,
       ];
+      const primary = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
+      const fallback = env.GEMINI_MODEL_FALLBACK ?? 'gemini-3.5-flash-lite';
+      lines.push(
+        `שימוש היום — ${primary}: ${await db.usageToday(env, primary)}, ` +
+          `${fallback}: ${await db.usageToday(env, fallback)}`,
+        `תשובות שנפסלו היום: ${await db.usageToday(env, '_rejections')}`,
+      );
       try {
         const t0 = Date.now();
         const res = await fetch(

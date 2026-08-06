@@ -13,12 +13,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // ------------------------------------------------------------------ D1 shim
 
 /**
- * `state.dbFailIn` counts down D1 `.run()` calls (INSERT/UPDATE/DELETE — never
- * `.first`/`.all`, which are reads). When the countdown hits exactly 1, that
- * write throws instead of executing, simulating a transient D1 failure in the
- * middle of a multi-write turn. 0 (the default) never fails.
+ * `state.dbFailOn`, when set, matches against the SQL text of every D1
+ * `.run()` call (INSERT/UPDATE/DELETE — never `.first`/`.all`, which are
+ * reads). The first write whose SQL matches throws instead of executing,
+ * simulating a transient D1 failure in the middle of a multi-write turn, and
+ * the trap disarms itself so later writes (e.g. a fallback capture reusing
+ * the same table) are unaffected. `null` (the default) never fails.
+ *
+ * Targeting by SQL text rather than by call position means a test stays valid
+ * when an unrelated write is added anywhere else in the turn — a positional
+ * countdown breaks the moment call order shifts for any reason.
  */
-function shim(sqlite: DatabaseSync, state: { dbFailIn: number }) {
+function shim(sqlite: DatabaseSync, state: { dbFailOn: RegExp | null }) {
   const norm = (v: unknown) =>
     typeof v === 'boolean' ? (v ? 1 : 0) : typeof v === 'bigint' ? Number(v) : v;
   const out = (row: any) => {
@@ -45,9 +51,9 @@ function shim(sqlite: DatabaseSync, state: { dbFailIn: number }) {
           return { results: (stmt.all(...(bound as any)) as any[]).map(out) as T[] };
         },
         async run() {
-          if (state.dbFailIn > 0) {
-            state.dbFailIn--;
-            if (state.dbFailIn === 0) throw new Error('test rig: simulated D1 write failure');
+          if (state.dbFailOn && state.dbFailOn.test(sql)) {
+            state.dbFailOn = null; // fires once, then disarms
+            throw new Error('test rig: simulated D1 write failure');
           }
           const r = stmt.run(...(bound as any));
           return { meta: { last_row_id: Number(r.lastInsertRowid), changes: Number(r.changes) } };
@@ -87,14 +93,20 @@ export interface Rig {
   speakQueue: (string | Error)[];
   /** Set true to make every Gemini call fail, simulating a rate limit. */
   geminiDown: boolean;
+  /** Models that should return 429, by exact id. */
+  downModels: Set<string>;
+  /** Every model id that was called, in order. */
+  modelsCalled: string[];
   /** Set true to make every Telegram sendMessage fail, simulating an outage. */
   telegramDown: boolean;
   /**
-   * Counts down D1 `.run()` (write) calls; the one where this hits exactly 1
-   * throws instead of executing. 0 (default) never fails. Lets a test force a
-   * write mid-turn to fail without touching Gemini or Telegram.
+   * When set, the next D1 `.run()` (write) whose SQL matches this pattern
+   * throws instead of executing, then disarms itself. `null` (default) never
+   * fails. Lets a test force one specific write mid-turn to fail without
+   * touching Gemini or Telegram, and without depending on the position of
+   * unrelated writes elsewhere in the same turn.
    */
-  dbFailIn: number;
+  dbFailOn: RegExp | null;
   restore(): void;
 }
 
@@ -103,7 +115,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
   const sqlite = new DatabaseSync(':memory:');
   const schema = readFileSync(join(HERE, '..', 'schema.sql'), 'utf8');
   sqlite.exec(schema);
-  const dbState = { dbFailIn: 0 };
+  const dbState: { dbFailOn: RegExp | null } = { dbFailOn: null };
 
   const rig: Rig = {
     env: {
@@ -122,11 +134,13 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     routerQueue: [],
     speakQueue: [],
     geminiDown: false,
-    get dbFailIn() {
-      return dbState.dbFailIn;
+    downModels: new Set<string>(),
+    modelsCalled: [],
+    get dbFailOn() {
+      return dbState.dbFailOn;
     },
-    set dbFailIn(v: number) {
-      dbState.dbFailIn = v;
+    set dbFailOn(v: RegExp | null) {
+      dbState.dbFailOn = v;
     },
     telegramDown: false,
     restore: () => {
@@ -153,7 +167,9 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     }
 
     if (url.includes('generativelanguage.googleapis.com')) {
-      if (rig.geminiDown) {
+      const model = /models\/([^:]+):/.exec(url)?.[1] ?? '';
+      rig.modelsCalled.push(model);
+      if (rig.geminiDown || rig.downModels.has(model)) {
         return new Response('{"error":{"code":429,"message":"rate limit"}}', { status: 429 });
       }
       // The router is the call that pins a responseSchema; everything else is speak().

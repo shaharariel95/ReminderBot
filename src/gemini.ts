@@ -1,3 +1,4 @@
+import * as db from './db';
 import type { Env } from './types';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -106,50 +107,76 @@ async function callOnce(env: Env, model: string, opts: GenerateOpts): Promise<Re
  */
 const RETRYABLE = new Set(['RECITATION', 'MAX_TOKENS', 'OTHER']);
 
+/**
+ * 429 (quota), 503 (overloaded), and 404 (unknown/retired model — e.g. a typo
+ * in wrangler.toml) all mean "this model is unavailable right now" — drop a
+ * tier at once rather than burning retries on it. 400 is deliberately not
+ * here: callOnce already retries a 400 without thinkingConfig, and treating
+ * it as a tier-down would mask genuine bad requests.
+ */
+const TIER_DOWN = new Set([429, 503, 404]);
+
+function tiers(env: Env): string[] {
+  const primary = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
+  const fallback = env.GEMINI_MODEL_FALLBACK ?? 'gemini-3.5-flash-lite';
+  return primary === fallback ? [primary] : [primary, fallback];
+}
+
 export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
-  const model = env.GEMINI_MODEL ?? 'gemini-3.5-flash-lite';
   let lastDetail = '';
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const tuned: GenerateOpts = { ...opts };
-    if (attempt > 0) {
-      // Nudge off the deterministic path, and widen the ceiling.
-      const base = opts.temperature ?? (opts.jsonSchema ? 0.2 : 1.0);
-      tuned.temperature = Math.min(1.4, base + 0.35 * attempt);
-      tuned.maxOutputTokens = (opts.maxOutputTokens ?? 2000) * (1 + attempt);
+  for (const model of tiers(env)) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const tuned: GenerateOpts = { ...opts };
+      if (attempt > 0) {
+        // Nudge off the deterministic path, and widen the ceiling.
+        const base = opts.temperature ?? (opts.jsonSchema ? 0.2 : 1.0);
+        tuned.temperature = Math.min(1.4, base + 0.35 * attempt);
+        tuned.maxOutputTokens = (opts.maxOutputTokens ?? 2000) * (1 + attempt);
+      }
+
+      const res = await callOnce(env, model, tuned);
+
+      if (TIER_DOWN.has(res.status)) {
+        lastDetail = `${model} returned ${res.status}`;
+        console.warn(`gemini: ${lastDetail}, dropping a tier`);
+        break; // next model, not next attempt — retrying a quota error is pointless
+      }
+      if (!res.ok) {
+        throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 500)}`);
+      }
+
+      const json = (await res.json()) as any;
+      const parts = json?.candidates?.[0]?.content?.parts ?? [];
+      const text = parts
+        .map((p: any) => p.text ?? '')
+        .join('')
+        .trim();
+      if (text) {
+        // Best-effort: a usage-tracking failure must never break a working reply.
+        await db.recordUsage(env, model).catch(() => {});
+        return text;
+      }
+
+      const reason = json?.candidates?.[0]?.finishReason ?? 'unknown';
+      const u = json?.usageMetadata ?? {};
+      lastDetail =
+        `${model} finishReason=${reason} prompt=${u.promptTokenCount ?? '?'} ` +
+        `thoughts=${u.thoughtsTokenCount ?? 0} out=${u.candidatesTokenCount ?? 0} ` +
+        `attempt=${attempt + 1}`;
+
+      if (!RETRYABLE.has(reason)) {
+        const hint =
+          reason === 'SAFETY' || reason === 'PROHIBITED_CONTENT'
+            ? ' — blocked by safety filters'
+            : '';
+        throw new Error(`gemini returned no text (${lastDetail})${hint}`);
+      }
+      console.warn(`gemini: empty response, retrying — ${lastDetail}`);
     }
-
-    const res = await callOnce(env, model, tuned);
-    if (!res.ok) {
-      throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 500)}`);
-    }
-
-    const json = (await res.json()) as any;
-    const parts = json?.candidates?.[0]?.content?.parts ?? [];
-    const text = parts
-      .map((p: any) => p.text ?? '')
-      .join('')
-      .trim();
-    if (text) return text;
-
-    const reason = json?.candidates?.[0]?.finishReason ?? 'unknown';
-    const u = json?.usageMetadata ?? {};
-    lastDetail =
-      `finishReason=${reason} prompt=${u.promptTokenCount ?? '?'} ` +
-      `thoughts=${u.thoughtsTokenCount ?? 0} out=${u.candidatesTokenCount ?? 0} ` +
-      `attempt=${attempt + 1}`;
-
-    if (!RETRYABLE.has(reason)) {
-      const hint =
-        reason === 'SAFETY' || reason === 'PROHIBITED_CONTENT'
-          ? ' — blocked by safety filters'
-          : '';
-      throw new Error(`gemini returned no text (${lastDetail})${hint}`);
-    }
-    console.warn(`gemini: empty response, retrying — ${lastDetail}`);
   }
 
-  throw new Error(`gemini returned no text after 3 attempts (${lastDetail})`);
+  throw new Error(`gemini exhausted every tier (${lastDetail})`);
 }
 
 export async function generateJson<T>(env: Env, opts: GenerateOpts): Promise<T> {

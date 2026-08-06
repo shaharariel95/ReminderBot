@@ -388,6 +388,46 @@ async function main() {
     rig.restore();
   }
 
+  section('model cascade — a rate-limited primary falls to the fallback');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.env.GEMINI_MODEL = 'gemini-3.5-flash';
+    rig.env.GEMINI_MODEL_FALLBACK = 'gemini-3.5-flash-lite';
+    rig.downModels.add('gemini-3.5-flash');
+    rig.speakQueue.push('נו? לאכול.');
+
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    check('the primary was tried', rig.modelsCalled.includes('gemini-3.5-flash'));
+    check('the fallback was used', rig.modelsCalled.includes('gemini-3.5-flash-lite'),
+      `models called: ${rig.modelsCalled.join(', ')}`);
+    check('the user still got a message', rig.texts().length > 0);
+    eq('usage was recorded for the model that worked',
+      await db.usageToday(rig.env, 'gemini-3.5-flash-lite'), 1);
+    rig.restore();
+  }
+
+  section('quota priority — check-ins yield the budget before reminders do');
+  {
+    const rig = createRig();
+    seedSettings(rig, { checkins_enabled: 1, next_checkin_at: Date.now() - 1000,
+                        quiet_start_hour: 0, quiet_end_hour: 0 });
+    rig.db.prepare(
+      'INSERT INTO goals (chat_id, title, status, checkin_count, created_at) VALUES (?, ?, ?, 0, ?)',
+    ).run(CHAT, 'לפתוח תיק מסחר', 'active', Date.now());
+    rig.env.GEMINI_SOFT_LIMIT = '2';
+    for (let i = 0; i < 3; i++) await db.recordUsage(rig.env, rig.env.GEMINI_MODEL);
+
+    const before = rig.geminiCalls.length;
+    await runCron(rig);
+    eq('a low-priority check-in skips the model past the soft limit',
+      rig.geminiCalls.length, before);
+    check('but the user still hears about the goal',
+      rig.texts().join('').includes('תיק מסחר'), `sent: ${rig.texts().join(' | ')}`);
+    rig.restore();
+  }
+
   section('usage — per-model call counting');
   {
     const rig = createRig();
@@ -510,10 +550,13 @@ async function main() {
         { action: 'create_reminder', title: 'לתלות', schedule_type: 'once', in_minutes: 60 },
       ],
     });
-    // D1 writes in order: 1 = addMessage (user turn), 2 = closeInstance (the
-    // complete intent), 3 = addReminder (the create intent) — force exactly
-    // that third one to fail, so the first intent's write has already landed.
-    rig.dbFailIn = 3;
+    // Target the second intent's write specifically — addReminder's INSERT,
+    // identifiable by the literal 'scheduled' status it writes (addInboxItem,
+    // the fallback this failure triggers, writes 'inbox' instead, to the same
+    // table). Matching by SQL text rather than call position means this test
+    // stays correct however many unrelated writes (e.g. usage tracking) land
+    // earlier in the same turn.
+    rig.dbFailOn = /INSERT INTO reminders[\s\S]*'scheduled'/;
 
     // No relative/absolute time phrase quickparse recognises, so this falls
     // through to the (mocked) router above instead of being fast-pathed.

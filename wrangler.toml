@@ -15,10 +15,16 @@ database_id = "94c7c9d0-b8b5-4305-8c0f-7588c1c6a140"
 
 [vars]
 DEFAULT_TZ = "Asia/Jerusalem"
-# Your key also has gemini-3.5-flash-lite (newer, same tier) and
-# gemini-flash-lite-latest (auto-updating, but the persona may drift when
-# Google rolls it forward). 2.5 is pinned and shuts down 16 Oct 2026.
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+# Primary is the stronger free-tier model; the fallback catches its tighter
+# rate limit — it's the model this project ran successfully before this
+# change, so it's a known-good floor. Verify the current free-tier
+# requests/day for both before changing these — the published numbers move.
+GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
+# Past this many primary-model calls in a UTC day, low-priority messages
+# (unprompted check-ins) stop calling the model and ship voice.ts output
+# directly. Reminders and nags are never throttled.
+GEMINI_SOFT_LIMIT = "200"
 
 # Secrets — set with `npx wrangler secret put <NAME>`. Never put them in this file.
 #   TELEGRAM_BOT_TOKEN

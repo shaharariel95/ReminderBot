@@ -5,6 +5,8 @@ export interface Env {
   GEMINI_API_KEY: string;
   OWNER_CHAT_ID: string;
   GEMINI_MODEL?: string;
+  GEMINI_MODEL_FALLBACK?: string;
+  GEMINI_SOFT_LIMIT?: string;
   DEFAULT_TZ?: string;
 }
 
