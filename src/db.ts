@@ -186,6 +186,29 @@ export async function addReminder(
   return Number(res.meta.last_row_id);
 }
 
+/**
+ * Scheduled reminders for this chat whose next_fire_at lands within
+ * `windowMs` of `nearAt` — the candidate pool for duplicate detection.
+ * A window rather than exact equality: two quick "עוד 5 דקות" double-sends
+ * land seconds apart, not at the identical millisecond.
+ */
+export async function findNearbyReminders(
+  env: Env,
+  chatId: string,
+  nearAt: number,
+  windowMs: number,
+): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminders
+      WHERE chat_id = ? AND status = 'scheduled' AND next_fire_at IS NOT NULL
+        AND next_fire_at BETWEEN ? AND ?
+      ORDER BY id`,
+  )
+    .bind(chatId, nearAt - windowMs, nearAt + windowMs)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
 export async function listReminders(env: Env, chatId: string): Promise<Reminder[]> {
   const res = await env.DB.prepare(
     "SELECT * FROM reminders WHERE chat_id = ? AND status = 'scheduled' ORDER BY next_fire_at IS NULL, next_fire_at",

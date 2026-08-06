@@ -25,9 +25,11 @@ function one(e: Effect, tz: string): string {
     case 'reminder_created':
       return `קבעתי: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
         e.requiresProof ? ' דורש תמונה.' : ''
-      }`;
+      }${e.duplicateOf ? ` שים לב, גם יש לך "${e.duplicateOf.title}" בערך באותו זמן.` : ''}`;
     case 'reminder_captured':
       return `תפסתי: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
+    case 'reminder_duplicate':
+      return `כבר יש לך את זה — #${e.id} "${e.title}" ב-${hhmm(e.at, tz)}.`;
     case 'reminder_scheduled':
       return `"${e.title}" — נקבע ל-${when(e.at, tz)}.`;
     case 'reminder_retimed':

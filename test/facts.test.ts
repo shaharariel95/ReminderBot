@@ -53,6 +53,26 @@ section('titles the model is allowed to quote');
   check('titles inside a listing are allowed', f.titles.includes('לקנות חלב'));
 }
 
+section('duplicateOf.title — the trap: a nested title must still reach facts.titles');
+{
+  // facts.ts's generic sweep checks `'title' in e` at the TOP LEVEL of the
+  // effect. duplicateOf is a nested object, so without an explicit sweep line
+  // its title never reaches facts.titles — and a truthful model rewrite that
+  // names the existing reminder would be discarded by validate.ts as an
+  // invented task.
+  const created: Effect = {
+    kind: 'reminder_created', id: 2, title: 'לקחת בגד ים', at: AT,
+    schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+  };
+  const f = buildFacts(ctx(), [created], TZ);
+  check(
+    'duplicateOf.title is swept into facts.titles even though it is nested',
+    f.titles.includes('לקחת בגד ים לחוף'),
+    `titles: ${JSON.stringify(f.titles)}`,
+  );
+}
+
 section('wrote — the gate on confirmation language');
 eq('a create counts as a write',
   buildFacts(ctx(), [{ kind: 'reminder_captured', id: 1, title: 'x' }], TZ).wrote, true);
@@ -61,5 +81,10 @@ eq('a listing does not',
 eq('a nothing-effect does not',
   buildFacts(ctx(), [{ kind: 'nothing', why: 'chat', userText: 'x' }], TZ).wrote, false);
 eq('a bare chat turn does not', buildFacts(ctx(), [], TZ).wrote, false);
+eq(
+  'reminder_duplicate does not count as a write — nothing was inserted',
+  buildFacts(ctx(), [{ kind: 'reminder_duplicate', id: 1, title: 'x', at: AT }], TZ).wrote,
+  false,
+);
 
 done();

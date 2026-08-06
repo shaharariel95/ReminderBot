@@ -142,11 +142,27 @@ export interface Intent {
  * "I saved it" impossible to say when nothing was saved.
  */
 export type Effect =
-  | { kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule; requiresProof: boolean; altHour?: number }
+  | {
+      kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule;
+      requiresProof: boolean; altHour?: number;
+      /**
+       * Set when a NEAR (not exact) duplicate already exists nearby in time.
+       * The reminder was still created — this only warns. Note: this title is
+       * nested, not top-level, so facts.ts must sweep it explicitly (see the
+       * comment there) or a truthful mention of it gets discarded by validate.ts.
+       */
+      duplicateOf?: { id: number; title: string };
+    }
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
   | { kind: 'reminder_deleted'; id: number; title: string }
+  /**
+   * An EXACT duplicate (same normalised title, within the dedup window) was
+   * found — nothing was inserted. Carries the EXISTING row's identity so the
+   * reply can point at it truthfully instead of claiming a new one was made.
+   */
+  | { kind: 'reminder_duplicate'; id: number; title: string; at: number }
   | { kind: 'instance_done'; id: number; title: string; streak: number }
   | { kind: 'instance_skipped'; id: number; title: string }
   | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }

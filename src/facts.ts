@@ -48,6 +48,11 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   // Plus whatever this turn produced.
   for (const e of effects) {
     if ('title' in e && typeof e.title === 'string') titles.add(e.title);
+    // The generic `'title' in e` check above only reaches the TOP LEVEL of an
+    // effect. duplicateOf is nested inside reminder_created, so its title
+    // needs an explicit sweep — otherwise a truthful mention of the existing
+    // similar reminder gets discarded by validate.ts as an invented task.
+    if (e.kind === 'reminder_created' && e.duplicateOf) titles.add(e.duplicateOf.title);
     if ('at' in e) addTime(e.at);
     if ('until' in e) addTime(e.until);
     if ('since' in e) addTime(e.since);

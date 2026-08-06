@@ -182,6 +182,7 @@ section(
     { kind: 'nothing', why: 'unknown_reminder', userText: 'תבטל' },
     { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
     { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
+    { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
   ];
 
   for (const e of samples) {
@@ -273,6 +274,33 @@ section(
     check('a shortened title plus its recurring time round-trip through facts.ts\'s sweep, not the baseline fold',
       v.ok, v.reason);
   }
+}
+
+section('duplicateOf.title — the nested-title trap, proven with a genuine round-trip');
+{
+  // facts.ts sweeps top-level `title` fields automatically, but duplicateOf is
+  // nested inside reminder_created. Without an explicit sweep line, a
+  // truthful model paraphrase naming the existing similar reminder would be
+  // rejected as an invented task. A lean, hand-written baseline (rather than
+  // the real baseline) proves the allow-list comes from facts.ts's sweep, not
+  // from validate()'s baseline fold.
+  const created: Effect = {
+    kind: 'reminder_created', id: 2, title: 'לקחת בגד ים',
+    at: new Date('2026-08-05T04:05:00Z').getTime(),   // 07:05 Asia/Jerusalem
+    schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+  };
+  const f = facts([created]);
+  check('facts.titles sweeps duplicateOf.title even though it is nested',
+    f.titles.includes('לקחת בגד ים לחוף'), `titles: ${JSON.stringify(f.titles)}`);
+
+  const leanBaseline = 'קבעתי ל-07:05.'; // never quotes either title
+  const paraphrase = 'קבעתי, אבל שים לב שכבר יש לך "לקחת בגד ים לחוף" בסביבה.';
+  const v = validate(paraphrase, f, leanBaseline);
+  check(
+    'a paraphrase naming the existing similar reminder round-trips through facts.titles, not the baseline fold',
+    v.ok, v.reason,
+  );
 }
 
 section('ambiguous-hour altHour never reaches validate() — it is a button label only');

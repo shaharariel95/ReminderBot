@@ -45,6 +45,7 @@ const samples: Effect[] = [
   { kind: 'nothing', why: 'unknown_reminder', userText: 'תבטל' },
   { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
   { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
+  { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
 ];
 
 for (const e of samples) {
@@ -73,6 +74,32 @@ check('goal_closed renders "done" and "dropped" differently', (() => {
   const droppedText = render({ ...samples[10], status: 'dropped' } as Effect);
   return doneText !== droppedText && doneText.includes('סגור') && droppedText.includes('הורדתי');
 })());
+check('reminder_duplicate names the existing reminder and its time',
+  render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT }).includes('לקחת בגד ים') &&
+  render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT }).includes('07:05'));
+
+section('WROTE invariant — the new non-writing effect uses no CLAIM verb');
+{
+  // reminder_duplicate is deliberately absent from WROTE (types.ts): nothing
+  // was inserted. If voice.ts's wording for it contained a CLAIM verb
+  // (validate.ts's lexicon), the deterministic baseline would reject itself
+  // the instant facts.wrote is false.
+  const claims = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה/;
+  check('reminder_duplicate\'s baseline contains no CLAIM verb',
+    !claims.test(render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT })));
+}
+
+section('reminder_created with duplicateOf warns about the near-duplicate');
+check('the created reminder still states its own title and time, plus the existing similar one', (() => {
+  const t = render({
+    kind: 'reminder_created', id: 2, title: 'לקחת בגד ים', at: AT,
+    schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+  });
+  return t.includes('לקחת בגד ים') && t.includes('לקחת בגד ים לחוף');
+})());
+check('without duplicateOf, nothing is said about a similar reminder',
+  !render(samples[0]).includes('גם יש לך') && samples[0].kind === 'reminder_created' && samples[0].duplicateOf === undefined);
 
 section('multiple effects join into one message');
 check('two creates produce both titles', (() => {

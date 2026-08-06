@@ -3,6 +3,54 @@ import type { Context } from './brain';
 import type { Effect, Env, Intent, Schedule } from './types';
 import { computeNext, wallString } from './time';
 
+/** Reminders whose next_fire_at lands within this many ms count as "the same time". */
+const DUPLICATE_WINDOW_MS = 60_000;
+
+/**
+ * Comparison key for two titles: trim, collapse internal whitespace, strip
+ * punctuation (replaced with a space so hyphenated words don't fuse), and
+ * lowercase (a no-op on Hebrew, which has no case).
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .replace(/[\p{P}\p{S}]/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+/** "תזכורת" is the fallback title quickparse/the router use when no subject
+ *  was extracted — two unrelated captures can both carry it, so it must not
+ *  be allowed to near-match anything on title similarity alone. */
+const GENERIC_TITLE = normalizeTitle('תזכורת');
+function isGenericTitle(normalized: string): boolean {
+  return normalized === GENERIC_TITLE;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const x of a) if (b.has(x)) intersection++;
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * "Similar enough to warn about, not identical." Token (Jaccard) overlap
+ * catches reordered/partially-shared phrasing; the containment check catches
+ * one title being a strict elaboration of the other ("לקחת בגד ים" vs "לקחת
+ * בגד ים לים"). The length-3 floor on the shorter side keeps a one-word
+ * generic-ish title (but not GENERIC_TITLE itself, handled separately) from
+ * matching everything that happens to contain it.
+ */
+function isNearMatch(normA: string, normB: string): boolean {
+  const tokensA = new Set(normA.split(' ').filter(Boolean));
+  const tokensB = new Set(normB.split(' ').filter(Boolean));
+  if (jaccard(tokensA, tokensB) >= 0.5) return true;
+  const [shorter, longer] = normA.length <= normB.length ? [normA, normB] : [normB, normA];
+  return shorter.length >= 3 && longer.includes(shorter);
+}
+
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
   // Relative times are resolved here rather than by the model. Asking an LLM to
   // add 5 minutes to a wall clock and cross midnight/month/year boundaries
@@ -54,6 +102,34 @@ export async function applyIntent(
       }
       if (next === null) return [{ kind: 'nothing', why: 'past_time', userText }];
 
+      // Deterministic duplicate check — no model call. Only reminders close
+      // in time to this one are even candidates, so this never touches
+      // anything the user scheduled for a genuinely different moment.
+      const normTitle = normalizeTitle(title);
+      const generic = isGenericTitle(normTitle);
+      const nearby = await db.findNearbyReminders(env, chatId, next, DUPLICATE_WINDOW_MS);
+
+      const exact = nearby.find((r) => normalizeTitle(r.title) === normTitle);
+      if (exact) {
+        // Identical title at (near enough) the same time really is a double-
+        // send — even for the generic fallback title, where two unrelated
+        // untitled captures landing in the same minute is implausible enough
+        // that treating it as a duplicate is still the right call. Nothing is
+        // inserted; the capture already exists.
+        return [
+          { kind: 'reminder_duplicate', id: exact.id, title: exact.title, at: exact.next_fire_at ?? next },
+        ];
+      }
+
+      // Near-matching is skipped for generic titles on either side — "תזכורת"
+      // says nothing about the subject, so similarity here is noise, not signal.
+      const near = generic
+        ? undefined
+        : nearby.find((r) => {
+            const normExisting = normalizeTitle(r.title);
+            return !isGenericTitle(normExisting) && isNearMatch(normTitle, normExisting);
+          });
+
       const id = await db.addReminder(env, {
         chat_id: chatId,
         title,
@@ -71,6 +147,7 @@ export async function applyIntent(
           kind: 'reminder_created', id, title, at: next, schedule,
           requiresProof: !!intent.requires_proof,
           ...(intent.ambiguous_hour === undefined ? {} : { altHour: intent.ambiguous_hour }),
+          ...(near ? { duplicateOf: { id: near.id, title: near.title } } : {}),
         },
       ];
     }
