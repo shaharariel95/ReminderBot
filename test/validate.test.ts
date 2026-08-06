@@ -132,7 +132,14 @@ check('the recurring time is in facts.times directly, independent of validate()\
   return f.times.includes('16:45');
 })());
 
-section('the baseline is always true by construction — every effect survives its own validator');
+section(
+  'every effect round-trips when text === baseline — this proves the CLOCK/QUOTED fold ' +
+    'mechanism and the CLAIM-verb gate (which reads facts.wrote, not the fold) do not throw ' +
+    'or reject on any known kind. It does NOT prove facts.ts actually swept each kind\'s time ' +
+    'or title: with text === baseline, every CLOCK/QUOTED match in `text` was, by definition, ' +
+    'just added to the allow-lists one line earlier from `baseline` — so this loop would pass ' +
+    'identically even if facts.ts swept nothing at all. See "genuine round-trips" below for that.',
+);
 {
   const AT = wallToUtc(2026, 8, 5, 7, 5, TZ);
 
@@ -181,7 +188,89 @@ section('the baseline is always true by construction — every effect survives i
     const text = renderBaseline([e], TZ);
     const f = facts([e]);
     const v = validate(text, f, text);
-    check(`${e.kind}${'why' in e ? `/${e.why}` : ''} baseline round-trips through its own validator`,
+    check(`${e.kind}${'why' in e ? `/${e.why}` : ''} does not throw and passes the fold + CLAIM gate (text === baseline)`,
+      v.ok, v.reason);
+  }
+}
+
+section(
+  'genuine round-trips — paraphrase !== baseline, proving facts.ts actually swept the value',
+);
+{
+  // The loop above cannot tell a real facts.ts sweep from a no-op: with
+  // text === baseline, every CLOCK/QUOTED match `text` contains was just
+  // folded in from `baseline` one line earlier in validate(), so the check
+  // passes whether or not facts.ts ever populated facts.times/titles.
+  //
+  // A real model rewrite also can't distinguish the two on its own: voice.ts
+  // renders every fact it uses directly into the baseline text (same digits,
+  // same quoted title), so a paraphrase that repeats those exact digits/quotes
+  // would ALSO pass via the baseline fold alone, sweep or no sweep — the fold
+  // is not a bug, but it means it silently absorbs coverage of anything the
+  // *current* wording of voice.ts happens to restate.
+  //
+  // To actually exercise facts.ts's own sweep, each case below pairs the real
+  // Facts (from buildFacts on the real effect — proven directly against
+  // facts.times/titles first) with a hand-written "lean" baseline that omits
+  // the value under test, the way a future terser voice.ts wording plausibly
+  // could. That forces validate()'s allow-list for the paraphrase to come
+  // from facts.ts's sweep and nothing else. Each case is verified (see the
+  // fix report) to fail once the corresponding facts.ts sweep line is deleted
+  // — that's what makes this a real test instead of the same tautology in a
+  // new costume.
+
+  {
+    // instance_snoozed: facts.ts's generic `if ('until' in e) addTime(e.until)`
+    // sweep (shared with `muted`) is what must supply the snooze target time.
+    const until = wallToUtc(2026, 8, 5, 10, 15, TZ);
+    const snoozed: Effect = { kind: 'instance_snoozed', id: 9, title: 'לקפל כביסה', until, minutes: 15 };
+    const f = facts([snoozed]);
+    check('facts.times sweeps the snooze target time from `until`',
+      f.times.includes('10:15'), `times: ${JSON.stringify(f.times)}`);
+
+    const leanBaseline = 'דחיתי את זה בעוד קצת.'; // no digits, no quotes — nothing to fold
+    const paraphrase = 'טוב, זזתי את זה ל-10:15, תירגע.';
+    const v = validate(paraphrase, f, leanBaseline);
+    check('a paraphrase naming the snooze time round-trips through facts.times, not the baseline fold',
+      v.ok, v.reason);
+  }
+  {
+    // nagged: facts.ts's generic `if ('title' in e) titles.add(e.title)` sweep
+    // is what must license the model shortening the title — the bidirectional
+    // title match (documented in validate.ts) exists exactly for this.
+    const since = wallToUtc(2026, 8, 5, 9, 0, TZ);
+    const nag: Effect = {
+      kind: 'nagged', instanceId: 9, title: 'להתקשר לרואה חשבון בעניין הדוח', since, round: 2,
+    };
+    const f = facts([nag]);
+    check('facts.titles sweeps the nagged instance\'s title',
+      f.titles.includes('להתקשר לרואה חשבון בעניין הדוח'), `titles: ${JSON.stringify(f.titles)}`);
+
+    const leanBaseline = 'נו? עדיין פתוח.'; // never quotes the title
+    const paraphrase = 'עדיין מחכה לך "להתקשר לרואה חשבון" — תזיז את זה כבר.';
+    const v = validate(paraphrase, f, leanBaseline);
+    check('a shortened, truthful title paraphrase round-trips through facts.titles, not the baseline fold',
+      v.ok, v.reason);
+  }
+  {
+    // listed_reminders: the kind-specific block in facts.ts sweeps both
+    // r.title and the recurring schedule.time straight off each row.
+    const row: Reminder = {
+      id: 31, chat_id: '1', title: 'להוציא זבל בחצר האחורית', notes: null,
+      schedule: '{"type":"daily","time":"09:30"}', tz: TZ, requires_proof: 0,
+      proof_type: 'any', nag_interval_min: 20, max_nags: 3,
+      next_fire_at: null, status: 'scheduled', active: 1, created_at: 0,
+    };
+    const f = facts([{ kind: 'listed_reminders', rows: [row], openCount: 0 }]);
+    check('facts.times sweeps the row\'s recurring schedule time',
+      f.times.includes('09:30'), `times: ${JSON.stringify(f.times)}`);
+    check('facts.titles sweeps the row\'s title',
+      f.titles.includes('להוציא זבל בחצר האחורית'), `titles: ${JSON.stringify(f.titles)}`);
+
+    const leanBaseline = 'יש לך תזכורת אחת פעילה.'; // no title, no schedule time
+    const paraphrase = 'יש לך "להוציא זבל" כל יום ב-09:30.';
+    const v = validate(paraphrase, f, leanBaseline);
+    check('a shortened title plus its recurring time round-trip through facts.ts\'s sweep, not the baseline fold',
       v.ok, v.reason);
   }
 }
