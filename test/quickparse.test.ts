@@ -92,7 +92,10 @@ console.log('\n--- ambiguous hours commit and offer a correction ---');
 {
   const got = quickParse('תזכיר לי ב-11 להתקשר', NOW, TZ);
   assertTrue('a bare hour still creates a reminder', got !== null && got.action === 'create_reminder');
-  assertTrue('it takes the literal reading', got?.once_at?.endsWith('11:00') === true);
+  // Pin the full string, not just the trailing "11:00" — a rollover regression
+  // that landed this on the wrong day (e.g. today instead of tomorrow) would
+  // still satisfy an endsWith check.
+  assertTrue('it takes the literal reading', got?.once_at === '2026-08-03T11:00');
   assertTrue('and flags the alternative', got?.ambiguous_hour === 23);
 }
 {
