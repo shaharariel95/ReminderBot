@@ -24,7 +24,7 @@ for (const c of samples) {
 }
 
 section('malformed input is rejected, never guessed');
-for (const bad of ['', 'x', 'd:', 'd:abc', 'nope:1', 's:1', 's:1:x', 'r:1:99:00', 'p:1:zzz']) {
+for (const bad of ['', 'x', 'd:', 'd:abc', 'nope:1', 's:1', 's:1:x', 'r:1:99:00', 'r:1:10:99', 'd:1:2', 'p:1:zzz']) {
   eq(`"${bad}" decodes to null`, decode(bad), null);
 }
 
