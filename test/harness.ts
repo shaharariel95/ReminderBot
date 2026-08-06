@@ -70,6 +70,7 @@ export interface Sent {
   method: string;
   chat_id?: string;
   text?: string;
+  markup?: unknown;
 }
 
 export interface GeminiCall {
@@ -165,7 +166,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       if (rig.telegramDown && method === 'sendMessage') {
         return json({ ok: false, description: 'test rig: telegram down' });
       }
-      rig.sent.push({ method, chat_id: body.chat_id, text: body.text });
+      rig.sent.push({ method, chat_id: body.chat_id, text: body.text, markup: body.reply_markup });
       return json({ ok: true, result: {} });
     }
 

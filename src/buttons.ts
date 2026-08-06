@@ -73,3 +73,51 @@ export function keyboard(rows: Button[][]): unknown {
     ),
   };
 }
+
+/** A positive integer id, or null. Guards against a typo'd property name
+ *  silently reading as NaN — NaN would still encode to callback_data (as the
+ *  literal string "NaN"), producing a button that decode() rejects on tap,
+ *  which is worse than no button at all. */
+function positiveId(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Which buttons belong on a message. Driven by effects rather than by the
+ * caller so that every path producing the same effect gets the same affordance.
+ */
+export function buttonsFor(
+  effects: { kind: string; [k: string]: unknown }[],
+): Button[][] | undefined {
+  const fired = effects.find((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
+  if (fired) {
+    const instance = positiveId(fired.instanceId);
+    if (instance === null) return undefined;
+    return [
+      [
+        { text: 'עשיתי', data: { t: 'done', instance } },
+        { text: 'עוד 10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
+        { text: 'לא היום', data: { t: 'skip', instance } },
+      ],
+    ];
+  }
+
+  const captured = effects.find((e) => e.kind === 'reminder_captured');
+  if (captured) {
+    const reminder = positiveId(captured.id);
+    if (reminder === null) return undefined;
+    return [
+      [
+        { text: 'עוד שעה', data: { t: 'plan', reminder, slot: 'hr' } },
+        { text: 'היום בערב', data: { t: 'plan', reminder, slot: 'eve' } },
+      ],
+      [
+        { text: 'מחר בבוקר', data: { t: 'plan', reminder, slot: 'tm' } },
+        { text: 'בלי זמן', data: { t: 'plan', reminder, slot: 'none' } },
+      ],
+    ];
+  }
+
+  return undefined;
+}

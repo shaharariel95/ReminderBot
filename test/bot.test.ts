@@ -718,6 +718,32 @@ async function main() {
     rig.restore();
   }
 
+  section('buttons are attached where they are useful');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    rig.speakQueue.push('נו? לרוץ.');
+    await runCron(rig);
+    const sent = rig.sent.filter((s) => s.method === 'sendMessage');
+    check('a fired reminder carries done/snooze/skip',
+      sent.some((s) => JSON.stringify(s.markup ?? '').includes('"d:')),
+      `markup: ${JSON.stringify(sent.map((s) => s.markup))}`);
+    rig.restore();
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'create_reminder', title: 'לקנות חלב' }] });
+    rig.speakQueue.push('תפסתי.');
+    await runWebhook(rig, 'תזכיר לי לקנות חלב');
+    const sent = rig.sent.filter((s) => s.method === 'sendMessage');
+    check('an inbox capture offers scheduling slots',
+      sent.some((s) => JSON.stringify(s.markup ?? '').includes('"p:')),
+      `markup: ${JSON.stringify(sent.map((s) => s.markup))}`);
+    rig.restore();
+  }
+
   done();
 }
 

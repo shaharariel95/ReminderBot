@@ -15,7 +15,7 @@ import {
   sendMessage,
   settleButtons,
 } from './telegram';
-import { decode } from './buttons';
+import { buttonsFor, decode, keyboard } from './buttons';
 import {
   afterQuietHours,
   computeNext,
@@ -394,7 +394,8 @@ async function sendOutcome(
   }
 
   try {
-    const sent = await sendBurst(env, chatId, text);
+    const rows = buttonsFor(effects as unknown as { kind: string }[]);
+    const sent = await sendBurst(env, chatId, text, rows ? keyboard(rows) : undefined);
     if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
     return sent.length > 0;
   } catch (err) {
