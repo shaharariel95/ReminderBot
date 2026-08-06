@@ -209,6 +209,15 @@ export type Effect =
   /** Nothing was written. `why` selects the deterministic wording. */
   | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };
 
+/**
+ * The title a reminder gets when he asked to be reminded but never said of
+ * what ("תזכיר לי עוד 5 דקות"). Capture must never block on a question, so the
+ * reminder is created anyway — but every layer that WORDS one of these needs to
+ * recognise it, because "נו? תזכורת." at 07:00 tells him nothing at all.
+ * Defined here so quickparse, effects and voice cannot drift apart on it.
+ */
+export const UNTITLED_TITLE = 'תזכורת';
+
 /** True when this effect wrote something the bot is allowed to confirm. */
 export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',

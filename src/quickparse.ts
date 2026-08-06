@@ -1,4 +1,5 @@
 import type { Intent } from './types';
+import { UNTITLED_TITLE } from './types';
 import { wallParts, wallString, wallToUtc } from './time';
 
 /**
@@ -442,7 +443,7 @@ export function quickParse(text: string, nowMs: number, tz: string): Intent | nu
     if (TIME_RESIDUE.test(title)) return null;
     return {
       action: 'create_reminder',
-      title: (title || 'תזכורת').slice(0, 120),
+      title: (title || UNTITLED_TITLE).slice(0, 120),
       schedule_type: 'once',
       in_minutes: rel.minutes,
     };

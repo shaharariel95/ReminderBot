@@ -1,4 +1,5 @@
 import type { Effect } from './types';
+import { UNTITLED_TITLE } from './types';
 import { describeSchedule, formatLocal } from './time';
 
 /**
@@ -20,14 +21,33 @@ function when(ts: number, tz: string): string {
   return formatLocal(ts, tz);
 }
 
+/**
+ * A reminder he asked for without ever saying what it was about.
+ *
+ * Quoting the fallback title back at him is the worst of both worlds — "נו?
+ * תזכורת." reads like a bug and carries none of the information he actually
+ * needed. Every wording below therefore says plainly that the subject is
+ * missing, and the moment he answers, the router turns that answer into a
+ * `rename` (see brain.ts) and the reminder gets its real title.
+ */
+function untitled(title: string): boolean {
+  return title.trim() === UNTITLED_TITLE;
+}
+
 function one(e: Effect, tz: string): string {
   switch (e.kind) {
     case 'reminder_created':
+      if (untitled(e.title)) {
+        // Ask now, while he still remembers. In an hour he won't.
+        return `קבעתי לך משהו ל-${when(e.at, tz)}. על מה להזכיר?`;
+      }
       return `קבעתי: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
         e.requiresProof ? ' דורש תמונה.' : ''
       }${e.duplicateOf ? ` שים לב, גם יש לך "${e.duplicateOf.title}" בערך באותו זמן.` : ''}`;
     case 'reminder_captured':
-      return `תפסתי: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
+      return untitled(e.title)
+        ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
+        : `תפסתי: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
     case 'reminder_duplicate':
       return `כבר יש לך את זה — #${e.id} "${e.title}" ב-${hhmm(e.at, tz)}.`;
     case 'reminder_scheduled':
@@ -91,9 +111,16 @@ function one(e: Effect, tz: string): string {
         ? ['בלי שעה:', ...e.rows.map((r) => `#${r.id} ${r.title}`)].join('\n')
         : 'האינבוקס ריק.';
     case 'reminder_fired':
+      if (untitled(e.title)) {
+        return `נו? ביקשת שאזכיר לך משהו עכשיו. לא אמרת מה.${
+          e.requiresProof ? '\n\nותשלח תמונה.' : ''
+        }`;
+      }
       return `נו? ${e.title}.${e.requiresProof ? '\n\nותשלח תמונה.' : ''}`;
     case 'nagged':
-      return `נו? "${e.title}" עדיין פתוחה מ-${hhmm(e.since, tz)}.`;
+      return untitled(e.title)
+        ? `נו? אותו דבר בלי שם מ-${hhmm(e.since, tz)} עדיין פתוח.`
+        : `נו? "${e.title}" עדיין פתוחה מ-${hhmm(e.since, tz)}.`;
     case 'gave_up':
       return `סגרתי את "${e.title}" ככישלון להיום.`;
     case 'checkin_goal':

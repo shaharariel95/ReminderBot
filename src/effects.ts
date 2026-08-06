@@ -1,6 +1,7 @@
 import * as db from './db';
 import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, Schedule } from './types';
+import { UNTITLED_TITLE } from './types';
 import { computeNext, wallString } from './time';
 
 /** Reminders whose next_fire_at lands within this many ms count as "the same time". */
@@ -19,10 +20,10 @@ function normalizeTitle(title: string): string {
     .toLowerCase();
 }
 
-/** "תזכורת" is the fallback title quickparse/the router use when no subject
- *  was extracted — two unrelated captures can both carry it, so it must not
- *  be allowed to near-match anything on title similarity alone. */
-const GENERIC_TITLE = normalizeTitle('תזכורת');
+/** The fallback title quickparse/the router use when no subject was extracted —
+ *  two unrelated captures can both carry it, so it must not be allowed to
+ *  near-match anything on title similarity alone. */
+const GENERIC_TITLE = normalizeTitle(UNTITLED_TITLE);
 function isGenericTitle(normalized: string): boolean {
   return normalized === GENERIC_TITLE;
 }
@@ -111,7 +112,7 @@ export async function applyIntent(
 
   switch (intent.action) {
     case 'create_reminder': {
-      const title = intent.title?.trim() || 'תזכורת';
+      const title = intent.title?.trim() || UNTITLED_TITLE;
       const schedule = scheduleFromIntent(intent, tz);
 
       // No time is not a failure any more. Capture first, schedule later.

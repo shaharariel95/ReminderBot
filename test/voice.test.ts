@@ -4,6 +4,7 @@ import { CLAIM } from '../src/validate';
 import { wallToUtc } from '../src/time';
 import { check, done, section } from './harness';
 import type { Effect } from '../src/types';
+import { UNTITLED_TITLE } from '../src/types';
 
 const TZ = 'Asia/Jerusalem';
 const AT = wallToUtc(2026, 8, 5, 7, 5, TZ);
@@ -96,6 +97,45 @@ check('needs_task_choice lists every open instance, not just one',
     });
     return t.includes('לקחת בגד ים') && t.includes('לזרוק זבל');
   })());
+
+section('a reminder with no subject never has the fallback title read back at it');
+{
+  const firedUntitled = render({ kind: 'reminder_fired', id: 1, title: UNTITLED_TITLE, instanceId: 9, requiresProof: false });
+  const firedNamed = render({ kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false });
+  // "נו? תזכורת." is the exact string this section exists to prevent: it reads
+  // like a bug and carries none of the information he needed at 07:00.
+  check('the fired wording does not just quote the fallback title',
+    firedUntitled !== 'נו? תזכורת.' && firedUntitled !== firedNamed,
+    `got: ${firedUntitled}`);
+  check('it says out loud that the subject is missing',
+    firedUntitled.includes('לא אמרת מה'), `got: ${firedUntitled}`);
+  check('and a normally-titled reminder is untouched by any of this',
+    firedNamed === 'נו? לרוץ.', `got: ${firedNamed}`);
+
+  const createdUntitled = render({
+    kind: 'reminder_created', id: 1, title: UNTITLED_TITLE, at: AT,
+    schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
+  });
+  check('the confirmation asks what it is about, while he still remembers',
+    createdUntitled.includes('על מה'), `got: ${createdUntitled}`);
+  check('and still states the exact time it was set for',
+    createdUntitled.includes('07:05'), `got: ${createdUntitled}`);
+
+  const naggedUntitled = render({ kind: 'nagged', instanceId: 9, title: UNTITLED_TITLE, since: AT, round: 1 });
+  check('the nag does not quote the fallback title either',
+    !naggedUntitled.includes(`"${UNTITLED_TITLE}"`), `got: ${naggedUntitled}`);
+  check('but still states when it has been open since',
+    naggedUntitled.includes('07:05'), `got: ${naggedUntitled}`);
+
+  const capturedUntitled = render({ kind: 'reminder_captured', id: 2, title: UNTITLED_TITLE });
+  check('a subject-less, time-less capture asks for both',
+    !capturedUntitled.includes(`"${UNTITLED_TITLE}"`), `got: ${capturedUntitled}`);
+
+  // reminder_fired and nagged are NOT in WROTE, so the reworded versions are
+  // subject to the same lexicon rule as everything else on that side.
+  check('the untitled fired wording contains no CLAIM verb', !CLAIM.test(firedUntitled));
+  check('the untitled nag wording contains no CLAIM verb', !CLAIM.test(naggedUntitled));
+}
 
 section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
 {
