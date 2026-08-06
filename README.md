@@ -78,12 +78,14 @@ Optionally `/setprivacy` → Disable, and `/setcommands`:
 help - כל הפקודות
 list - התזכורות שלך
 goals - המטרות שלך
+inbox - דברים שתפסתי בלי שעה
 stats - המספרים שלך
 chill - שתיקה זמנית
 checkins - כמה אני יוזם שיחות
 intensity - כמה עוקצני אני
 quiet - שעות שקט
 offlimits - נושאים אסורים
+diag - בדיקת תקינות
 ```
 
 ### 2. Get a Gemini API key
