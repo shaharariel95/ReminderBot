@@ -68,15 +68,74 @@ check('תזכיר לי ב-8 בערב לצאת', { at: '2026-08-03T20:00' });
 check('תזכיר לי ב-12 בלילה', { at: '2026-08-03T00:00' });
 check('תזכיר לי ב-14:30 פגישה', { at: '2026-08-03T14:30' });
 
+console.log('\n--- recurring rules are parsed here, not routed ---');
+// `\b` is ASCII-only in JS, so the guard that was supposed to catch these
+// never fired on Hebrew, and every one became a single reminder that rang
+// once and stopped. They are now parsed properly rather than merely detected:
+// a standing reminder is the phrase a daily driver types most, and routing it
+// meant losing the habit outright whenever the model was rate-limited.
+function recurring(
+  input: string,
+  expected: { type?: string; time?: string; days?: number[]; every?: number; title?: string } | null,
+) {
+  const got = quickParse(input, NOW, TZ);
+  let ok: boolean;
+  if (expected === null) {
+    ok = got === null;
+  } else {
+    ok =
+      got !== null &&
+      (expected.type === undefined || got.schedule_type === expected.type) &&
+      (expected.time === undefined || got.time === expected.time) &&
+      (expected.every === undefined || got.interval_minutes === expected.every) &&
+      (expected.title === undefined || got.title === expected.title) &&
+      (expected.days === undefined ||
+        JSON.stringify(got.days) === JSON.stringify(expected.days));
+  }
+  if (!ok) failures++;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${input}`);
+  if (!ok) {
+    console.log(`        expected ${JSON.stringify(expected)}`);
+    console.log(`        actual   ${JSON.stringify(got)}`);
+  }
+}
+
+recurring('תזכיר לי כל יום ב-7 לרוץ', { type: 'daily', time: '07:00', title: 'לרוץ' });
+recurring('תזכיר לי כל בוקר ב-7:05 לקום', { type: 'daily', time: '07:05', title: 'לקום' });
+recurring('תזכיר לי בכל יום ב-8:00 לשתות', { type: 'daily', time: '08:00', title: 'לשתות' });
+recurring('תזכיר לי מדי בוקר ב-6:30 להתאמן', { type: 'daily', time: '06:30', title: 'להתאמן' });
+// "כל ערב ב-9" is 21:00 — the span word settles the hour exactly as a
+// trailing "בערב" would, so there is nothing left to ask about.
+recurring('תזכיר לי כל ערב ב-9 לקחת כדור', { type: 'daily', time: '21:00' });
+recurring('תזכיר לי כל לילה ב-11 לכבות', { type: 'daily', time: '23:00' });
+recurring('תזכיר לי כל שני ב-20:00 להוציא זבל', { type: 'weekly', time: '20:00', days: [1], title: 'להוציא זבל' });
+recurring('תזכיר לי כל שני ורביעי ב-18:00 לשלם', { type: 'weekly', time: '18:00', days: [1, 3] });
+recurring('תזכיר לי כל יום שלישי ב-9 להתקשר', { type: 'weekly', time: '09:00', days: [2] });
+recurring('תזכיר לי כל שבת ב-10 לנוח', { type: 'weekly', time: '10:00', days: [6] });
+recurring('תזכיר לי כל שעה לשתות מים', { type: 'interval', every: 60, title: 'לשתות מים' });
+recurring('תזכיר לי כל 20 דקות למתוח', { type: 'interval', every: 20, title: 'למתוח' });
+recurring('תזכיר לי כל שעתיים לזוז', { type: 'interval', every: 120 });
+recurring('remind me every day at 7 to run', { type: 'daily', time: '07:00' });
+{
+  const got = quickParse('תזכיר לי כל יום ב-7 לרוץ', NOW, TZ);
+  assertTrue('a bare recurring hour still offers the other reading', got?.ambiguous_hour === 19);
+  const settled = quickParse('תזכיר לי כל ערב ב-9 לקחת כדור', NOW, TZ);
+  assertTrue('a settled one does not', settled?.ambiguous_hour === undefined);
+}
+
+console.log('\n--- recurring shapes this file cannot express still route ---');
+// An interval in DAYS is not an interval in minutes: 2880 minutes drifts by an
+// hour at every DST change, and a reminder that slides is worse than one the
+// router handles properly.
+recurring('תזכיר לי כל יומיים לשלם', null);
+recurring('תזכיר לי פעמיים ביום לקחת כדור', null);
+// A repeat rule with no clock in it is not a schedule.
+recurring('תזכיר לי כל יום לרוץ', null);
+recurring('תזכורת יומית ב-8', null);
+// Still a statement of fact, recurring or not.
+recurring('כל יום ב-7 אני רץ', null);
+
 console.log('\n--- must fall through to the router ---');
-// Recurring. `\b` is ASCII-only in JS, so the old guard never fired on Hebrew
-// and every one of these became a single reminder that rang once and stopped.
-check('תזכיר לי כל יום ב-7 לרוץ', null);
-check('תזכיר לי כל שני ב-20:00', null);
-check('תזכיר לי כל בוקר ב-7:05 לקום', null);
-check('תזכיר לי כל ערב ב-21:00 לקחת כדור', null);
-check('תזכיר לי בכל יום ב-8:00 לשתות', null);
-check('תזכיר לי מדי בוקר ב-6:30 להתאמן', null);
 // Two times in one message: one Intent cannot carry both, so the router gets it.
 check('תזכיר לי עוד 5 דקות לאכול ובעוד שעה להתקשר לאמא', null);
 check('תזכיר לי ב-7:00 לקום וב-9:00 להתקשר', null);

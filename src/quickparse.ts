@@ -92,7 +92,7 @@ const PERIOD = String.raw`בלילה|בבוקר|בערב|בצהריי?ם|אחה"
  * being read as a recurring reminder and thrown to the router every time.
  */
 const RECURRING =
-  /כל\s+(יום|יומיים|שבוע|שבועיים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)|מדי\s+(יום|בוקר|ערב|שבוע)|פעמיים\s+ביום|\bevery\s+(day|week|morning|evening|night|hour|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:יומי|שבועי)[תם]?(?![א-ת])/i;
+  /כל\s+(יום|יומיים|שבוע|שבועיים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)|כל\s+\d{1,3}\s*(דקות|דקה|שעות|שעה)|מדי\s+(יום|בוקר|ערב|שבוע)|פעמיים\s+ביום|\bevery\s+(\d{1,3}\s+)?(day|week|morning|evening|night|hour|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:יומי|שבועי)[תם]?(?![א-ת])/i;
 
 /** Did he actually ask to be reminded, or is he just telling me something? */
 const ASKED = /תזכיר|תזכורת|תנדנד|תעיר\s+לי|remind|ping/i;
@@ -343,6 +343,131 @@ function matchDay(t: string): DayHint | null {
   return null;
 }
 
+// ------------------------------------------------------- recurring
+
+/** "כל", "בכל", "מדי", "every" — the lead-in that makes a request repeat. */
+const EVERY = String.raw`(?:^|\s)[ובלמ]?(?:כל|מדי|every)\s+`;
+
+/**
+ * Hours and minutes only. An `interval` schedule counts minutes forward from
+ * the last firing, so days and weeks are deliberately excluded: "כל יומיים"
+ * expressed as 2880 minutes drifts by an hour at every DST change, and a
+ * reminder that slides is worse than one the router handles properly.
+ */
+const UNIT_HM = String.raw`(?:שעתיים|שעות|שעה|hours?|hrs?|h|דקות|דקה|דק['׳]?|minutes?|mins?|m)`;
+
+const RE_INTERVAL = new RegExp(
+  EVERY + String.raw`(?:(?<n>\d{1,3}|\S+)\s+)?(?<unit>${UNIT_HM})` + END,
+  'i',
+);
+const RE_WEEKLY = new RegExp(
+  EVERY +
+    String.raw`(?:יום\s+)?(?<days>(?:${WEEKDAY_ALT})(?:\s*(?:ו|,|\s+and\s+)\s*(?:${WEEKDAY_ALT}))*)` +
+    String.raw`(?![א-ת])`,
+  'i',
+);
+const RE_DAILY = new RegExp(
+  EVERY + String.raw`(?<span>יום|בוקר|ערב|לילה|צהריי?ם|day|morning|evening|night)(?![א-ת])`,
+  'i',
+);
+
+/** "07:05" from a matched clock — the shape daily/weekly schedules store. */
+function hhmm(clock: Clock): string {
+  return `${String(clock.hour).padStart(2, '0')}:${String(clock.minute).padStart(2, '0')}`;
+}
+
+/**
+ * "כל יום ב-7 לרוץ" and friends.
+ *
+ * Worth parsing here rather than routing, because a standing reminder is the
+ * phrase a daily driver types most, and until now every one of them cost a
+ * round trip AND was lost outright whenever the model was rate-limited — which
+ * for a recurring reminder means the habit silently never starts.
+ *
+ * Anything not covered below still falls through to the router: "פעמיים ביום",
+ * "כל יומיים" (an interval in DAYS is not the same as one in minutes, and
+ * pretending otherwise drifts by an hour every DST change), and any recurring
+ * phrase with no clock time in it at all.
+ */
+function parseRecurring(t: string): Intent | null {
+  const finish = (
+    intent: Omit<Intent, 'title'>,
+    consumed: string[],
+  ): Intent | null => {
+    const title = cleanTitle(t, consumed);
+    if (TIME_RESIDUE.test(title) || RECURRING.test(title)) return null;
+    return { ...intent, title: (title || UNTITLED_TITLE).slice(0, 120) } as Intent;
+  };
+
+  // "כל 20 דקות" / "כל שעה" — no clock time involved, it just repeats.
+  const interval = RE_INTERVAL.exec(t);
+  if (interval) {
+    const g = interval.groups!;
+    const dual = /שעתיים/i.test(g.unit);
+    const per = dual ? 120 : unitMinutes(g.unit);
+    const n = dual || g.n === undefined ? 1 : toNumber(g.n);
+    if (n !== null && per > 0) {
+      const minutes = n * per;
+      if (minutes >= 1 && minutes <= 60 * 24) {
+        return finish(
+          { action: 'create_reminder', schedule_type: 'interval', interval_minutes: minutes },
+          [interval[0]],
+        );
+      }
+    }
+    return null;
+  }
+
+  // Everything below needs a time of day: "כל יום" alone is not a schedule.
+  const clock = matchClock(t);
+  if (!clock) return null;
+  const ambiguous = !clock.settled && clock.hour <= 12;
+
+  const weekly = RE_WEEKLY.exec(t);
+  if (weekly) {
+    const names = weekly.groups!.days.match(new RegExp(WEEKDAY_ALT, 'g')) ?? [];
+    const days = [...new Set(names.map((d) => WEEKDAYS[d]))].filter((d) => d !== undefined);
+    if (!days.length) return null;
+    return finish(
+      {
+        action: 'create_reminder', schedule_type: 'weekly', time: hhmm(clock), days,
+        ...(ambiguous ? { ambiguous_hour: (clock.hour + 12) % 24 } : {}),
+      },
+      [weekly[0], clock.matched],
+    );
+  }
+
+  const daily = RE_DAILY.exec(t);
+  if (daily) {
+    // "כל ערב ב-8" is 20:00 — the span word settles the hour just as a
+    // trailing "בערב" would, so there is nothing left to offer a button for.
+    const span = daily.groups!.span;
+    let hour = clock.hour;
+    let settled = clock.settled;
+    if (!settled) {
+      if (/ערב|evening/i.test(span)) {
+        hour = hour < 12 ? hour + 12 : hour;
+        settled = true;
+      } else if (/לילה|night/i.test(span)) {
+        hour = hour === 12 ? 0 : hour < 12 ? hour + 12 : hour;
+        settled = true;
+      } else if (/בוקר|morning/i.test(span)) {
+        settled = true; // as written
+      }
+    }
+    const time = hhmm({ ...clock, hour });
+    return finish(
+      {
+        action: 'create_reminder', schedule_type: 'daily', time,
+        ...(!settled && hour <= 12 ? { ambiguous_hour: (hour + 12) % 24 } : {}),
+      },
+      [daily[0], clock.matched],
+    );
+  }
+
+  return null;
+}
+
 // ------------------------------------------------------- assembly
 
 /** Strip the phrases we consumed plus the "remind me" framing; what's left is the task. */
@@ -428,12 +553,16 @@ function resolve(
 export function quickParse(text: string, nowMs: number, tz: string): Intent | null {
   const t = text.trim();
   if (!t) return null;
-  if (RECURRING.test(t)) return null;
   // Rule 1: this path only ever answers an explicit request.
   if (!ASKED.test(t)) return null;
   // Two times in one message means two reminders. One Intent cannot hold both,
   // and guessing which one he meant is how a reminder goes missing.
   if (countTimeAnchors(t) > 1) return null;
+
+  // Recurring requests have their own grammar entirely — a repeat rule, not an
+  // instant. parseRecurring returns null for the shapes it cannot express, and
+  // those still reach the router.
+  if (RECURRING.test(t)) return parseRecurring(t);
 
   const rel = parseRelative(t);
   // Two months out is past the point where "in N weeks" is the phrasing anyone

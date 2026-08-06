@@ -177,18 +177,29 @@ async function main() {
   // ------------------------------------------------------------------------
   section('BUG 3b — Hebrew recurring reminders must not become one-shot');
   {
+    // These used to be fast-pathed into ONE-OFF reminders that rang once and
+    // switched themselves off, because the guard meant to catch them used a
+    // `\b` that can never match before a Hebrew letter. They are now parsed as
+    // recurring rules outright rather than merely detected and routed — but the
+    // property under test is unchanged and is the one that matters: a request
+    // that repeats must never be stored as a schedule that does not.
     const now = Date.now();
-    for (const phrase of [
-      'תזכיר לי כל בוקר ב-7:05 לקום',
-      'תזכיר לי כל יום ב-22:30 לקחת כדור',
-      'תזכיר לי כל שני ב-20:00 להוציא זבל',
-      'תזכיר לי כל ערב ב-21:00 ללמוד',
-    ]) {
+    for (const [phrase, type] of [
+      ['תזכיר לי כל בוקר ב-7:05 לקום', 'daily'],
+      ['תזכיר לי כל יום ב-22:30 לקחת כדור', 'daily'],
+      ['תזכיר לי כל שני ב-20:00 להוציא זבל', 'weekly'],
+      ['תזכיר לי כל ערב ב-21:00 ללמוד', 'daily'],
+    ] as const) {
       const got = quickParse(phrase, now, TZ);
       check(
-        `"${phrase}" falls through to the router instead of a one-off`,
-        got === null,
-        `quickparse turned a recurring request into ${JSON.stringify(got)}`,
+        `"${phrase}" is never turned into a one-off`,
+        got === null || got.schedule_type === type,
+        `quickparse produced ${JSON.stringify(got)}`,
+      );
+      check(
+        `"${phrase}" carries no one-shot fields`,
+        got === null || (got.once_at === undefined && got.in_minutes === undefined),
+        `quickparse produced ${JSON.stringify(got)}`,
       );
     }
   }
@@ -656,6 +667,53 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('the hour-correction button fixes the hour without ending a recurrence');
+  {
+    // "כל יום ב-7" is ambiguous, so it offers [לא, 19:00]. That button used to
+    // write a `once` schedule unconditionally — one tap and a daily habit
+    // became a single reminder tomorrow evening, silently. Correcting the HOUR
+    // must never change the KIND.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000, '{"type":"daily","time":"07:00"}');
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:19:00`));
+
+    const after = reminders(rig).find((r) => r.id === id)!;
+    const schedule = JSON.parse(after.schedule);
+    eq('it is still a daily reminder', schedule.type, 'daily');
+    eq('and the hour is the corrected one', schedule.time, '19:00');
+    rig.restore();
+  }
+  {
+    // A weekly rule keeps its days as well as its type.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לשלם', Date.now() + 3_600_000, '{"type":"weekly","time":"09:00","days":[1,3]}');
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:21:00`));
+
+    const schedule = JSON.parse(reminders(rig).find((r) => r.id === id)!.schedule);
+    eq('still weekly', schedule.type, 'weekly');
+    eq('same days', JSON.stringify(schedule.days), '[1,3]');
+    eq('corrected hour', schedule.time, '21:00');
+    rig.restore();
+  }
+  {
+    // And a genuine one-off still behaves exactly as before.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000);
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:19:00`));
+
+    const schedule = JSON.parse(reminders(rig).find((r) => r.id === id)!.schedule);
+    eq('a one-off stays a one-off', schedule.type, 'once');
+    check('pointing at the corrected hour', String(schedule.at).endsWith('T19:00'), schedule.at);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('the per-minute governor spends its last calls on routing, not on wording');
   {
     // The free tier limits requests per MINUTE, and the old guard counted per
@@ -680,9 +738,10 @@ async function main() {
     rig.speakQueue.push('this must never be reached');
 
     await withNow(frozen, async () => {
-      // A recurring phrase, so quickparse hands it to the router rather than
-      // answering it deterministically.
-      await runWebhook(rig, 'תזכיר לי כל יום ב-7 לרוץ');
+      // "כל יומיים" is a repeat in DAYS, which quickparse deliberately refuses
+      // to express — so this genuinely reaches the router. (A phrase quickparse
+      // handles itself would make this test vacuous: no model call to squeeze.)
+      await runWebhook(rig, 'תזכיר לי כל יומיים לשלם');
     });
 
     const kinds = rig.geminiCalls.map((c) => c.kind);
@@ -701,7 +760,7 @@ async function main() {
     rig.env.GEMINI_RPM = '0.5'; // below 1: even the first non-decorative call is over
     rig.routerQueue.push({ actions: [{ action: 'chat' }] });
 
-    await runWebhook(rig, 'תזכיר לי כל יום ב-7 לרוץ');
+    await runWebhook(rig, 'תזכיר לי כל יומיים לשלם');
     eq('no request was made to the model', rig.geminiCalls.length, 0);
     check('and the bot still answered', rig.texts().length > 0, JSON.stringify(rig.texts()));
     rig.restore();

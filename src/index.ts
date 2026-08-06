@@ -281,10 +281,35 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       case 'retime': {
         const rem = await db.getReminder(env, cb.reminder);
         if (rem) {
-          const p = wallParts(Date.now(), rem.tz);
-          let at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
-          if (at <= Date.now()) at += 86_400_000;
-          const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+          const hhmm = `${String(cb.hour).padStart(2, '0')}:${String(cb.minute).padStart(2, '0')}`;
+          let existing: Schedule | null = null;
+          try {
+            existing = JSON.parse(rem.schedule) as Schedule;
+          } catch {
+            /* unparseable: treated as a one-off below */
+          }
+
+          // Correcting the HOUR must not also change the KIND of reminder.
+          // This branch used to write a `once` schedule unconditionally, which
+          // would have turned "כל יום ב-7" into a single 19:00 reminder the
+          // moment he tapped "לא, 19:00" — ending the recurrence silently,
+          // which is the worst outcome a correction button could have.
+          const schedule: Schedule =
+            existing?.type === 'daily'
+              ? { type: 'daily', time: hhmm }
+              : existing?.type === 'weekly'
+                ? { type: 'weekly', time: hhmm, days: existing.days }
+                : { type: 'once', at: '' };
+          let at: number;
+          if (schedule.type === 'once') {
+            const p = wallParts(Date.now(), rem.tz);
+            at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
+            if (at <= Date.now()) at += 86_400_000;
+            schedule.at = wallString(at, rem.tz);
+          } else {
+            at = computeNext(schedule, rem.tz, Date.now()) ?? Date.now();
+          }
+
           // Gated on status inside the query, same as the other branches — a
           // retime tapped after the reminder was deleted must not un-cancel it.
           if (await db.retimeReminder(env, rem.id, at, JSON.stringify(schedule))) {
