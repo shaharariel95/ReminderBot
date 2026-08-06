@@ -192,7 +192,18 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   // leaked or guessed message id must not be a free write: check auth
   // before touching the database, and before even answering the spinner,
   // so a stranger's callback_query_id leaks nothing back either.
-  if (!chatId || !env.OWNER_CHAT_ID || fromId !== env.OWNER_CHAT_ID || chatId !== env.OWNER_CHAT_ID) {
+  //
+  // No separate "!env.OWNER_CHAT_ID" clause: `chatId !== env.OWNER_CHAT_ID`
+  // already fails closed on an unset/empty OWNER_CHAT_ID by itself. `!chatId`
+  // just above guarantees chatId is a non-empty string here, and a non-empty
+  // string can never `===` a falsy value ('', undefined) — so a misconfigured
+  // deployment can't accidentally authorise anyone. (Verified by exhaustive
+  // enumeration, not just this argument: adding the clause back never changes
+  // the outcome for any chatId/fromId/OWNER_CHAT_ID combination — it is a
+  // provable tautology given the other three clauses, which is also why a
+  // "delete it and see if a test goes red" check can't distinguish it: no
+  // input exists for which it would.)
+  if (!chatId || fromId !== env.OWNER_CHAT_ID || chatId !== env.OWNER_CHAT_ID) {
     console.log(`ignored callback from ${fromId}`);
     return;
   }

@@ -677,6 +677,25 @@ async function main() {
     await runUpdate(rig, callbackUpdate('77777', `d:${inst.id}`, CHAT));
     const row2 = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
     eq('a foreign chat_id cannot close a task even with the owner\'s from_id', row2.status, 'open');
+
+    // The fail-closed guarantee: an unset OWNER_CHAT_ID must not turn into
+    // "anyone with a non-empty id is authorised". Unlike handleUpdate, which
+    // deliberately enters setup mode and replies with the chat id when
+    // OWNER_CHAT_ID is unset, handleCallback must reject silently — a tap is
+    // not the place to announce the bot is unconfigured to whoever tapped it.
+    // (This is carried entirely by the chatId-equality clause, not a
+    // standalone "!env.OWNER_CHAT_ID" check — see the comment in
+    // handleCallback: that clause would be a provable tautology given
+    // chatId is guaranteed non-empty here, so no input can isolate it. This
+    // case still pins the product-level guarantee end to end.)
+    rig.env.OWNER_CHAT_ID = '';
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
+    const row3 = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
+    eq('an unset OWNER_CHAT_ID rejects the callback instead of authorising it', row3.status, 'open');
+    check('no spinner answer when OWNER_CHAT_ID is unset', !rig.methods().includes('answerCallbackQuery'));
+    eq('no setup-mode reply is sent on the callback path either', rig.texts().length, textsBefore);
+    rig.env.OWNER_CHAT_ID = CHAT;
+
     rig.restore();
   }
 
