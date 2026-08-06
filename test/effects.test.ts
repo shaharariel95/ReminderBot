@@ -296,6 +296,40 @@ async function main() {
     });
     rig.restore();
   }
+  {
+    // The mirror of the block above: this time the NEW title is the generic
+    // one (no subject given -> falls back to "תזכורת") and the EXISTING
+    // candidate is specific but happens to contain "תזכורת" as a token, e.g.
+    // a reminder literally called "תזכורת חשובה מהבוקר". Without the outer
+    // `generic ? undefined : ...` guard in effects.ts (as opposed to the
+    // inner `!isGenericTitle(normExisting)` check, which only covers the
+    // OTHER direction), containment alone (shorter="תזכורת", length >= 3,
+    // longer.includes(shorter)) would still fire and produce a spurious
+    // duplicateOf warning against an unrelated reminder.
+    const rig = createRig();
+    seedSettings(rig);
+    const now = Date.now();
+
+    await withNow(now, async () => {
+      await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'תזכורת חשובה מהבוקר', schedule_type: 'once', in_minutes: 5 },
+        'x',
+      );
+      const second = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', schedule_type: 'once', in_minutes: 5 }, // no title -> "תזכורת"
+        'תזכיר לי עוד 5 דקות',
+      );
+      eq('a generic new title vs a specific existing one creates cleanly', second[0].kind, 'reminder_created');
+      check(
+        'near-matching is skipped when the NEW (not just the existing) title is generic',
+        second[0].kind === 'reminder_created' && second[0].duplicateOf === undefined,
+        `got: ${JSON.stringify(second[0])}`,
+      );
+    });
+    rig.restore();
+  }
 
   // =========================================================================
   section('disambiguation — complete with two+ open instances and no resolvable target_id');
