@@ -1,5 +1,6 @@
 /** Run with `npm run test:voice`. */
 import { renderBaseline } from '../src/voice';
+import { CLAIM } from '../src/validate';
 import { wallToUtc } from '../src/time';
 import { check, done, section } from './harness';
 import type { Effect } from '../src/types';
@@ -100,13 +101,15 @@ section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
 {
   // reminder_duplicate and needs_task_choice are deliberately absent from
   // WROTE (types.ts): nothing was inserted for either. If voice.ts's wording
-  // for them contained a CLAIM verb (validate.ts's lexicon), the deterministic
-  // baseline would reject itself the instant facts.wrote is false.
-  const claims = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה/;
+  // for them contained a CLAIM verb, the deterministic baseline would reject
+  // itself the instant facts.wrote is false. Imported straight from
+  // validate.ts (rather than hand-copied) so the two can never silently
+  // diverge — this project has already had the prompt and the lexicon drift
+  // apart once.
   check('reminder_duplicate\'s baseline contains no CLAIM verb',
-    !claims.test(render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT })));
+    !CLAIM.test(render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT })));
   check('needs_task_choice\'s baseline contains no CLAIM verb',
-    !claims.test(render({
+    !CLAIM.test(render({
       kind: 'needs_task_choice', action: 'complete',
       open: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null }],
     })));
