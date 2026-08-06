@@ -8,6 +8,17 @@ const NOW = wallToUtc(2026, 8, 2, 22, 52, TZ);
 
 let failures = 0;
 
+/**
+ * A plain assertion, distinct from `check` above (which compares a whole
+ * expected Intent shape). Named for what it does rather than reused/numbered,
+ * since two near-identical `check`/`check2` helpers in one file is its own
+ * maintenance trap.
+ */
+function assertTrue(label: string, ok: boolean): void {
+  if (!ok) failures++;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
+}
+
 function check(
   input: string,
   expected: { minutes?: number; at?: string; title?: string } | null,
@@ -69,12 +80,35 @@ check('תזכיר לי מדי בוקר ב-6:30 להתאמן', null);
 // Two times in one message: one Intent cannot carry both, so the router gets it.
 check('תזכיר לי עוד 5 דקות לאכול ובעוד שעה להתקשר לאמא', null);
 check('תזכיר לי ב-7:00 לקום וב-9:00 להתקשר', null);
-check('תזכיר לי ב-11', null);                       // ambiguous hour, no period word
 check('אני רוצה לפתוח תיק מסחר', null);            // a goal
 check('מה השעה', null);
 check('סיימתי', null);
 check('עוד מעט אני הולך', null);                    // no number
 check('נפגשתי איתו ב-8 בערב אתמול', null);         // not a reminder request
+
+console.log('\n--- ambiguous hours commit and offer a correction ---');
+// Capture must never block on a question, so a bare hour is taken literally and
+// the other reading is offered as a button.
+{
+  const got = quickParse('תזכיר לי ב-11 להתקשר', NOW, TZ);
+  assertTrue('a bare hour still creates a reminder', got !== null && got.action === 'create_reminder');
+  assertTrue('it takes the literal reading', got?.once_at?.endsWith('11:00') === true);
+  assertTrue('and flags the alternative', got?.ambiguous_hour === 23);
+}
+{
+  const got = quickParse('תזכיר לי ב-7 בבוקר לקום', NOW, TZ);
+  assertTrue('an explicit part-of-day is not ambiguous', got?.ambiguous_hour === undefined);
+}
+{
+  const got = quickParse('תזכיר לי ב-14:30 פגישה', NOW, TZ);
+  assertTrue('an explicit HH:MM is not ambiguous', got?.ambiguous_hour === undefined);
+}
+{
+  // 12 is the edge case: (12 + 12) % 24 must wrap to 0, not the invalid "24".
+  const got = quickParse('תזכיר לי ב-12 להתקשר', NOW, TZ);
+  assertTrue('a bare "ב-12" takes the literal noon reading', got?.once_at?.endsWith('T12:00') === true);
+  assertTrue('and flags midnight (0), not 24, as the alternative', got?.ambiguous_hour === 0);
+}
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
 if (failures > 0) (globalThis as any).process?.exit?.(1);

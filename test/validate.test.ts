@@ -186,4 +186,38 @@ section('the baseline is always true by construction — every effect survives i
   }
 }
 
+section('ambiguous-hour altHour never reaches validate() — it is a button label only');
+{
+  // Task 11: reminder_created can carry altHour (the "other reading" offered
+  // as a one-tap correction). facts.ts only sweeps `at`/`until`/`since` into
+  // facts.times, and voice.ts's baseline for reminder_created never mentions
+  // altHour at all — so it must not cause a false rejection of the truthful
+  // deterministic message, and it must not silently become an allowed time.
+  const CREATED_WITH_ALT: Effect = {
+    kind: 'reminder_created', id: 1, title: 'להתקשר',
+    at: new Date('2026-08-06T08:00:00Z').getTime(),   // 11:00 Asia/Jerusalem
+    schedule: { type: 'once', at: '2026-08-06T11:00' }, requiresProof: false,
+    altHour: 23,
+  };
+  const f = facts([CREATED_WITH_ALT]);
+  check('altHour is not swept into facts.times',
+    !f.times.includes('23:00'), `times: ${JSON.stringify(f.times)}`);
+
+  const b = base([CREATED_WITH_ALT]);
+  check('the baseline never mentions the alt hour',
+    !b.includes('23:00'), `baseline: ${b}`);
+  check('the true baseline still passes its own validator with altHour set',
+    validate(b, f, b).ok, validate(b, f, b).reason);
+
+  // The failure case the brief warns about: the alt hour reaching the MODEL's
+  // rewrite while absent from both facts.times and the baseline. That must
+  // still be rejected — offering it as a button is fine, a model asserting it
+  // as a clock time in prose is not.
+  check('a model rewrite that invents the alt hour as a clock time is rejected',
+    !validate('קבעתי ל-11:00, אולי התכוונת ל-23:00?', f, b).ok);
+  // And the literal, truthful reading is unaffected by altHour being present.
+  check('a truthful rewrite of the literal hour still passes',
+    validate('קבעתי ל-11:00.', f, b).ok);
+}
+
 done();

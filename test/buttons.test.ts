@@ -49,4 +49,25 @@ check('a well-formed capture effect yields plan slots',
 eq('a malformed capture id yields no buttons',
   buttonsFor([{ kind: 'reminder_captured', id: NaN }]), undefined);
 
+section('ambiguous-hour correction button');
+{
+  const buttons = buttonsFor([{ kind: 'reminder_created', id: 12, altHour: 23 }]);
+  check('a reminder_created effect with altHour offers a retime button',
+    !!buttons && JSON.stringify(buttons).includes('"t":"retime"'),
+    JSON.stringify(buttons));
+  const decoded = buttons ? decode(encode(buttons[0][0].data)) : null;
+  eq('the button payload decodes back to the same retime', decoded, { t: 'retime', reminder: 12, hour: 23, minute: 0 });
+}
+{
+  // 12 + 12 = 24, which must wrap to 00, not encode as the literal "24".
+  const buttons = buttonsFor([{ kind: 'reminder_created', id: 5, altHour: 0 }]);
+  eq('midnight (hour 0) round-trips through encode/decode, not "24"',
+    buttons ? decode(encode(buttons[0][0].data)) : null,
+    { t: 'retime', reminder: 5, hour: 0, minute: 0 });
+}
+eq('a reminder_created effect with no altHour offers no correction button',
+  buttonsFor([{ kind: 'reminder_created', id: 12 }]), undefined);
+eq('a malformed id with altHour set yields no buttons, not a broken one',
+  buttonsFor([{ kind: 'reminder_created', id: NaN, altHour: 23 }]), undefined);
+
 done();

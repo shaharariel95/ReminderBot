@@ -67,7 +67,11 @@ export async function applyIntent(
         next_fire_at: next,
       });
       return [
-        { kind: 'reminder_created', id, title, at: next, schedule, requiresProof: !!intent.requires_proof },
+        {
+          kind: 'reminder_created', id, title, at: next, schedule,
+          requiresProof: !!intent.requires_proof,
+          ...(intent.ambiguous_hour === undefined ? {} : { altHour: intent.ambiguous_hour }),
+        },
       ];
     }
 

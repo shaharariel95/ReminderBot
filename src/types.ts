@@ -121,6 +121,11 @@ export interface Intent {
   checkin_per_day?: number;
   distress?: boolean;
   reason?: string;
+  /**
+   * Set when the hour was written without am/pm and we committed to the literal
+   * reading. Value is the other reading's hour, offered as a one-tap correction.
+   */
+  ambiguous_hour?: number;
 }
 
 /**

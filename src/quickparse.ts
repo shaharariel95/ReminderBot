@@ -118,9 +118,10 @@ function parseRelative(t: string): { minutes: number; matched: string } | null {
 
 /**
  * "ב-11 בלילה" · "ב23:00" · "מחר ב-7 בבוקר" — an absolute clock time today or
- * tomorrow. Only fast-pathed when the hour is unambiguous: either written as
- * HH:MM, or given a part-of-day word. A bare "ב-11" could mean 11:00 or 23:00,
- * so that one goes to the router where context can settle it.
+ * tomorrow. When the hour is written as HH:MM or carries a part-of-day word,
+ * the reading is unambiguous. A bare "ב-11" could mean 11:00 or 23:00; capture
+ * must never block on a question, so it commits to the literal hour and flags
+ * the other reading via `ambiguous_hour` for a one-tap correction.
  */
 function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
   const m =
@@ -134,15 +135,17 @@ function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
   const period = m[3];
   if (hour > 23 || minute > 59) return null;
 
+  let ambiguousAlternative: number | undefined;
   if (period) {
     if (/בלילה/.test(period)) hour = hour === 12 ? 0 : hour < 12 ? hour + 12 : hour;
     else if (/בערב/.test(period)) hour = hour < 12 ? hour + 12 : hour;
     else if (/צהריי?ם|אחה"צ/.test(period)) hour = hour >= 1 && hour <= 6 ? hour + 12 : hour;
     // בבוקר: leave as written.
   } else if (!m[2]) {
-    // No minutes and no part-of-day word — genuinely ambiguous. Let the LLM
-    // read the surrounding conversation instead of guessing wrong.
-    return null;
+    // Genuinely ambiguous — "ב-11" could be 11:00 or 23:00. Capture never blocks
+    // on a question, so commit to the literal reading and let a button fix it.
+    // Predictable beats clever: no inference from the task wording.
+    ambiguousAlternative = (hour + 12) % 24;
   }
 
   const tomorrow = /מחר|tomorrow/i.test(t);
@@ -166,6 +169,7 @@ function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
     title: title.slice(0, 120),
     schedule_type: 'once',
     once_at: wallString(at, tz),
+    ...(ambiguousAlternative === undefined ? {} : { ambiguous_hour: ambiguousAlternative }),
   };
 }
 

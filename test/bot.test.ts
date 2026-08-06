@@ -718,6 +718,27 @@ async function main() {
     rig.restore();
   }
 
+  section('ambiguous hour — commits, then one tap fixes it');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.speakQueue.push('קבעתי.');
+    await runWebhook(rig, 'תזכיר לי ב-11 להתקשר');
+    const row = reminders(rig)[0];
+    check('a reminder was created immediately', !!row);
+    const sent = rig.sent.filter((s) => s.method === 'sendMessage');
+    check('the correction button is offered',
+      sent.some((s) => JSON.stringify(s.markup ?? '').includes('"r:')),
+      `markup: ${JSON.stringify(sent.map((s) => s.markup))}`);
+
+    rig.speakQueue.push('שיניתי.');
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${row.id}:23:00`));
+    const after = reminders(rig)[0];
+    check('the time moved to the other reading',
+      after.next_fire_at !== row.next_fire_at, `before=${row.next_fire_at} after=${after.next_fire_at}`);
+    rig.restore();
+  }
+
   section('buttons are attached where they are useful');
   {
     const rig = createRig();

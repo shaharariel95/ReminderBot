@@ -103,6 +103,21 @@ export function buttonsFor(
     ];
   }
 
+  const created = effects.find((e) => e.kind === 'reminder_created' && e.altHour !== undefined);
+  if (created) {
+    const reminder = positiveId(created.id);
+    const alt = Number(created.altHour);
+    if (reminder === null || !Number.isInteger(alt) || alt < 0 || alt > 23) return undefined;
+    return [
+      [
+        {
+          text: `לא, ${String(alt).padStart(2, '0')}:00`,
+          data: { t: 'retime', reminder, hour: alt, minute: 0 },
+        },
+      ],
+    ];
+  }
+
   const captured = effects.find((e) => e.kind === 'reminder_captured');
   if (captured) {
     const reminder = positiveId(captured.id);
