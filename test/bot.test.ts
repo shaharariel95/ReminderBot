@@ -777,6 +777,42 @@ async function main() {
     check(`a short line pauses at least 900ms (${short})`, short >= 900);
     check(`a long line pauses longer than a short one (${long} > ${short})`, long > short);
     check(`pauses are capped at 5s (${long})`, long <= 5000);
+
+    // Pin the floor and ceiling at both extremes, not just two mid-range
+    // lengths — an empty chunk must still floor at 900ms, and an absurdly
+    // long one must still ceiling at 5000ms.
+    const empty = pacingDelay(0, () => 0.5);
+    eq('len=0 still floors at 900ms', empty, 900);
+    const huge = pacingDelay(10_000, () => 0.5);
+    eq('a very long line still ceilings at 5000ms', huge, 5000);
+
+    // The jitter band itself, away from the clamps: at len=50 (base
+    // 700+50*45=2950ms) rand=0 and rand=1 give exactly 0.8x and 1.2x, both
+    // inside [900, 5000], so this pins the jitter arithmetic rather than the
+    // floor/ceiling.
+    const jitterLow = pacingDelay(50, () => 0);
+    const jitterHigh = pacingDelay(50, () => 1);
+    eq('rand=0 gives the low end of the jitter band (0.8x base)', jitterLow, Math.round(2950 * 0.8));
+    eq('rand=1 gives the high end of the jitter band (1.2x base)', jitterHigh, Math.round(2950 * 1.2));
+  }
+  {
+    // Nothing observes sendBurst's actual delay values unless a test looks:
+    // rig.burstDelays records what sendBurst requested from env.__burstSleep
+    // instead of discarding it, so a regression in BURST_BUDGET_MS's clamping
+    // arithmetic (total pacing exceeding 15s) would show up here.
+    const { sendBurst } = await import('../src/telegram');
+    const rig = createRig();
+    const chunks = ['א'.repeat(500), 'ב'.repeat(500), 'ג'.repeat(500), 'ד'.repeat(500)];
+    await sendBurst(rig.env, CHAT, chunks.join('\n\n'));
+    eq('three gaps were paced (four chunks)', rig.burstDelays.length, 3);
+    check('every requested delay lands within pacingDelay\'s [900, 5000] bounds',
+      rig.burstDelays.every((d) => d >= 900 && d <= 5000),
+      `delays: ${JSON.stringify(rig.burstDelays)}`);
+    const total = rig.burstDelays.reduce((a, b) => a + b, 0);
+    check(`total requested pacing never exceeds the 15s burst budget (${total}ms)`,
+      total <= 15_000,
+      `delays: ${JSON.stringify(rig.burstDelays)}`);
+    rig.restore();
   }
   {
     const rig = createRig();

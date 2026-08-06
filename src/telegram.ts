@@ -53,25 +53,29 @@ async function realSleep(ms: number): Promise<void> {
 }
 
 /**
- * The wait `sendBurst` uses between chunks. Production never touches this;
- * the test harness swaps it for something instant (see `setBurstSleepForTests`)
- * so a multi-chunk reply doesn't cost real wall-clock time in the suite —
- * nothing in the tests asserts sendBurst's actual pacing, only pacingDelay's
- * return value and the chunk/markup behaviour, so stubbing it changes no
- * assertion's meaning.
- */
-let burstSleep: (ms: number) => Promise<void> = realSleep;
-
-/** Test-only seam — see `burstSleep` above. */
-export function setBurstSleepForTests(fn: (ms: number) => Promise<void>): void {
-  burstSleep = fn;
-}
-
-/**
  * Send a reply as a burst of short messages instead of one block.
  * The model separates them with a blank line. The rhythm is a real part of the
  * personality — one long paragraph reads like a form letter no matter how
  * good the words are.
+ *
+ * The inter-chunk wait is `env.__burstSleep ?? realSleep`. This is a
+ * deliberate choice over a module-level mutable seam (what this used to be):
+ * a global `let` swapped by a test-only setter stays swapped for the whole
+ * isolate's lifetime once anything calls the setter, including a future
+ * accidental import from non-test code — nothing would catch that, and
+ * pacing would silently and permanently vanish in production. `env` is
+ * already threaded through every call site here; a real deployment's `Env`
+ * comes from Cloudflare's wrangler bindings, which cannot produce a function
+ * value, so `env.__burstSleep` is structurally always `undefined` outside
+ * tests — there is no path by which production code can end up with pacing
+ * disabled. The alternative the parameter-injection precedent (`pacingDelay`,
+ * `withTyping`) suggests — an optional `sleepFn` parameter on `sendBurst`
+ * itself — was rejected: nothing in the test suite calls `sendBurst`
+ * directly except one unit test; the integration tests drive it through
+ * `sendOutcome`, which would need the same optional parameter threaded
+ * through its own six-parameter signature and every one of its callers,
+ * putting a test-only parameter into production call sites for no benefit
+ * over the env field.
  */
 export async function sendBurst(
   env: Env,
@@ -79,6 +83,7 @@ export async function sendBurst(
   text: string,
   replyMarkup?: unknown,
 ): Promise<string[]> {
+  const sleep = env.__burstSleep ?? realSleep;
   const chunks = text
     .split(/\n\s*\n/)
     .map((s) => s.trim())
@@ -93,7 +98,7 @@ export async function sendBurst(
       const delay = Math.min(pacingDelay(chunks[i].length), BURST_BUDGET_MS - spent);
       if (delay > 0) {
         await sendChatAction(env, chatId);
-        await burstSleep(delay);
+        await sleep(delay);
         spent += delay;
       }
     }

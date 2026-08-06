@@ -8,6 +8,14 @@ export interface Env {
   GEMINI_MODEL_FALLBACK?: string;
   GEMINI_SOFT_LIMIT?: string;
   DEFAULT_TZ?: string;
+  /**
+   * Test-only override for sendBurst's inter-chunk sleep (see telegram.ts).
+   * Real deployments get `Env` from Cloudflare's wrangler bindings, which
+   * cannot produce a function value, so this is always `undefined` outside
+   * the test harness — there is no path by which a real deployment could end
+   * up with this set.
+   */
+  __burstSleep?: (ms: number) => Promise<void>;
 }
 
 /** Recurrence rule, stored as JSON in reminders.schedule. */

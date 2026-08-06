@@ -7,17 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { setBurstSleepForTests } from '../src/telegram';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-
-// sendBurst's inter-chunk pacing (900ms-5s per gap, see pacingDelay in
-// src/telegram.ts) is real production behaviour, but no test in this suite
-// asserts anything about its actual wall-clock timing — only pacingDelay's
-// return value and sendBurst's chunk/markup output are checked. Installed
-// once per test process (every test file imports this module), before any
-// test can call sendBurst, so a multi-chunk reply never costs real time here.
-setBurstSleepForTests(async () => {});
 
 // ------------------------------------------------------------------ D1 shim
 
@@ -100,6 +91,16 @@ export interface Rig {
    * "did the reaction fire before the model was consulted?" on their own.
    */
   timeline: string[];
+  /**
+   * Every millisecond value sendBurst actually requested from its inter-chunk
+   * sleep, in order. `env.__burstSleep` (installed below) records into this
+   * and resolves immediately rather than discarding the value — a stub that
+   * only made pacing fast would leave a regression in the BURST_BUDGET_MS
+   * clamping arithmetic (or in pacingDelay's own bounds) unobservable by any
+   * test; recording turns the seam into something that makes timing
+   * assertable instead of invisible.
+   */
+  burstDelays: number[];
   /** Every Gemini call, so a test can assert what the model was actually told. */
   geminiCalls: GeminiCall[];
   /** Plain text of the messages the user would have seen, in order. */
@@ -145,10 +146,18 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       OWNER_CHAT_ID: chatId,
       GEMINI_MODEL: 'gemini-3.5-flash-lite',
       DEFAULT_TZ: opts.tz ?? 'Asia/Jerusalem',
+      // Records what sendBurst actually requested instead of really sleeping
+      // for it — see the `burstDelays` doc comment above. Referencing `rig`
+      // here is safe: this closure only runs once a test calls sendBurst,
+      // long after the `rig` binding below has been assigned.
+      __burstSleep: async (ms: number) => {
+        rig.burstDelays.push(ms);
+      },
     },
     db: sqlite,
     sent: [],
     timeline: [],
+    burstDelays: [],
     geminiCalls: [],
     texts: () => rig.sent.filter((s) => s.method === 'sendMessage').map((s) => s.text ?? ''),
     methods: () => rig.sent.map((s) => s.method),
