@@ -521,6 +521,14 @@ async function tick(env: Env): Promise<void> {
     ctx.settings.quiet_end_hour,
   );
 
+  // Everything that comes due in one tick is, from his side of the screen,
+  // "the 7:00 stuff" — two reminders at the same time should read as one
+  // moment with two things in it, not as two notifications a minute apart.
+  // They are collected here and sent as a single message below; each keeps its
+  // own effect (and therefore its own row, its own instance and its own
+  // buttons), because grouping is a presentation decision and must not blur
+  // which task he actually closed.
+  const fired: Effect[] = [];
   for (const r of due) {
     // Reschedule first: if the send throws, we still don't fire twice.
     let next: number | null = null;
@@ -532,15 +540,20 @@ async function tick(env: Env): Promise<void> {
     await db.setNextFire(env, r.id, next);
 
     const instanceId = await db.createInstance(env, r, now);
+    console.log(`fired reminder ${r.id} → instance ${instanceId}`);
     if (muted) continue;
+    fired.push({
+      kind: 'reminder_fired', id: r.id, title: r.title, instanceId,
+      requiresProof: r.requires_proof === 1,
+    });
+  }
 
+  // Every instance above is already committed, so a failed send costs a
+  // message, never a fired reminder.
+  if (fired.length) {
     ctx = await buildContext(env, chatId);
-    const delivered = await sendOutcome(env, chatId, ctx,
-      [{ kind: 'reminder_fired', id: r.id, title: r.title, instanceId, requiresProof: r.requires_proof === 1 }],
-      NAG_LADDER[0]);
-    console.log(
-      `fired reminder ${r.id} → instance ${instanceId}${delivered ? '' : ' (DELIVERY FAILED)'}`,
-    );
+    const delivered = await sendOutcome(env, chatId, ctx, fired, NAG_LADDER[0]);
+    if (!delivered) console.log(`DELIVERY FAILED for ${fired.length} fired reminder(s)`);
   }
 
   if (muted) return;

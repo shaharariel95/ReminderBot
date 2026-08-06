@@ -5,6 +5,8 @@
  * writing to the database on the strength of a corrupted string.
  */
 
+import { UNTITLED_TITLE } from './types';
+
 export type PlanSlot = 'eve' | 'tm' | 'hr' | 'none';
 
 export type Callback =
@@ -87,12 +89,20 @@ function positiveId(v: unknown): number | null {
  * Which buttons belong on a message. Driven by effects rather than by the
  * caller so that every path producing the same effect gets the same affordance.
  */
+/** Enough of a title to tell two buttons apart, short enough to fit on one. */
+function shortLabel(title: unknown): string {
+  const s = String(title ?? '').trim();
+  if (!s || s === UNTITLED_TITLE) return 'בלי שם';
+  return s.length > 14 ? `${s.slice(0, 13)}…` : s;
+}
+
 export function buttonsFor(
   effects: { kind: string; [k: string]: unknown }[],
 ): Button[][] | undefined {
-  const fired = effects.find((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
-  if (fired) {
-    const instance = positiveId(fired.instanceId);
+  const fired = effects.filter((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
+
+  if (fired.length === 1) {
+    const instance = positiveId(fired[0].instanceId);
     if (instance === null) return undefined;
     return [
       [
@@ -101,6 +111,26 @@ export function buttonsFor(
         { text: 'לא היום', data: { t: 'skip', instance } },
       ],
     ];
+  }
+
+  // Several fired at once. One row per task, each labelled — a single shared
+  // "עשיתי" would be a lie about which one he closed, and this used to be a
+  // `.find()`, which quietly gave buttons to the first task and none to the
+  // rest. A task whose id is unusable is skipped rather than taking the whole
+  // keyboard down with it: the others are still actionable.
+  if (fired.length > 1) {
+    const rows = fired.flatMap((f) => {
+      const instance = positiveId(f.instanceId);
+      if (instance === null) return [];
+      return [
+        [
+          { text: `✓ ${shortLabel(f.title)}`, data: { t: 'done', instance } },
+          { text: '10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
+          { text: 'לא היום', data: { t: 'skip', instance } },
+        ] as Button[],
+      ];
+    });
+    return rows.length ? rows : undefined;
   }
 
   const created = effects.find((e) => e.kind === 'reminder_created' && e.altHour !== undefined);

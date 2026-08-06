@@ -586,22 +586,61 @@ async function main() {
     seedSettings(rig);
     seedReminder(rig, 'משימה א', Date.now() - 2000);
     seedReminder(rig, 'משימה ב', Date.now() - 1000);
-    rig.speakQueue.push('נו? משימה א.');
-    rig.speakQueue.push('נו? משימה ב.');
+    rig.speakQueue.push('נו? שתי משימות: משימה א, משימה ב.');
 
     await runCron(rig);
 
     const speakCalls = rig.geminiCalls.filter((c) => c.kind === 'speak');
-    eq('one speak call per due reminder', speakCalls.length, 2);
+    // Reminders coming due together are now one message, so the shape of the
+    // staleness question changed: instead of "does the SECOND send see the
+    // first's write", it is "does the single send see BOTH". Same invariant,
+    // stronger form — every instance is committed before the context is built.
+    eq('due reminders in one tick are spoken once, not once each', speakCalls.length, 1);
 
     const openSection = (system: string) =>
       system.split('משימות פתוחות שנשלחו אליו')[1]?.split('המטרות המתמשכות')[0] ?? '';
+    const open = openSection(speakCalls[0]?.system ?? '');
 
     check(
-      'the second reminder\'s context already shows the first reminder\'s instance as open — not stale from before this tick\'s writes',
-      openSection(speakCalls[1]?.system ?? '').includes('משימה א'),
-      `second call's open section: ${openSection(speakCalls[1]?.system ?? '')}`,
+      "the send's context already shows the FIRST reminder's instance as open — not stale from before this tick's writes",
+      open.includes('משימה א'),
+      `open section: ${open}`,
     );
+    check(
+      "and the SECOND one's too — both were committed before the context was built",
+      open.includes('משימה ב'),
+      `open section: ${open}`,
+    );
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('two reminders due at the same time arrive as one message, with buttons for each');
+  {
+    // The reported shape: 07:00 with "take food" and "throw out the rubbish"
+    // used to be two near-identical pings seconds apart, and buttonsFor used
+    // `.find()`, so only the first task was actually actionable.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לקחת אוכל', Date.now() - 2000);
+    seedReminder(rig, 'לזרוק זבל', Date.now() - 1000);
+    rig.geminiDown = true; // force the deterministic baseline, so this pins voice.ts
+
+    await runCron(rig);
+
+    const texts = rig.texts();
+    eq('one message, not one per reminder', texts.length, 1);
+    check('it names both tasks', texts[0].includes('לקחת אוכל') && texts[0].includes('לזרוק זבל'),
+      `got: ${texts[0]}`);
+
+    const markup = JSON.stringify(
+      rig.sent.find((s) => s.method === 'sendMessage')?.markup ?? null,
+    );
+    const openIds = instances(rig).map((i: any) => i.id);
+    eq('both reminders produced an instance', openIds.length, 2);
+    for (const id of openIds) {
+      check(`instance ${id} has its own "done" button`, markup.includes(`"d:${id}"`), markup);
+    }
     rig.restore();
   }
 

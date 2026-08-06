@@ -153,8 +153,30 @@ function one(e: Effect, tz: string): string {
   }
 }
 
+/**
+ * Several reminders coming due together, as one moment rather than a burst of
+ * near-identical pings. Rendered as a single block on purpose: sendBurst splits
+ * on blank lines, so anything separated that way arrives as separate messages —
+ * which is exactly what this exists to stop.
+ */
+function firedTogether(items: Extract<Effect, { kind: 'reminder_fired' }>[]): string {
+  const lines = items.map((e) => {
+    const name = untitled(e.title) ? 'משהו שלא אמרת מה זה' : e.title;
+    return `· ${name}${e.requiresProof ? ' (עם תמונה)' : ''}`;
+  });
+  return [`נו? ${items.length} דברים עכשיו:`, ...lines].join('\n');
+}
+
 /** One message for the whole turn. Blank-line separated so sendBurst can split it. */
 export function renderBaseline(effects: Effect[], tz: string): string {
+  const fired = effects.filter(
+    (e): e is Extract<Effect, { kind: 'reminder_fired' }> => e.kind === 'reminder_fired',
+  );
+  // Only when the whole turn is reminders firing. A tick that also produced,
+  // say, a give-up has more to say than a list, and falls through to the
+  // per-effect rendering below.
+  if (fired.length > 1 && fired.length === effects.length) return firedTogether(fired);
+
   const parts = effects.map((e) => one(e, tz)).filter((s) => s.trim().length > 0);
   return parts.join('\n\n');
 }

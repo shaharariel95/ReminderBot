@@ -137,6 +137,41 @@ section('a reminder with no subject never has the fallback title read back at it
   check('the untitled nag wording contains no CLAIM verb', !CLAIM.test(naggedUntitled));
 }
 
+section('reminders due together render as one block, not one message each');
+{
+  const two: Effect[] = [
+    { kind: 'reminder_fired', id: 1, title: 'לקחת אוכל', instanceId: 9, requiresProof: false },
+    { kind: 'reminder_fired', id: 2, title: 'לזרוק זבל', instanceId: 10, requiresProof: false },
+  ];
+  const text = renderBaseline(two, TZ);
+  check('both tasks are named', text.includes('לקחת אוכל') && text.includes('לזרוק זבל'), text);
+  // sendBurst splits on blank lines, so a blank line here would put them back
+  // into two messages and undo the entire point of grouping them.
+  check('and there is no blank line for sendBurst to split on', !text.includes('\n\n'), JSON.stringify(text));
+  check('the count is stated', text.includes('2'), text);
+
+  const withProof = renderBaseline(
+    [two[0], { ...two[1], requiresProof: true } as Effect],
+    TZ,
+  );
+  check('a task needing a photo is marked individually, not for the whole group',
+    withProof.includes('לזרוק זבל (עם תמונה)') && !withProof.includes('לקחת אוכל (עם תמונה)'),
+    withProof);
+
+  // A single reminder must be untouched by any of this.
+  check('one reminder alone still renders the plain wording',
+    renderBaseline([two[0]], TZ) === 'נו? לקחת אוכל.', renderBaseline([two[0]], TZ));
+
+  // A tick that fired two reminders AND gave up on something has more to say
+  // than a list, so it falls through to per-effect rendering.
+  const mixed = renderBaseline(
+    [...two, { kind: 'gave_up', instanceId: 4, title: 'לרוץ', rounds: 3 }],
+    TZ,
+  );
+  check('a mixed tick is not collapsed into the group wording',
+    mixed.includes('לרוץ') && mixed.includes('\n\n'), mixed);
+}
+
 section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
 {
   // reminder_duplicate and needs_task_choice are deliberately absent from
