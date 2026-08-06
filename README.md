@@ -6,27 +6,38 @@
 A private Telegram bot that reminds you, chases you, demands proof, and is a bit
 of a dick about it. Runs entirely on free tiers.
 
-**Stack:** Telegram Bot API → Cloudflare Worker (webhook + 1-minute cron) → D1 (SQLite) → Gemini Flash-Lite.
+**Stack:** Telegram Bot API → Cloudflare Worker (webhook + 1-minute cron) → D1 (SQLite) → Gemini, primary model with a cheaper fallback.
 
 **Cost:** $0 at personal volume. ~1,440 cron invocations/day against a 100,000/day
 free allowance, and a couple of Gemini calls per message against a free tier of
-roughly 15 RPM / 1,500 RPD. Verify current limits before you scale it up.
+roughly 15 RPM / 1,500 RPD. Verify current limits before you scale it up. Past a
+configurable daily call count, unprompted check-ins stop calling the model
+entirely and ship deterministic text instead — see **Model configuration**
+below.
 
 ---
 
 ## How it works
 
 ```
-Telegram ──webhook──> Worker /tg ──> route()  (Gemini, temp 0, JSON)  → decides WHAT
-                                 └─> applyIntent()  (plain TS)        → touches the DB
-                                 └─> speak()   (Gemini, temp 1.05)    → decides HOW it sounds
+Telegram ──webhook──> Worker /tg ──┬─ message ────> route()      (Gemini, temp 0, JSON)  → decides WHAT
+                                    │                applyIntent() (plain TS, effects.ts)  → touches the DB, returns Effect[]
+                                    └─ callback_query> (buttons.ts decode)                  → touches the DB, returns Effect[]
+                                                                                              — no model call at all
+
+Effect[] ──> buildFacts()   (facts.ts)     → allow-lists of times/titles the reply may mention
+        └─> renderBaseline() (voice.ts)    → correct, blunt Hebrew — always shippable on its own
+              └─> speak()    (Gemini, temp 1.05) → rewrites the baseline in character
+                    └─> validate()  (validate.ts) → throws the rewrite away if it strays from the facts
+                          └─> send: rewrite if it passed, baseline otherwise
 
 cron * * * * * ──> tick() ──> fire due reminders
                           ├─> nag open instances, escalating each round
-                          └─> give up after max_nags, mark failed
+                          ├─> give up after max_nags, mark failed
+                          └─> occasionally start a check-in, only if a goal exists to ask about
 ```
 
-Two design decisions worth keeping:
+Design decisions worth keeping:
 
 **One cron, not one cron per reminder.** Scheduling lives in
 `reminders.next_fire_at`; the tick just asks "what's due?". This is what makes
@@ -35,8 +46,18 @@ of cron triggers.
 
 **The router and the personality are separate calls.** The personality never
 gets write access to the database, and the scheduler never has to sound like a
-form letter. `route()` returns structured JSON at temperature 0; `speak()` takes
-a factual note produced by ordinary TypeScript and dresses it in character.
+form letter. `route()` returns structured JSON at temperature 0; `applyIntent()`
+is ordinary TypeScript that touches the database and returns a list of
+`Effect`s — a typed record of what actually happened.
+
+**The model never originates a fact, only rephrases one.** `voice.ts` renders
+every `Effect` into correct, deterministic Hebrew before the model ever sees it
+— that baseline is what actually gets sent if anything downstream fails. The
+model's only job is making that text sound like נו?; `validate.ts` compares the
+rewrite against the same allow-lists the baseline was built from (times, titles,
+numbers) and discards it if it invented one. A button tap skips the model
+entirely — the effect and its Hebrew are already fully known, so a tap is both
+free of quota and the fastest path in the bot.
 
 ---
 
@@ -84,11 +105,15 @@ npm run db:init
 ```
 
 **Already deployed an earlier version?** `db:init` drops your data. Run the
-migration instead:
+migrations instead, in order, once each:
 
 ```bash
 npx wrangler d1 execute nu-bot --remote --file=./migrations/001_goals.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/002_inbox_and_usage.sql
 ```
+
+`002` adds `reminders.status` (the inbox) and the `usage` table. Re-running it
+errors with "duplicate column name", which is safe to ignore.
 
 ### 4. Secrets
 
@@ -110,7 +135,7 @@ Note the deployed URL, then register it (substitute your token, secret and URL):
 ```bash
 curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -H "content-type: application/json" \
-  -d '{"url":"https://nu-bot.<subdomain>.workers.dev/tg","secret_token":"<WEBHOOK_SECRET>","allowed_updates":["message"]}'
+  -d '{"url":"https://nu-bot.<subdomain>.workers.dev/tg","secret_token":"<WEBHOOK_SECRET>","allowed_updates":["message","callback_query"]}'
 ```
 
 **On Windows PowerShell**, `curl` is an alias for `Invoke-WebRequest` and the
@@ -121,12 +146,25 @@ through literally:
 Invoke-RestMethod -Method Post `
   -Uri "https://api.telegram.org/bot<TOKEN>/setWebhook" `
   -ContentType "application/json" `
-  -Body '{"url":"https://nu-bot.<subdomain>.workers.dev/tg","secret_token":"<WEBHOOK_SECRET>","allowed_updates":["message"]}'
+  -Body '{"url":"https://nu-bot.<subdomain>.workers.dev/tg","secret_token":"<WEBHOOK_SECRET>","allowed_updates":["message","callback_query"]}'
 ```
 
 You should get back `ok: True`. To check it later:
 `Invoke-RestMethod "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"` —
 `last_error_message` is where a broken deploy shows up.
+
+Inline buttons arrive as a different update type from a plain text message, so
+the webhook must explicitly opt in — that's the `"callback_query"` in
+`allowed_updates` above. **If you registered the webhook before this change**
+(or ever registered it without that field), re-register with both:
+
+```json
+{"allowed_updates":["message","callback_query"]}
+```
+
+Without `callback_query` in that list, every button tap is silently dropped —
+no error, no log entry, nothing. It is the single most likely cause of "I
+deployed it and the buttons don't work."
 
 ### 6. Claim the bot
 
@@ -139,6 +177,41 @@ npm run deploy
 ```
 
 From here on, every message from any other chat id is silently dropped.
+
+---
+
+## Model configuration
+
+`wrangler.toml` sets three vars under `[vars]`:
+
+```toml
+GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
+GEMINI_SOFT_LIMIT = "200"
+```
+
+**`gemini-3.5-flash` has not been verified to exist on any particular key** —
+it's a forward-looking pin, not a confirmed-available model id. If it turns out
+not to exist (or is dropped, or renamed), every call to it returns a 404, which
+the bot treats the same as a rate limit: it drops a tier and retries on
+`GEMINI_MODEL_FALLBACK` for that call. Nothing breaks — you just silently run
+on the fallback model until you notice. `/diag` tells you which one actually
+answered and how many calls each has taken today, so it's the first thing to
+check if replies feel off. Verify current model names and free-tier limits at
+[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)
+before relying on either id.
+
+The same 429/503/404 cascade applies to both the router (`route()`) and the
+persona rewrite (`speak()`) — a reminder or nag always gets a real attempt on
+both tiers before it degrades to the deterministic baseline text.
+
+`GEMINI_SOFT_LIMIT` only throttles unprompted check-ins, and only after the
+primary model has been called that many times today (UTC day, tracked in the
+`usage` table): past the limit, a check-in skips the model and sends
+`voice.ts`'s deterministic Hebrew directly instead of paying for a rewrite.
+Reminders, nags, and give-ups are never throttled — the budget priority is
+check-ins first, because a blunt check-in is no worse than none, but a blunt
+reminder would be a regression.
 
 ---
 
@@ -173,13 +246,24 @@ Full command list (`/help` prints it in the chat):
 |---|---|
 | `/list` | Reminders, with next fire time |
 | `/goals` | Ongoing goals + last progress on each |
+| `/inbox` | Things captured without a time — see below |
 | `/stats` | Streak, done, failed |
 | `/chill [hours]` | Total silence, default 4h. Any message from you cancels it. |
 | `/checkins on\|off\|1-8` | How often it starts conversations |
 | `/intensity 1\|2\|3` | Snark dial |
 | `/quiet [start] [end]` | Quiet hours, e.g. `/quiet 23 8` |
 | `/offlimits [text]` | Topics it must never touch. No argument shows current; `clear` wipes. |
-| `/diag` | Health check: model name, whether the key is set, live Gemini + D1 probe |
+| `/diag` | Health check: which model actually answered today and how many times (primary + fallback), rejected-rewrite count, whether the key is set, live Gemini + D1 probe |
+
+## The inbox
+
+If something that looks like a reminder request fails to parse into one — the
+router errored, or the message was ambiguous — it doesn't just vanish. It's
+captured verbatim into the inbox (`reminders.status = 'inbox'`) instead, and
+the reply comes with buttons: *in an hour*, *this evening*, *tomorrow morning*,
+or *no time* (stays in the inbox as a plain note). `/inbox` lists what's
+waiting. This is the fallback for "the model choked but the user clearly asked
+for something" — before it existed, that case was a silently dropped reminder.
 
 ## Unprompted check-ins
 
@@ -248,11 +332,15 @@ touch. Worth doing.
 ## Local development
 
 ```bash
-npm run typecheck
-npm test              # all three suites, no framework
+npm run typecheck     # two projects: tsc --noEmit, then -p tsconfig.test.json
+npm test              # all seven suites below, in order, no framework
 npm run test:time     # recurrence + DST checks
 npm run test:parse    # the deterministic phrase parser
+npm run test:voice    # renderBaseline() — the deterministic Hebrew per Effect
+npm run test:validate # the rewrite-vs-baseline validator
+npm run test:buttons  # callback_data encode/decode + buttonsFor()
 npm run test:bot      # end-to-end: webhook + cron against real SQLite
+npm run test:facts    # buildFacts() allow-lists
 npx wrangler dev      # local Worker; use `npx wrangler tail` for live logs
 ```
 
@@ -267,17 +355,29 @@ ones no unit test sees: a reminder that is marked as fired but never sent, or a
 recurring reminder that quietly becomes a one-off. Every case in it is a bug
 that reached production.
 
+`test/facts.test.ts` exists for a subtler reason: `facts.ts` builds the
+allow-lists `validate.ts` enforces, so a gap there causes a *false rejection*
+— the model rewrite told the truth and got discarded for it anyway. That
+failure mode is invisible in production (the baseline still ships, so nothing
+looks broken) which is exactly why it needs its own test rather than relying
+on `validate.test.ts` to catch it indirectly.
+
 ## Files
 
 | File | Job |
 |---|---|
-| `src/index.ts` | Webhook handler + cron tick + nag loop + check-ins |
+| `src/index.ts` | Webhook handler (messages + button callbacks) + cron tick + nag loop + check-ins |
 | `src/brain.ts` | `route()`, `speak()`, `judgePhoto()` |
+| `src/effects.ts` | `applyIntent()` — intent → database, returns the `Effect[]` that happened |
+| `src/facts.ts` | `buildFacts()` — the allow-lists (times, titles) the validator enforces |
+| `src/voice.ts` | `renderBaseline()` — deterministic, correct Hebrew for every `Effect` |
+| `src/validate.ts` | Rejects a model rewrite that strays from the facts |
+| `src/buttons.ts` | Inline-keyboard `callback_data` encode/decode + which buttons go on which message |
 | `src/persona.ts` | The entire personality |
-| `src/commands.ts` | Intent → database, plus slash commands |
+| `src/slash.ts` | Slash commands (`/list`, `/diag`, `/inbox`, ...), handled without an LLM call |
 | `src/time.ts` | Timezone, recurrence, quiet hours, check-in jitter |
 | `src/db.ts` | D1 queries |
-| `src/gemini.ts` | Gemini REST wrapper |
+| `src/gemini.ts` | Gemini REST wrapper: two-tier model cascade, thinking-config fallback, usage tracking |
 | `src/telegram.ts` | Bot API + message bursting |
 | `schema.sql` | Tables |
 | `migrations/` | Incremental changes for a live database |
