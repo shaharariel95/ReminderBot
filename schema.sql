@@ -80,7 +80,14 @@ CREATE TABLE settings (
   checkin_per_day  INTEGER NOT NULL DEFAULT 2,     -- unprompted messages per waking day
   quiet_start_hour INTEGER NOT NULL DEFAULT 23,    -- no check-ins or nags from here...
   quiet_end_hour   INTEGER NOT NULL DEFAULT 8,     -- ...until here (local time)
-  next_checkin_at  INTEGER
+  next_checkin_at  INTEGER,
+  -- Once-a-day messages. NULL hour = switched off. The "last sent on" columns
+  -- hold a LOCAL date (YYYY-MM-DD), not a timestamp: an epoch comparison sends
+  -- the brief twice on the day the clocks go back.
+  brief_hour       INTEGER DEFAULT 8,
+  closeout_hour    INTEGER DEFAULT 21,
+  last_brief_on    TEXT,
+  last_closeout_on TEXT
 );
 
 -- One row per model per day. Small, and it lets /diag tell the truth about quota.

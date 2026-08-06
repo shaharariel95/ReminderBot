@@ -83,6 +83,15 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     if (e.kind === 'listed_goals' || e.kind === 'listed_inbox') {
       for (const r of e.rows) titles.add(r.title);
     }
+    if (e.kind === 'morning_brief') {
+      for (const r of e.rows) {
+        titles.add(r.title);
+        addTime(r.next_fire_at);
+      }
+    }
+    if (e.kind === 'evening_closeout') {
+      for (const i of e.missed) titles.add(i.title);
+    }
     if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
     if (e.kind === 'checkin_goal') addQuotable(e.lastProgress);
     if (e.kind === 'goal_progress') {

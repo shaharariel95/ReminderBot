@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Run with `npm run test:bot`.
  *
  * End-to-end reproductions of the four reported failures. Each block names the
@@ -59,11 +59,17 @@ async function runUpdate(rig: Rig, update: unknown): Promise<void> {
 }
 
 function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
+  // brief_hour/closeout_hour default to NULL — i.e. OFF — rather than to the
+  // schema defaults of 08:00/21:00. Otherwise every cron test in this file
+  // would additionally send a morning brief or an evening close-out depending
+  // on what time of day the suite happened to run, and half of them would
+  // start failing at 08:01. Tests that want those messages ask for them.
   rig.db
     .prepare(
       `INSERT INTO settings (chat_id, tz, intensity, checkins_enabled, checkin_per_day,
-                             quiet_start_hour, quiet_end_hour, next_checkin_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                             quiet_start_hour, quiet_end_hour, next_checkin_at,
+                             brief_hour, closeout_hour, last_brief_on, last_closeout_on)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       CHAT,
@@ -74,6 +80,10 @@ function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
       over.quiet_start_hour ?? 23,
       over.quiet_end_hour ?? 8,
       (over.next_checkin_at ?? null) as any,
+      (over.brief_hour ?? null) as any,
+      (over.closeout_hour ?? null) as any,
+      (over.last_brief_on ?? null) as any,
+      (over.last_closeout_on ?? null) as any,
     );
 }
 
@@ -245,6 +255,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const prompt = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');
@@ -641,6 +652,119 @@ async function main() {
     for (const id of openIds) {
       check(`instance ${id} has its own "done" button`, markup.includes(`"d:${id}"`), markup);
     }
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('the morning brief lists today, once, and only once');
+  {
+    const rig = createRig();
+    // 08:40 local, inside the brief hour's grace window.
+    const morning = wallToUtc(2026, 8, 7, 8, 40, TZ);
+    seedSettings(rig, { brief_hour: 8 });
+    seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 7, 17, 0, TZ));
+    seedReminder(rig, 'להתקשר לרואה חשבון', wallToUtc(2026, 8, 7, 19, 30, TZ));
+    // Tomorrow — must not appear in today's brief.
+    seedReminder(rig, 'משהו של מחר', wallToUtc(2026, 8, 8, 9, 0, TZ));
+    rig.geminiDown = true;
+
+    await withNow(morning, async () => {
+      await runCron(rig);
+      const text = rig.texts().join('\n');
+      check('the brief names both of today\'s reminders',
+        text.includes('לרוץ') && text.includes('להתקשר לרואה חשבון'), text);
+      check('and states their times', text.includes('17:00') && text.includes('19:30'), text);
+      check('tomorrow is not in it', !text.includes('משהו של מחר'), text);
+
+      const before = rig.texts().length;
+      await runCron(rig);
+      eq('a second tick the same morning sends nothing more', rig.texts().length, before);
+    });
+    rig.restore();
+  }
+
+  section('a brief hours late is dropped, not delivered as "בוקר" in the afternoon');
+  {
+    const rig = createRig();
+    seedSettings(rig, { brief_hour: 8 });
+    seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 7, 17, 0, TZ));
+    rig.geminiDown = true;
+
+    // 14:00 — the worker was down all morning. Sending now would open with
+    // "בוקר" six hours late, which is worse than skipping the day.
+    await withNow(wallToUtc(2026, 8, 7, 14, 0, TZ), async () => {
+      await runCron(rig);
+      eq('nothing is sent outside the grace window', rig.texts().length, 0);
+    });
+    rig.restore();
+  }
+
+  section('the evening close-out reports the day and offers one tap per miss');
+  {
+    const rig = createRig();
+    const evening = wallToUtc(2026, 8, 7, 21, 10, TZ);
+    seedSettings(rig, { closeout_hour: 21 });
+    // The reminder already fired at 19:00 and its instance is still open, so
+    // its next firing is tomorrow — seeding it as still due would make it fire
+    // again during this very tick and put another message ahead of the
+    // close-out.
+    const remId = seedReminder(rig, 'לזרוק זבל', wallToUtc(2026, 8, 8, 19, 0, TZ));
+    const openId = seedInstance(rig, remId, 'לזרוק זבל', wallToUtc(2026, 8, 7, 19, 0, TZ));
+    // One task closed earlier today, so the tally has something to report.
+    const doneRem = seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 8, 7, 0, TZ));
+    const doneInst = seedInstance(rig, doneRem, 'לרוץ', wallToUtc(2026, 8, 7, 7, 0, TZ));
+    rig.db.prepare("UPDATE instances SET status='done', closed_at=? WHERE id=?")
+      .run(wallToUtc(2026, 8, 7, 7, 30, TZ), doneInst);
+    rig.geminiDown = true;
+
+    await withNow(evening, async () => {
+      await runCron(rig);
+      const text = rig.texts().join('\n');
+      check('it names what is still open', text.includes('לזרוק זבל'), text);
+      check('and counts what was closed', text.includes('1'), text);
+
+      const markup = JSON.stringify(rig.sent.map((s) => s.markup ?? null));
+      check('the still-open task has a one-tap "tomorrow" button',
+        markup.includes(`m:${openId}`), markup);
+    });
+    rig.restore();
+  }
+
+  section('"tomorrow" on a miss moves a one-off, but never breaks a recurring rule');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const firedAt = wallToUtc(2026, 8, 7, 19, 0, TZ);
+    const onceId = seedReminder(rig, 'לזרוק זבל', firedAt);
+    const onceInst = seedInstance(rig, onceId, 'לזרוק זבל', firedAt);
+
+    await withNow(wallToUtc(2026, 8, 7, 21, 10, TZ), async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `m:${onceInst}`));
+    });
+
+    eq('the missed instance is closed, not left hanging',
+      instances(rig).find((i) => i.id === onceInst)?.status, 'skipped');
+    eq('and the one-off reminder now points at the same time tomorrow',
+      reminders(rig).find((r) => r.id === onceId)?.next_fire_at,
+      wallToUtc(2026, 8, 8, 19, 0, TZ));
+  }
+  {
+    // The dangerous case: overwriting a daily rule with a one-off would end
+    // the recurrence silently. The tap must close the instance and stop there.
+    const rig = createRig();
+    seedSettings(rig);
+    const firedAt = wallToUtc(2026, 8, 7, 19, 0, TZ);
+    const dailySchedule = '{"type":"daily","time":"19:00"}';
+    const dailyId = seedReminder(rig, 'לקחת כדור', wallToUtc(2026, 8, 8, 19, 0, TZ), dailySchedule);
+    const dailyInst = seedInstance(rig, dailyId, 'לקחת כדור', firedAt);
+
+    await withNow(wallToUtc(2026, 8, 7, 21, 10, TZ), async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `m:${dailyInst}`));
+    });
+
+    eq('the instance is still closed', instances(rig).find((i) => i.id === dailyInst)?.status, 'skipped');
+    eq('but the daily rule is untouched',
+      reminders(rig).find((r) => r.id === dailyId)?.schedule, dailySchedule);
     rig.restore();
   }
 
@@ -1050,6 +1174,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const p = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');

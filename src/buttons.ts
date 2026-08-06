@@ -14,7 +14,9 @@ export type Callback =
   | { t: 'snooze'; instance: number; minutes: number }
   | { t: 'skip'; instance: number }
   | { t: 'retime'; reminder: number; hour: number; minute: number }
-  | { t: 'plan'; reminder: number; slot: PlanSlot };
+  | { t: 'plan'; reminder: number; slot: PlanSlot }
+  /** From the evening close-out: drop today's attempt and try again tomorrow. */
+  | { t: 'tomorrow'; instance: number };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
@@ -32,6 +34,8 @@ export function encode(c: Callback): string {
       return `r:${c.reminder}:${String(c.hour).padStart(2, '0')}:${String(c.minute).padStart(2, '0')}`;
     case 'plan':
       return `p:${c.reminder}:${c.slot}`;
+    case 'tomorrow':
+      return `m:${c.instance}`;
   }
 }
 
@@ -42,6 +46,8 @@ export function decode(s: string): Callback | null {
       return parts.length === 2 && isNat(parts[1]) ? { t: 'done', instance: +parts[1] } : null;
     case 'x':
       return parts.length === 2 && isNat(parts[1]) ? { t: 'skip', instance: +parts[1] } : null;
+    case 'm':
+      return parts.length === 2 && isNat(parts[1]) ? { t: 'tomorrow', instance: +parts[1] } : null;
     case 's':
       return parts.length === 3 && isNat(parts[1]) && isNat(parts[2])
         ? { t: 'snooze', instance: +parts[1], minutes: +parts[2] }
@@ -146,6 +152,19 @@ export function buttonsFor(
         },
       ],
     ];
+  }
+
+  // The close-out's whole point is that a miss costs one tap, not a re-typed
+  // reminder. One row per item still open at the end of the day.
+  const closeout = effects.find((e) => e.kind === 'evening_closeout');
+  if (closeout) {
+    const missed = Array.isArray(closeout.missed) ? closeout.missed : [];
+    const rows = missed.flatMap((m: { id?: unknown; title?: unknown }) => {
+      const instance = positiveId(m?.id);
+      if (instance === null) return [];
+      return [[{ text: `מחר · ${shortLabel(m?.title)}`, data: { t: 'tomorrow', instance } }] as Button[]];
+    });
+    return rows.length ? rows : undefined;
   }
 
   const captured = effects.find((e) => e.kind === 'reminder_captured');

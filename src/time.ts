@@ -207,6 +207,29 @@ export function wallString(ts: number, tz: string): string {
   return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
 }
 
+/**
+ * "2026-08-07" — the local calendar day an instant falls on.
+ *
+ * The once-a-day messages key off this rather than off a timestamp, because
+ * "has today's brief been sent" is a question about the user's calendar, not
+ * about elapsed hours: a 24-hour comparison sends it twice on the day the
+ * clocks go back and skips it on the day they go forward.
+ */
+export function localDateKey(ts: number, tz: string): string {
+  const p = wallParts(ts, tz);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
+/** Start of the local day containing `ts`, and the start of the next one. */
+export function localDayBounds(ts: number, tz: string): { from: number; to: number } {
+  const p = wallParts(ts, tz);
+  return {
+    from: wallToUtc(p.year, p.month, p.day, 0, 0, tz),
+    to: wallToUtc(p.year, p.month, p.day + 1, 0, 0, tz),
+  };
+}
+
 export function describeSchedule(schedule: Schedule): string {
   const names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   switch (schedule.type) {

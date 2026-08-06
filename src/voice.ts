@@ -131,6 +131,32 @@ function one(e: Effect, tz: string): string {
       return `התקבל: "${e.title}" — ${e.reason}. רצף ${e.streak}.`;
     case 'photo_rejected':
       return `זה לא "${e.title}". רואים ${e.reason}. המשימה עדיין פתוחה.`;
+    case 'morning_brief': {
+      if (!e.rows.length) {
+        return e.openCount
+          ? `בוקר. אין כלום מתוזמן להיום, אבל ${e.openCount} עדיין פתוחות מאתמול.`
+          : 'בוקר. היום ריק. אם יש משהו, תגיד עכשיו.';
+      }
+      const lines = e.rows.map((r) => {
+        const name = untitled(r.title) ? 'משהו שלא אמרת מה זה' : r.title;
+        return `· ${r.next_fire_at ? `${hhmm(r.next_fire_at, tz)} ` : ''}${name}`;
+      });
+      const tail = e.openCount ? `\nועוד ${e.openCount} פתוחות מאתמול.` : '';
+      return `בוקר. היום יש לך ${e.rows.length}:\n${lines.join('\n')}${tail}`;
+    }
+    case 'evening_closeout': {
+      const closed = e.done === 0 ? 'לא סגרת כלום היום' : `סגרת ${e.done} היום`;
+      if (!e.missed.length) {
+        return e.failed
+          ? `${closed}. ${e.failed} נפלו. מחר.`
+          : `${closed}. אין זנבות.`;
+      }
+      const lines = e.missed.map((i) => {
+        const name = untitled(i.title) ? 'משהו שלא אמרת מה זה' : i.title;
+        return `· ${name}`;
+      });
+      return `${closed}. עדיין פתוח:\n${lines.join('\n')}`;
+    }
     case 'distress':
       return 'אני פה. מה קורה?';
     case 'nothing':

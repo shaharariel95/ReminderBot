@@ -16,6 +16,13 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
       quiet_start_hour: row.quiet_start_hour ?? 23,
       quiet_end_hour: row.quiet_end_hour ?? 8,
       next_checkin_at: row.next_checkin_at ?? null,
+      // A database that hasn't run migrations/003 reads these as undefined.
+      // `?? null` means "switched off" there, which is the safe degradation:
+      // no brief at all beats a brief at an hour nobody chose.
+      brief_hour: row.brief_hour ?? null,
+      closeout_hour: row.closeout_hour ?? null,
+      last_brief_on: row.last_brief_on ?? null,
+      last_closeout_on: row.last_closeout_on ?? null,
     };
   }
   const fresh: Settings = {
@@ -29,6 +36,10 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
     quiet_start_hour: 23,
     quiet_end_hour: 8,
     next_checkin_at: null,
+    brief_hour: 8,
+    closeout_hour: 21,
+    last_brief_on: null,
+    last_closeout_on: null,
   };
   await env.DB.prepare('INSERT OR IGNORE INTO settings (chat_id, tz) VALUES (?, ?)')
     .bind(chatId, fresh.tz)
@@ -216,6 +227,79 @@ export async function listReminders(env: Env, chatId: string): Promise<Reminder[
     .bind(chatId)
     .all<Reminder>();
   return res.results ?? [];
+}
+
+/** Scheduled reminders whose next firing falls inside [from, to). */
+export async function remindersBetween(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminders
+      WHERE chat_id = ? AND status = 'scheduled'
+        AND next_fire_at IS NOT NULL AND next_fire_at >= ? AND next_fire_at < ?
+      ORDER BY next_fire_at`,
+  )
+    .bind(chatId, from, to)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
+/** How the instances that CLOSED inside [from, to) turned out. */
+export async function dayTally(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<{ done: number; failed: number; skipped: number }> {
+  const res = await env.DB.prepare(
+    `SELECT status, COUNT(*) AS n FROM instances
+      WHERE chat_id = ? AND closed_at IS NOT NULL AND closed_at >= ? AND closed_at < ?
+      GROUP BY status`,
+  )
+    .bind(chatId, from, to)
+    .all<{ status: string; n: number }>();
+  const tally = { done: 0, failed: 0, skipped: 0 };
+  for (const row of res.results ?? []) {
+    if (row.status === 'done') tally.done = row.n;
+    else if (row.status === 'failed') tally.failed = row.n;
+    else if (row.status === 'skipped') tally.skipped = row.n;
+  }
+  return tally;
+}
+
+/**
+ * Record that a once-a-day message went out for local date `day`.
+ * Written BEFORE the send in tick(), deliberately: a failed send costs one
+ * message, whereas a failed write would repeat that message every minute for
+ * the rest of the day.
+ */
+/** Set (or with nulls, switch off) the two once-a-day messages. */
+export async function setDailyHours(
+  env: Env,
+  chatId: string,
+  briefHour: number | null,
+  closeoutHour: number | null,
+): Promise<void> {
+  await env.DB.prepare(
+    'UPDATE settings SET brief_hour = ?, closeout_hour = ? WHERE chat_id = ?',
+  )
+    .bind(briefHour, closeoutHour, chatId)
+    .run();
+}
+
+export async function markDailySent(
+  env: Env,
+  chatId: string,
+  which: 'brief' | 'closeout',
+  day: string,
+): Promise<void> {
+  const column = which === 'brief' ? 'last_brief_on' : 'last_closeout_on';
+  await env.DB.prepare(`UPDATE settings SET ${column} = ? WHERE chat_id = ?`)
+    .bind(day, chatId)
+    .run();
 }
 
 export async function deleteReminder(env: Env, chatId: string, id: number): Promise<boolean> {

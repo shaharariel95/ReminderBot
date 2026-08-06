@@ -82,6 +82,12 @@ export interface Settings {
   quiet_start_hour: number;
   quiet_end_hour: number;
   next_checkin_at: number | null;
+  /** Local hour for the once-a-day messages; null switches one off. */
+  brief_hour: number | null;
+  closeout_hour: number | null;
+  /** Local date (YYYY-MM-DD) each was last sent on — see migrations/003. */
+  last_brief_on: string | null;
+  last_closeout_on: string | null;
 }
 
 export interface Stats {
@@ -205,6 +211,10 @@ export type Effect =
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
   | { kind: 'photo_accepted'; instanceId: number; title: string; reason: string; streak: number }
   | { kind: 'photo_rejected'; instanceId: number; title: string; reason: string }
+  /** The once-a-day messages. Neither writes anything the user could be told
+   *  about, so neither belongs in WROTE — they only describe existing rows. */
+  | { kind: 'morning_brief'; rows: Reminder[]; openCount: number }
+  | { kind: 'evening_closeout'; done: number; failed: number; missed: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
   | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };

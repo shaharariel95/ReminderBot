@@ -39,6 +39,8 @@ const samples: Effect[] = [
   { kind: 'checkin_goal', id: 3, title: 'לפתוח תיק מסחר', why: null, lastProgress: null, lastProgressAt: null, lastCheckinAt: null },
   { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
   { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
+  { kind: 'morning_brief', rows: [], openCount: 0 },
+  { kind: 'evening_closeout', done: 0, failed: 0, missed: [] },
   { kind: 'distress', text: 'אני שבור' },
   { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
   { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },
@@ -170,6 +172,41 @@ section('reminders due together render as one block, not one message each');
   );
   check('a mixed tick is not collapsed into the group wording',
     mixed.includes('לרוץ') && mixed.includes('\n\n'), mixed);
+}
+
+section('the daily messages describe the day without claiming to have changed it');
+{
+  const reminder = (id: number, title: string, at: number) => ({
+    id, chat_id: '1', title, notes: null, schedule: '{"type":"once","at":"x"}',
+    tz: TZ, requires_proof: 0, proof_type: 'any' as const, nag_interval_min: 20,
+    max_nags: 3, next_fire_at: at, status: 'scheduled' as const, active: 1, created_at: 0,
+  });
+  const brief = renderBaseline([{
+    kind: 'morning_brief',
+    rows: [reminder(1, 'לרוץ', AT), reminder(2, 'להתקשר לרואה חשבון', AT + 3_600_000)],
+    openCount: 1,
+  }], TZ);
+  check('the brief names every reminder', brief.includes('לרוץ') && brief.includes('להתקשר לרואה חשבון'), brief);
+  check('and states the time of each', brief.includes('07:05') && brief.includes('08:05'), brief);
+  check('and mentions what is still open from before', brief.includes('1'), brief);
+  // morning_brief is NOT in WROTE — it reads rows, it does not write any.
+  check('the brief claims no write', !CLAIM.test(brief), brief);
+  check('an empty day still says something rather than nothing',
+    renderBaseline([{ kind: 'morning_brief', rows: [], openCount: 0 }], TZ).trim().length > 0);
+
+  const closeout = renderBaseline([{
+    kind: 'evening_closeout', done: 2, failed: 0,
+    missed: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null }],
+  }], TZ);
+  check('the close-out counts what was closed', closeout.includes('2'), closeout);
+  check('and names what was not', closeout.includes('לזרוק זבל'), closeout);
+  check('the close-out claims no write', !CLAIM.test(closeout), closeout);
+
+  const clean = renderBaseline([{ kind: 'evening_closeout', done: 3, failed: 0, missed: [] }], TZ);
+  check('a day with no loose ends says so', clean.includes('אין זנבות'), clean);
+  const nothing = renderBaseline([{ kind: 'evening_closeout', done: 0, failed: 0, missed: [] }], TZ);
+  check('and a day with nothing closed does not pretend otherwise',
+    nothing.includes('לא סגרת כלום'), nothing);
 }
 
 section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
