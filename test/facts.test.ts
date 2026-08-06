@@ -1,4 +1,4 @@
-/** Run with `npm run test:facts`. */
+﻿/** Run with `npm run test:facts`. */
 import { buildFacts } from '../src/facts';
 import { wallToUtc } from '../src/time';
 import { check, done, eq, section } from './harness';
@@ -12,6 +12,7 @@ const settings: Settings = {
   chat_id: '1', tz: TZ, intensity: 2, muted_until: null, off_limits: null,
   checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
   next_checkin_at: null,
+  brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
 };
 const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 3 };
 
@@ -71,6 +72,28 @@ section('duplicateOf.title — the trap: a nested title must still reach facts.t
     f.titles.includes('לקחת בגד ים לחוף'),
     `titles: ${JSON.stringify(f.titles)}`,
   );
+}
+
+section('reminder_renamed — the same trap, twice: neither title sits under `title`');
+{
+  // A rename carries `from` and `to`, so the generic `'title' in e` sweep finds
+  // NEITHER. Without the explicit line in facts.ts, the one sentence the bot
+  // most needs to say here — "X is now Y" — cites two titles the validator has
+  // never heard of and gets thrown away, falling back to the baseline.
+  const renamed: Effect = { kind: 'reminder_renamed', id: 3, from: 'לקנות חלב', to: 'לקנות לחם' };
+  const f = buildFacts(ctx(), [renamed], TZ);
+  check('the OLD title is quotable', f.titles.includes('לקנות חלב'), `titles: ${JSON.stringify(f.titles)}`);
+  check('the NEW title is quotable', f.titles.includes('לקנות לחם'), `titles: ${JSON.stringify(f.titles)}`);
+}
+
+section('needs_reminder_choice — the candidates it lists must be quotable');
+{
+  const rows = [daily, { ...daily, id: 8, title: 'לרוץ' }];
+  const f = buildFacts(ctx(), [{ kind: 'needs_reminder_choice', action: 'reschedule', rows }], TZ);
+  check('the first candidate is allowed', f.titles.includes('להתקשר לרואה חשבון'));
+  check('the second candidate is allowed', f.titles.includes('לרוץ'));
+  eq('and asking a question is not a write',
+    buildFacts(ctx(), [{ kind: 'needs_reminder_choice', action: 'rename', rows: [] }], TZ).wrote, false);
 }
 
 section('needs_task_choice — instance titles come from ctx.open, already swept');

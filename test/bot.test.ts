@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Run with `npm run test:bot`.
  *
  * End-to-end reproductions of the four reported failures. Each block names the
@@ -59,11 +59,17 @@ async function runUpdate(rig: Rig, update: unknown): Promise<void> {
 }
 
 function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
+  // brief_hour/closeout_hour default to NULL — i.e. OFF — rather than to the
+  // schema defaults of 08:00/21:00. Otherwise every cron test in this file
+  // would additionally send a morning brief or an evening close-out depending
+  // on what time of day the suite happened to run, and half of them would
+  // start failing at 08:01. Tests that want those messages ask for them.
   rig.db
     .prepare(
       `INSERT INTO settings (chat_id, tz, intensity, checkins_enabled, checkin_per_day,
-                             quiet_start_hour, quiet_end_hour, next_checkin_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                             quiet_start_hour, quiet_end_hour, next_checkin_at,
+                             brief_hour, closeout_hour, last_brief_on, last_closeout_on)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       CHAT,
@@ -74,6 +80,10 @@ function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
       over.quiet_start_hour ?? 23,
       over.quiet_end_hour ?? 8,
       (over.next_checkin_at ?? null) as any,
+      (over.brief_hour ?? null) as any,
+      (over.closeout_hour ?? null) as any,
+      (over.last_brief_on ?? null) as any,
+      (over.last_closeout_on ?? null) as any,
     );
 }
 
@@ -167,18 +177,29 @@ async function main() {
   // ------------------------------------------------------------------------
   section('BUG 3b — Hebrew recurring reminders must not become one-shot');
   {
+    // These used to be fast-pathed into ONE-OFF reminders that rang once and
+    // switched themselves off, because the guard meant to catch them used a
+    // `\b` that can never match before a Hebrew letter. They are now parsed as
+    // recurring rules outright rather than merely detected and routed — but the
+    // property under test is unchanged and is the one that matters: a request
+    // that repeats must never be stored as a schedule that does not.
     const now = Date.now();
-    for (const phrase of [
-      'תזכיר לי כל בוקר ב-7:05 לקום',
-      'תזכיר לי כל יום ב-22:30 לקחת כדור',
-      'תזכיר לי כל שני ב-20:00 להוציא זבל',
-      'תזכיר לי כל ערב ב-21:00 ללמוד',
-    ]) {
+    for (const [phrase, type] of [
+      ['תזכיר לי כל בוקר ב-7:05 לקום', 'daily'],
+      ['תזכיר לי כל יום ב-22:30 לקחת כדור', 'daily'],
+      ['תזכיר לי כל שני ב-20:00 להוציא זבל', 'weekly'],
+      ['תזכיר לי כל ערב ב-21:00 ללמוד', 'daily'],
+    ] as const) {
       const got = quickParse(phrase, now, TZ);
       check(
-        `"${phrase}" falls through to the router instead of a one-off`,
-        got === null,
-        `quickparse turned a recurring request into ${JSON.stringify(got)}`,
+        `"${phrase}" is never turned into a one-off`,
+        got === null || got.schedule_type === type,
+        `quickparse produced ${JSON.stringify(got)}`,
+      );
+      check(
+        `"${phrase}" carries no one-shot fields`,
+        got === null || (got.once_at === undefined && got.in_minutes === undefined),
+        `quickparse produced ${JSON.stringify(got)}`,
       );
     }
   }
@@ -245,6 +266,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const prompt = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');
@@ -586,22 +608,274 @@ async function main() {
     seedSettings(rig);
     seedReminder(rig, 'משימה א', Date.now() - 2000);
     seedReminder(rig, 'משימה ב', Date.now() - 1000);
-    rig.speakQueue.push('נו? משימה א.');
-    rig.speakQueue.push('נו? משימה ב.');
+    rig.speakQueue.push('נו? שתי משימות: משימה א, משימה ב.');
 
     await runCron(rig);
 
     const speakCalls = rig.geminiCalls.filter((c) => c.kind === 'speak');
-    eq('one speak call per due reminder', speakCalls.length, 2);
+    // Reminders coming due together are now one message, so the shape of the
+    // staleness question changed: instead of "does the SECOND send see the
+    // first's write", it is "does the single send see BOTH". Same invariant,
+    // stronger form — every instance is committed before the context is built.
+    eq('due reminders in one tick are spoken once, not once each', speakCalls.length, 1);
 
     const openSection = (system: string) =>
       system.split('משימות פתוחות שנשלחו אליו')[1]?.split('המטרות המתמשכות')[0] ?? '';
+    const open = openSection(speakCalls[0]?.system ?? '');
 
     check(
-      'the second reminder\'s context already shows the first reminder\'s instance as open — not stale from before this tick\'s writes',
-      openSection(speakCalls[1]?.system ?? '').includes('משימה א'),
-      `second call's open section: ${openSection(speakCalls[1]?.system ?? '')}`,
+      "the send's context already shows the FIRST reminder's instance as open — not stale from before this tick's writes",
+      open.includes('משימה א'),
+      `open section: ${open}`,
     );
+    check(
+      "and the SECOND one's too — both were committed before the context was built",
+      open.includes('משימה ב'),
+      `open section: ${open}`,
+    );
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('two reminders due at the same time arrive as one message, with buttons for each');
+  {
+    // The reported shape: 07:00 with "take food" and "throw out the rubbish"
+    // used to be two near-identical pings seconds apart, and buttonsFor used
+    // `.find()`, so only the first task was actually actionable.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לקחת אוכל', Date.now() - 2000);
+    seedReminder(rig, 'לזרוק זבל', Date.now() - 1000);
+    rig.geminiDown = true; // force the deterministic baseline, so this pins voice.ts
+
+    await runCron(rig);
+
+    const texts = rig.texts();
+    eq('one message, not one per reminder', texts.length, 1);
+    check('it names both tasks', texts[0].includes('לקחת אוכל') && texts[0].includes('לזרוק זבל'),
+      `got: ${texts[0]}`);
+
+    const markup = JSON.stringify(
+      rig.sent.find((s) => s.method === 'sendMessage')?.markup ?? null,
+    );
+    const openIds = instances(rig).map((i: any) => i.id);
+    eq('both reminders produced an instance', openIds.length, 2);
+    for (const id of openIds) {
+      check(`instance ${id} has its own "done" button`, markup.includes(`"d:${id}"`), markup);
+    }
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('the hour-correction button fixes the hour without ending a recurrence');
+  {
+    // "כל יום ב-7" is ambiguous, so it offers [לא, 19:00]. That button used to
+    // write a `once` schedule unconditionally — one tap and a daily habit
+    // became a single reminder tomorrow evening, silently. Correcting the HOUR
+    // must never change the KIND.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000, '{"type":"daily","time":"07:00"}');
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:19:00`));
+
+    const after = reminders(rig).find((r) => r.id === id)!;
+    const schedule = JSON.parse(after.schedule);
+    eq('it is still a daily reminder', schedule.type, 'daily');
+    eq('and the hour is the corrected one', schedule.time, '19:00');
+    rig.restore();
+  }
+  {
+    // A weekly rule keeps its days as well as its type.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לשלם', Date.now() + 3_600_000, '{"type":"weekly","time":"09:00","days":[1,3]}');
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:21:00`));
+
+    const schedule = JSON.parse(reminders(rig).find((r) => r.id === id)!.schedule);
+    eq('still weekly', schedule.type, 'weekly');
+    eq('same days', JSON.stringify(schedule.days), '[1,3]');
+    eq('corrected hour', schedule.time, '21:00');
+    rig.restore();
+  }
+  {
+    // And a genuine one-off still behaves exactly as before.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000);
+
+    await runUpdate(rig, callbackUpdate(CHAT, `r:${id}:19:00`));
+
+    const schedule = JSON.parse(reminders(rig).find((r) => r.id === id)!.schedule);
+    eq('a one-off stays a one-off', schedule.type, 'once');
+    check('pointing at the corrected hour', String(schedule.at).endsWith('T19:00'), schedule.at);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('the per-minute governor spends its last calls on routing, not on wording');
+  {
+    // The free tier limits requests per MINUTE, and the old guard counted per
+    // DAY — so it never fired and a burst just ate 429s. With one call left,
+    // the reminder must still be created; only the personality is sacrificed.
+    const rig = createRig();
+    seedSettings(rig);
+    // Budget 10/minute, 7 already spent. Routing (ceiling 10) still fits at 8;
+    // wording (ceiling 7, being decorative) does not. The numbers are chosen so
+    // that a call is refused ONLY because of the decorative discount — with a
+    // flat ceiling both would go through, which is exactly the regression this
+    // pins.
+    const frozen = wallToUtc(2026, 8, 7, 12, 0, TZ);
+    rig.env.GEMINI_RPM = '10';
+    rig.db
+      .prepare('INSERT INTO rate_window (bucket, calls) VALUES (?, 7)')
+      .run(`${new Date(frozen).toISOString().slice(0, 16)}|${rig.env.GEMINI_MODEL}`);
+
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'לרוץ', schedule_type: 'daily', time: '07:00' }],
+    });
+    rig.speakQueue.push('this must never be reached');
+
+    await withNow(frozen, async () => {
+      // "כל יומיים" is a repeat in DAYS, which quickparse deliberately refuses
+      // to express — so this genuinely reaches the router. (A phrase quickparse
+      // handles itself would make this test vacuous: no model call to squeeze.)
+      await runWebhook(rig, 'תזכיר לי כל יומיים לשלם');
+    });
+
+    const kinds = rig.geminiCalls.map((c) => c.kind);
+    check('the router was still consulted', kinds.includes('router'), JSON.stringify(kinds));
+    check('but the decorative speak call was dropped', !kinds.includes('speak'), JSON.stringify(kinds));
+    eq('the reminder exists — the write survived the squeeze', reminders(rig).length, 1);
+    check('and he was still told, in the deterministic voice',
+      rig.texts().join('\n').includes('לרוץ'), JSON.stringify(rig.texts()));
+    rig.restore();
+  }
+
+  section('a used-up minute stops calling the model at all');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.env.GEMINI_RPM = '0.5'; // below 1: even the first non-decorative call is over
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+
+    await runWebhook(rig, 'תזכיר לי כל יומיים לשלם');
+    eq('no request was made to the model', rig.geminiCalls.length, 0);
+    check('and the bot still answered', rig.texts().length > 0, JSON.stringify(rig.texts()));
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('the morning brief lists today, once, and only once');
+  {
+    const rig = createRig();
+    // 08:40 local, inside the brief hour's grace window.
+    const morning = wallToUtc(2026, 8, 7, 8, 40, TZ);
+    seedSettings(rig, { brief_hour: 8 });
+    seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 7, 17, 0, TZ));
+    seedReminder(rig, 'להתקשר לרואה חשבון', wallToUtc(2026, 8, 7, 19, 30, TZ));
+    // Tomorrow — must not appear in today's brief.
+    seedReminder(rig, 'משהו של מחר', wallToUtc(2026, 8, 8, 9, 0, TZ));
+    rig.geminiDown = true;
+
+    await withNow(morning, async () => {
+      await runCron(rig);
+      const text = rig.texts().join('\n');
+      check('the brief names both of today\'s reminders',
+        text.includes('לרוץ') && text.includes('להתקשר לרואה חשבון'), text);
+      check('and states their times', text.includes('17:00') && text.includes('19:30'), text);
+      check('tomorrow is not in it', !text.includes('משהו של מחר'), text);
+
+      const before = rig.texts().length;
+      await runCron(rig);
+      eq('a second tick the same morning sends nothing more', rig.texts().length, before);
+    });
+    rig.restore();
+  }
+
+  section('a brief hours late is dropped, not delivered as "בוקר" in the afternoon');
+  {
+    const rig = createRig();
+    seedSettings(rig, { brief_hour: 8 });
+    seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 7, 17, 0, TZ));
+    rig.geminiDown = true;
+
+    // 14:00 — the worker was down all morning. Sending now would open with
+    // "בוקר" six hours late, which is worse than skipping the day.
+    await withNow(wallToUtc(2026, 8, 7, 14, 0, TZ), async () => {
+      await runCron(rig);
+      eq('nothing is sent outside the grace window', rig.texts().length, 0);
+    });
+    rig.restore();
+  }
+
+  section('the evening close-out reports the day and offers one tap per miss');
+  {
+    const rig = createRig();
+    const evening = wallToUtc(2026, 8, 7, 21, 10, TZ);
+    seedSettings(rig, { closeout_hour: 21 });
+    // The reminder already fired at 19:00 and its instance is still open, so
+    // its next firing is tomorrow — seeding it as still due would make it fire
+    // again during this very tick and put another message ahead of the
+    // close-out.
+    const remId = seedReminder(rig, 'לזרוק זבל', wallToUtc(2026, 8, 8, 19, 0, TZ));
+    const openId = seedInstance(rig, remId, 'לזרוק זבל', wallToUtc(2026, 8, 7, 19, 0, TZ));
+    // One task closed earlier today, so the tally has something to report.
+    const doneRem = seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 8, 7, 0, TZ));
+    const doneInst = seedInstance(rig, doneRem, 'לרוץ', wallToUtc(2026, 8, 7, 7, 0, TZ));
+    rig.db.prepare("UPDATE instances SET status='done', closed_at=? WHERE id=?")
+      .run(wallToUtc(2026, 8, 7, 7, 30, TZ), doneInst);
+    rig.geminiDown = true;
+
+    await withNow(evening, async () => {
+      await runCron(rig);
+      const text = rig.texts().join('\n');
+      check('it names what is still open', text.includes('לזרוק זבל'), text);
+      check('and counts what was closed', text.includes('1'), text);
+
+      const markup = JSON.stringify(rig.sent.map((s) => s.markup ?? null));
+      check('the still-open task has a one-tap "tomorrow" button',
+        markup.includes(`m:${openId}`), markup);
+    });
+    rig.restore();
+  }
+
+  section('"tomorrow" on a miss moves a one-off, but never breaks a recurring rule');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const firedAt = wallToUtc(2026, 8, 7, 19, 0, TZ);
+    const onceId = seedReminder(rig, 'לזרוק זבל', firedAt);
+    const onceInst = seedInstance(rig, onceId, 'לזרוק זבל', firedAt);
+
+    await withNow(wallToUtc(2026, 8, 7, 21, 10, TZ), async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `m:${onceInst}`));
+    });
+
+    eq('the missed instance is closed, not left hanging',
+      instances(rig).find((i) => i.id === onceInst)?.status, 'skipped');
+    eq('and the one-off reminder now points at the same time tomorrow',
+      reminders(rig).find((r) => r.id === onceId)?.next_fire_at,
+      wallToUtc(2026, 8, 8, 19, 0, TZ));
+  }
+  {
+    // The dangerous case: overwriting a daily rule with a one-off would end
+    // the recurrence silently. The tap must close the instance and stop there.
+    const rig = createRig();
+    seedSettings(rig);
+    const firedAt = wallToUtc(2026, 8, 7, 19, 0, TZ);
+    const dailySchedule = '{"type":"daily","time":"19:00"}';
+    const dailyId = seedReminder(rig, 'לקחת כדור', wallToUtc(2026, 8, 8, 19, 0, TZ), dailySchedule);
+    const dailyInst = seedInstance(rig, dailyId, 'לקחת כדור', firedAt);
+
+    await withNow(wallToUtc(2026, 8, 7, 21, 10, TZ), async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `m:${dailyInst}`));
+    });
+
+    eq('the instance is still closed', instances(rig).find((i) => i.id === dailyInst)?.status, 'skipped');
+    eq('but the daily rule is untouched',
+      reminders(rig).find((r) => r.id === dailyId)?.schedule, dailySchedule);
     rig.restore();
   }
 
@@ -1011,6 +1285,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const p = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');

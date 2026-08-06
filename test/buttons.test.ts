@@ -49,6 +49,51 @@ check('a well-formed capture effect yields plan slots',
 eq('a malformed capture id yields no buttons',
   buttonsFor([{ kind: 'reminder_captured', id: NaN }]), undefined);
 
+section('several reminders firing at once each get their own buttons');
+{
+  // This was a `.find()`, so the first task got a keyboard and every other
+  // task fired that minute got none — unclosable except by typing.
+  const rows = buttonsFor([
+    { kind: 'reminder_fired', instanceId: 9, title: 'לקחת אוכל' },
+    { kind: 'reminder_fired', instanceId: 10, title: 'לזרוק זבל' },
+  ]);
+  check('one row per task', !!rows && rows.length === 2, JSON.stringify(rows));
+  const flat = JSON.stringify(rows);
+  check('the first task can be closed', flat.includes('"instance":9'), flat);
+  check('the second task can be closed too', flat.includes('"instance":10'), flat);
+  check('each button is labelled so they can be told apart',
+    flat.includes('לקחת אוכל') && flat.includes('לזרוק זבל'), flat);
+
+  // A single fired reminder keeps the original, unlabelled keyboard.
+  const solo = buttonsFor([{ kind: 'reminder_fired', instanceId: 42, title: 'לרוץ' }]);
+  check('a lone reminder still gets the plain three buttons on one row',
+    !!solo && solo.length === 1 && solo[0].length === 3 && solo[0][0].text === 'עשיתי',
+    JSON.stringify(solo));
+
+  // One unusable id must not cost the other task its buttons.
+  const partial = buttonsFor([
+    { kind: 'reminder_fired', instanceId: 'abc', title: 'שבור' },
+    { kind: 'reminder_fired', instanceId: 11, title: 'תקין' },
+  ]);
+  check('a task with a malformed id is skipped, the rest stay actionable',
+    !!partial && partial.length === 1 && JSON.stringify(partial).includes('"instance":11'),
+    JSON.stringify(partial));
+  eq('and if none of them are usable, no keyboard at all',
+    buttonsFor([
+      { kind: 'reminder_fired', instanceId: 'abc' },
+      { kind: 'reminder_fired', instanceId: NaN },
+    ]),
+    undefined);
+
+  // A long title has to be cut, or Telegram wraps it into an unreadable slab.
+  const long = buttonsFor([
+    { kind: 'reminder_fired', instanceId: 1, title: 'להתקשר לרואה החשבון בעניין הדוח השנתי' },
+    { kind: 'reminder_fired', instanceId: 2, title: 'לרוץ' },
+  ]);
+  check('a long title is truncated on the button',
+    !!long && long[0][0].text.length <= 18, JSON.stringify(long?.[0][0].text));
+}
+
 section('ambiguous-hour correction button');
 {
   const buttons = buttonsFor([{ kind: 'reminder_created', id: 12, altHour: 23 }]);

@@ -16,6 +16,13 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
       quiet_start_hour: row.quiet_start_hour ?? 23,
       quiet_end_hour: row.quiet_end_hour ?? 8,
       next_checkin_at: row.next_checkin_at ?? null,
+      // A database that hasn't run migrations/003 reads these as undefined.
+      // `?? null` means "switched off" there, which is the safe degradation:
+      // no brief at all beats a brief at an hour nobody chose.
+      brief_hour: row.brief_hour ?? null,
+      closeout_hour: row.closeout_hour ?? null,
+      last_brief_on: row.last_brief_on ?? null,
+      last_closeout_on: row.last_closeout_on ?? null,
     };
   }
   const fresh: Settings = {
@@ -29,6 +36,10 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
     quiet_start_hour: 23,
     quiet_end_hour: 8,
     next_checkin_at: null,
+    brief_hour: 8,
+    closeout_hour: 21,
+    last_brief_on: null,
+    last_closeout_on: null,
   };
   await env.DB.prepare('INSERT OR IGNORE INTO settings (chat_id, tz) VALUES (?, ?)')
     .bind(chatId, fresh.tz)
@@ -218,6 +229,79 @@ export async function listReminders(env: Env, chatId: string): Promise<Reminder[
   return res.results ?? [];
 }
 
+/** Scheduled reminders whose next firing falls inside [from, to). */
+export async function remindersBetween(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminders
+      WHERE chat_id = ? AND status = 'scheduled'
+        AND next_fire_at IS NOT NULL AND next_fire_at >= ? AND next_fire_at < ?
+      ORDER BY next_fire_at`,
+  )
+    .bind(chatId, from, to)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
+/** How the instances that CLOSED inside [from, to) turned out. */
+export async function dayTally(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<{ done: number; failed: number; skipped: number }> {
+  const res = await env.DB.prepare(
+    `SELECT status, COUNT(*) AS n FROM instances
+      WHERE chat_id = ? AND closed_at IS NOT NULL AND closed_at >= ? AND closed_at < ?
+      GROUP BY status`,
+  )
+    .bind(chatId, from, to)
+    .all<{ status: string; n: number }>();
+  const tally = { done: 0, failed: 0, skipped: 0 };
+  for (const row of res.results ?? []) {
+    if (row.status === 'done') tally.done = row.n;
+    else if (row.status === 'failed') tally.failed = row.n;
+    else if (row.status === 'skipped') tally.skipped = row.n;
+  }
+  return tally;
+}
+
+/**
+ * Record that a once-a-day message went out for local date `day`.
+ * Written BEFORE the send in tick(), deliberately: a failed send costs one
+ * message, whereas a failed write would repeat that message every minute for
+ * the rest of the day.
+ */
+/** Set (or with nulls, switch off) the two once-a-day messages. */
+export async function setDailyHours(
+  env: Env,
+  chatId: string,
+  briefHour: number | null,
+  closeoutHour: number | null,
+): Promise<void> {
+  await env.DB.prepare(
+    'UPDATE settings SET brief_hour = ?, closeout_hour = ? WHERE chat_id = ?',
+  )
+    .bind(briefHour, closeoutHour, chatId)
+    .run();
+}
+
+export async function markDailySent(
+  env: Env,
+  chatId: string,
+  which: 'brief' | 'closeout',
+  day: string,
+): Promise<void> {
+  const column = which === 'brief' ? 'last_brief_on' : 'last_closeout_on';
+  await env.DB.prepare(`UPDATE settings SET ${column} = ? WHERE chat_id = ?`)
+    .bind(day, chatId)
+    .run();
+}
+
 export async function deleteReminder(env: Env, chatId: string, id: number): Promise<boolean> {
   const res = await env.DB.prepare(
     "UPDATE reminders SET status = 'cancelled', active = 0, next_fire_at = NULL WHERE id = ? AND chat_id = ?",
@@ -352,6 +436,18 @@ export async function retimeReminder(
     "UPDATE reminders SET next_fire_at = ?, schedule = ?, status = 'scheduled', active = 1 WHERE id = ? AND status != 'cancelled'",
   )
     .bind(at, schedule, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/** Change a reminder's wording, leaving its schedule alone. Cancelled reminders
+ *  are excluded for the same reason retimeReminder excludes them: renaming one
+ *  would resurrect it in every listing that reads by title. */
+export async function renameReminder(env: Env, id: number, title: string): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE reminders SET title = ? WHERE id = ? AND status != 'cancelled'",
+  )
+    .bind(title, id)
     .run();
   return (res.meta.changes ?? 0) > 0;
 }
@@ -491,6 +587,43 @@ export async function usageToday(env: Env, model: string): Promise<number> {
 }
 
 /** Counts validator rejections so /diag can report how often the model lies. */
+/**
+ * Count one call against the current minute's window and return the new total.
+ *
+ * Counts ATTEMPTS, not successes — unlike recordUsage, which only fires on a
+ * reply that came back with text. A 429 costs the same quota as a 200, so a
+ * counter that ignores failures would happily keep hammering a limit it had
+ * already blown through.
+ *
+ * The first call of a new minute prunes every older window: the bucket key puts
+ * the minute first precisely so that this is one range delete rather than a
+ * scan, and doing it here means no cron job has to remember to.
+ */
+export async function bumpRateWindow(env: Env, minute: string, model: string): Promise<number> {
+  const bucket = `${minute}|${model}`;
+  const row = await env.DB.prepare(
+    `INSERT INTO rate_window (bucket, calls) VALUES (?, 1)
+       ON CONFLICT(bucket) DO UPDATE SET calls = calls + 1
+       RETURNING calls`,
+  )
+    .bind(bucket)
+    .first<{ calls: number }>();
+  const calls = row?.calls ?? 1;
+  if (calls === 1) {
+    await env.DB.prepare('DELETE FROM rate_window WHERE bucket < ?').bind(`${minute}|`).run();
+  }
+  return calls;
+}
+
+/** Calls already spent in the current minute for `model` — read-only, for /diag. */
+export async function rateWindowNow(env: Env, model: string): Promise<number> {
+  const minute = new Date().toISOString().slice(0, 16);
+  const row = await env.DB.prepare('SELECT calls FROM rate_window WHERE bucket = ?')
+    .bind(`${minute}|${model}`)
+    .first<{ calls: number }>();
+  return row?.calls ?? 0;
+}
+
 export async function recordRejection(env: Env): Promise<void> {
   await recordUsage(env, '_rejections');
 }

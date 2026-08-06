@@ -21,6 +21,8 @@ import {
   computeNext,
   formatLocal,
   isQuietHour,
+  localDateKey,
+  localDayBounds,
   nextCheckinTime,
   wallParts,
   wallString,
@@ -251,13 +253,63 @@ async function handleCallback(update: any, env: Env): Promise<void> {
         }
         break;
       }
+      case 'tomorrow': {
+        const inst = await db.getInstance(env, cb.instance);
+        if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'נדחה למחר'))) {
+          effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+          const rem = await db.getReminder(env, inst.reminder_id);
+          // A recurring reminder already has tomorrow covered by its own rule —
+          // overwriting it with a one-off would silently end the recurrence,
+          // which is a far worse outcome than the tap doing slightly less.
+          let schedule: Schedule | null = null;
+          try {
+            schedule = rem ? (JSON.parse(rem.schedule) as Schedule) : null;
+          } catch {
+            /* unparseable schedule: leave it alone */
+          }
+          if (rem && schedule?.type === 'once') {
+            const p = wallParts(inst.fired_at, rem.tz);
+            const at = wallToUtc(p.year, p.month, p.day + 1, p.hour, p.minute, rem.tz);
+            const next: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+            if (await db.retimeReminder(env, rem.id, at, JSON.stringify(next))) {
+              effects.push({ kind: 'reminder_retimed', id: rem.id, title: rem.title, at });
+            }
+          }
+        }
+        break;
+      }
       case 'retime': {
         const rem = await db.getReminder(env, cb.reminder);
         if (rem) {
-          const p = wallParts(Date.now(), rem.tz);
-          let at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
-          if (at <= Date.now()) at += 86_400_000;
-          const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+          const hhmm = `${String(cb.hour).padStart(2, '0')}:${String(cb.minute).padStart(2, '0')}`;
+          let existing: Schedule | null = null;
+          try {
+            existing = JSON.parse(rem.schedule) as Schedule;
+          } catch {
+            /* unparseable: treated as a one-off below */
+          }
+
+          // Correcting the HOUR must not also change the KIND of reminder.
+          // This branch used to write a `once` schedule unconditionally, which
+          // would have turned "כל יום ב-7" into a single 19:00 reminder the
+          // moment he tapped "לא, 19:00" — ending the recurrence silently,
+          // which is the worst outcome a correction button could have.
+          const schedule: Schedule =
+            existing?.type === 'daily'
+              ? { type: 'daily', time: hhmm }
+              : existing?.type === 'weekly'
+                ? { type: 'weekly', time: hhmm, days: existing.days }
+                : { type: 'once', at: '' };
+          let at: number;
+          if (schedule.type === 'once') {
+            const p = wallParts(Date.now(), rem.tz);
+            at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
+            if (at <= Date.now()) at += 86_400_000;
+            schedule.at = wallString(at, rem.tz);
+          } else {
+            at = computeNext(schedule, rem.tz, Date.now()) ?? Date.now();
+          }
+
           // Gated on status inside the query, same as the other branches — a
           // retime tapped after the reminder was deleted must not un-cancel it.
           if (await db.retimeReminder(env, rem.id, at, JSON.stringify(schedule))) {
@@ -485,8 +537,11 @@ async function tick(env: Env): Promise<void> {
     settings.next_checkin_at !== null &&
     settings.next_checkin_at <= now;
 
+  const briefDue = dailyDue(settings.brief_hour, settings.last_brief_on, now, settings.tz);
+  const closeoutDue = dailyDue(settings.closeout_hour, settings.last_closeout_on, now, settings.tz);
+
   // The overwhelmingly common case: nothing to do. Bail before building context.
-  if (!due.length && !nags.length && !checkinDue) {
+  if (!due.length && !nags.length && !checkinDue && !briefDue && !closeoutDue) {
     if (settings.checkins_enabled === 1 && settings.next_checkin_at === null) {
       await db.setNextCheckin(
         env,
@@ -521,6 +576,14 @@ async function tick(env: Env): Promise<void> {
     ctx.settings.quiet_end_hour,
   );
 
+  // Everything that comes due in one tick is, from his side of the screen,
+  // "the 7:00 stuff" — two reminders at the same time should read as one
+  // moment with two things in it, not as two notifications a minute apart.
+  // They are collected here and sent as a single message below; each keeps its
+  // own effect (and therefore its own row, its own instance and its own
+  // buttons), because grouping is a presentation decision and must not blur
+  // which task he actually closed.
+  const fired: Effect[] = [];
   for (const r of due) {
     // Reschedule first: if the send throws, we still don't fire twice.
     let next: number | null = null;
@@ -532,15 +595,20 @@ async function tick(env: Env): Promise<void> {
     await db.setNextFire(env, r.id, next);
 
     const instanceId = await db.createInstance(env, r, now);
+    console.log(`fired reminder ${r.id} → instance ${instanceId}`);
     if (muted) continue;
+    fired.push({
+      kind: 'reminder_fired', id: r.id, title: r.title, instanceId,
+      requiresProof: r.requires_proof === 1,
+    });
+  }
 
+  // Every instance above is already committed, so a failed send costs a
+  // message, never a fired reminder.
+  if (fired.length) {
     ctx = await buildContext(env, chatId);
-    const delivered = await sendOutcome(env, chatId, ctx,
-      [{ kind: 'reminder_fired', id: r.id, title: r.title, instanceId, requiresProof: r.requires_proof === 1 }],
-      NAG_LADDER[0]);
-    console.log(
-      `fired reminder ${r.id} → instance ${instanceId}${delivered ? '' : ' (DELIVERY FAILED)'}`,
-    );
+    const delivered = await sendOutcome(env, chatId, ctx, fired, NAG_LADDER[0]);
+    if (!delivered) console.log(`DELIVERY FAILED for ${fired.length} fired reminder(s)`);
   }
 
   if (muted) return;
@@ -579,7 +647,68 @@ async function tick(env: Env): Promise<void> {
       NAG_LADDER[level] ?? NAG_LADDER[3]);
   }
 
+  if (briefDue) await sendMorningBrief(env, chatId, now, settings.tz);
+  if (closeoutDue) await sendEveningCloseout(env, chatId, now, settings.tz);
+
   if (checkinDue) await maybeCheckIn(env, ctx, chatId, now, quiet, due.length + nags.length > 0);
+}
+
+/** How late a once-a-day message may be before it is dropped rather than sent. */
+const DAILY_GRACE_HOURS = 2;
+
+/**
+ * Is a once-a-day message due right now?
+ *
+ * The grace window matters: the cron runs every minute, so being hours past
+ * the hour means the worker was down. A morning brief delivered at 14:00 is
+ * not a late brief, it is a wrong one — better to skip the day than to open
+ * with "בוקר" in the afternoon.
+ */
+function dailyDue(
+  hour: number | null,
+  lastOn: string | null,
+  now: number,
+  tz: string,
+): boolean {
+  if (hour === null) return false;
+  if (lastOn === localDateKey(now, tz)) return false;
+  const current = wallParts(now, tz).hour;
+  return current >= hour && current < hour + DAILY_GRACE_HOURS;
+}
+
+/**
+ * Both daily messages mark themselves sent BEFORE sending. A failed send costs
+ * one message; a failed mark would repeat that message every minute until the
+ * hour rolled past.
+ */
+async function sendMorningBrief(env: Env, chatId: string, now: number, tz: string): Promise<void> {
+  await db.markDailySent(env, chatId, 'brief', localDateKey(now, tz));
+  const { to } = localDayBounds(now, tz);
+  const [rows, open] = await Promise.all([
+    db.remindersBetween(env, chatId, now, to),
+    db.openInstances(env, chatId),
+  ]);
+  // Nothing scheduled and nothing hanging over — an empty brief every morning
+  // is how a useful message turns into one that gets muted.
+  if (!rows.length && !open.length) return;
+  const ctx = await buildContext(env, chatId);
+  await sendOutcome(env, chatId, ctx, [
+    { kind: 'morning_brief', rows, openCount: open.length },
+  ]);
+}
+
+async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: string): Promise<void> {
+  await db.markDailySent(env, chatId, 'closeout', localDateKey(now, tz));
+  const { from } = localDayBounds(now, tz);
+  const [tally, missed] = await Promise.all([
+    db.dayTally(env, chatId, from, now),
+    db.openInstances(env, chatId),
+  ]);
+  if (!tally.done && !tally.failed && !missed.length) return;
+  const ctx = await buildContext(env, chatId);
+  await sendOutcome(env, chatId, ctx, [
+    { kind: 'evening_closeout', done: tally.done, failed: tally.failed, missed },
+  ]);
 }
 
 /**

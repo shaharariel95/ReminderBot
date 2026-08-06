@@ -1,5 +1,5 @@
 import * as db from './db';
-import { describeSchedule, formatLocal } from './time';
+import { describeSchedule, formatLocal, localDayBounds } from './time';
 import type { Env, Schedule } from './types';
 
 /** Slash commands handled without burning an LLM call. */
@@ -24,12 +24,14 @@ export async function handleSlash(
     case '/help':
       return [
         'רשימות:',
+        '/today — מה יש היום, ומה עוד פתוח',
         '/list — התזכורות שלך (אלה עם שעה)',
         '/goals — המטרות שלך (אלה בלי שעה)',
         '/inbox — דברים שתפסתי בלי שעה',
         '/stats — רצף, בוצעו, נפלו',
         '',
         'שליטה בי:',
+        '/daily [בוקר] [ערב] — שעות הסיכום היומי. "off" מכבה.',
         '/chill [שעות] — שתיקה מוחלטת זמנית (ברירת מחדל 4). כל הודעה ממך מבטלת.',
         '/checkins on|off|1-8 — כמה אני פותח שיחות מעצמי',
         '/intensity 1|2|3 — כמה עוקצני אני',
@@ -56,6 +58,11 @@ export async function handleSlash(
         `שימוש היום — ${primary}: ${await db.usageToday(env, primary)}, ` +
           `${fallback}: ${await db.usageToday(env, fallback)}`,
         `תשובות שנפסלו היום: ${await db.usageToday(env, '_rejections')}`,
+        // The daily counters above are the axis that never binds. This is the
+        // one that does, and seeing it live is the whole reason /diag exists.
+        `תקרת דקה: ${env.GEMINI_RPM ?? 18} לכל מודל · בדקה הזאת: ${await db
+          .rateWindowNow(env, primary)
+          .catch(() => '?')}`,
       );
       try {
         const t0 = Date.now();
@@ -99,6 +106,59 @@ export async function handleSlash(
           return `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${r.requires_proof ? ' · דורש הוכחה' : ''}`;
         })
         .join('\n');
+    }
+
+    case '/today': {
+      const settings = await db.getSettings(env, chatId);
+      const { from, to } = localDayBounds(Date.now(), settings.tz);
+      // From the start of the day, not from now: what already fired today is
+      // still part of "today", and leaving it out makes the list look wrong.
+      const [rows, open] = await Promise.all([
+        db.remindersBetween(env, chatId, from, to),
+        db.openInstances(env, chatId),
+      ]);
+      const lines: string[] = [];
+      if (rows.length) {
+        lines.push('היום:');
+        for (const r of rows) {
+          const at = r.next_fire_at ? formatLocal(r.next_fire_at, settings.tz) : '';
+          lines.push(`#${r.id} ${r.title}${at ? ` · ${at}` : ''}`);
+        }
+      } else {
+        lines.push('היום ריק.');
+      }
+      if (open.length) {
+        lines.push('', 'פתוחות עכשיו:');
+        for (const i of open) lines.push(`#${i.id} ${i.title}`);
+      }
+      return lines.join('\n');
+    }
+
+    case '/daily': {
+      const parts = text.trim().split(/\s+/);
+      const settings = await db.getSettings(env, chatId);
+      const show = (h: number | null) => (h === null ? 'כבוי' : `${h}:00`);
+      if (parts.length < 2) {
+        return [
+          `סיכום בוקר: ${show(settings.brief_hour)}`,
+          `סיכום ערב: ${show(settings.closeout_hour)}`,
+          '',
+          'לשינוי: /daily 8 21 — בוקר ב-8, ערב ב-21.',
+          'לכיבוי: /daily off',
+        ].join('\n');
+      }
+      if (parts[1].toLowerCase() === 'off') {
+        await db.setDailyHours(env, chatId, null, null);
+        return 'כיביתי את שני הסיכומים. תזכורות ממשיכות כרגיל.';
+      }
+      const brief = Number(parts[1]);
+      const closeout = Number(parts[2]);
+      const valid = (n: number) => Number.isInteger(n) && n >= 0 && n <= 23;
+      if (!valid(brief) || !valid(closeout)) {
+        return 'תן לי שתי שעות שלמות בין 0 ל-23. למשל: /daily 8 21';
+      }
+      await db.setDailyHours(env, chatId, brief, closeout);
+      return `סיכום בוקר ב-${brief}:00, סיכום ערב ב-${closeout}:00.`;
     }
 
     case '/quiet': {

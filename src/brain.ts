@@ -22,6 +22,8 @@ const ACTION_SCHEMA = {
         'snooze',
         'list',
         'delete',
+        'reschedule',
+        'rename',
         'set_intensity',
         'chill',
         'create_goal',
@@ -176,7 +178,11 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
     שים לב: "עוד 20 דקות" זה once עם in_minutes=20, ולא interval. interval זה רק כשהוא רוצה שזה יחזור על עצמו בלי סוף.
 
   requires_proof=true אם הוא ביקש שתדרוש הוכחה או אם זו משימה פיזית שקל לשקר לגביה.
-- "snooze" — דחייה. target_id = instance id, snooze_minutes.
+- "snooze" — דחייה של משימה שכבר צלצלה ומחכה לדיווח. target_id = instance id, snooze_minutes.
+- "reschedule" — הזזה של תזכורת קיימת שעוד לא צלצלה, לזמן אחר ("תעביר את זה ל-8", "תדחה את הריצה למחר בבוקר", "בעצם ב-21:00"). target_id = reminder id מהרשימה למעלה, ואת הזמן החדש באותם שדות של create_reminder (in_minutes / once_at / time+days).
+  זה לא create_reminder — אל תיצור תזכורת חדשה כשהוא רק מזיז אחת קיימת, אחרת יהיו לו שתיים.
+  זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לתזכורת שעדיין מחכה.
+- "rename" — שינוי הניסוח של תזכורת קיימת בלי לגעת בשעה ("תשנה את זה ל'לקחת את הכלב'", "זה לא חלב זה לחם", וגם תשובה לשאלה שלך "על מה התזכורת?"). target_id = reminder id + title = הנוסח החדש.
 - "delete" — ביטול תזכורת. target_id = reminder id.
 - "list" — הוא שואל מה יש לו (תזכורות).
 
@@ -308,5 +314,10 @@ export async function speak(
     contents.push({ role: 'user', parts: [{ text: '(המשך)' }] });
   }
 
-  return generate(env, { system, contents, temperature: 1.05, maxOutputTokens: 2000 });
+  // Decorative: the baseline this rewrites is already true and already
+  // shippable, so when the minute's budget runs short this is the call that
+  // should go, leaving room for the routing that decides what actually happens.
+  return generate(env, {
+    system, contents, temperature: 1.05, maxOutputTokens: 2000, decorative: true,
+  });
 }

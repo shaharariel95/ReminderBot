@@ -20,6 +20,41 @@ interface GenerateOpts {
   thinkingLevel?: 'low' | 'high';
   /** Gemini 2.5 equivalent, in tokens. 0 disables reasoning entirely. */
   thinkingBudget?: number;
+  /**
+   * This call makes the reply nicer but changes nothing about what happens.
+   * When the minute is running short, these are dropped first, so the last
+   * calls of a busy minute go to deciding WHAT to do rather than to how to
+   * word it. A dropped `speak` costs the personality; a dropped `route` costs
+   * the reminder.
+   */
+  decorative?: boolean;
+}
+
+/** "2026-08-07T14:32" — the window a call is counted against. */
+function minuteBucket(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 16);
+}
+
+/**
+ * Take one call's worth of this minute's budget for `model`, and say whether
+ * we were still inside it.
+ *
+ * Deliberately fails OPEN: if the bookkeeping query throws, the call proceeds.
+ * A broken counter costing a 429 is a bad minute; a broken counter costing
+ * every reply is a broken bot.
+ */
+async function withinRateWindow(env: Env, model: string, decorative: boolean): Promise<boolean> {
+  const limit = Number(env.GEMINI_RPM ?? 18);
+  if (!Number.isFinite(limit) || limit <= 0) return true;
+  // Decorative calls yield at 70% so there is always headroom left for routing.
+  const ceiling = decorative ? Math.floor(limit * 0.7) : limit;
+  try {
+    const used = await db.bumpRateWindow(env, minuteBucket(Date.now()), model);
+    return used <= ceiling;
+  } catch (err) {
+    console.error('rate window bookkeeping failed, allowing the call', err);
+    return true;
+  }
 }
 
 /**
@@ -133,6 +168,14 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         const base = opts.temperature ?? (opts.jsonSchema ? 0.2 : 1.0);
         tuned.temperature = Math.min(1.4, base + 0.35 * attempt);
         tuned.maxOutputTokens = (opts.maxOutputTokens ?? 2000) * (1 + attempt);
+      }
+
+      // Checked per attempt rather than per call, because each retry is a
+      // real request against the same quota.
+      if (!(await withinRateWindow(env, model, opts.decorative === true))) {
+        lastDetail = `${model} is out of this minute's budget`;
+        console.warn(`gemini: ${lastDetail}, dropping a tier without calling it`);
+        break; // same handling as a 429, minus the wasted round trip
       }
 
       const res = await callOnce(env, model, tuned);

@@ -6,7 +6,16 @@ export interface Env {
   OWNER_CHAT_ID: string;
   GEMINI_MODEL?: string;
   GEMINI_MODEL_FALLBACK?: string;
+  /** Calls per DAY before the bot stops consulting the model at all. */
   GEMINI_SOFT_LIMIT?: string;
+  /**
+   * Calls per MINUTE, per model. This is the axis the free tier actually
+   * limits — /diag caught it returning `limit: 20` with "please retry in 56s"
+   * while the daily budget still had hundreds left, so the daily guard above
+   * had never once fired. Kept a little under the real ceiling so a burst
+   * degrades to the deterministic baseline instead of to a 429.
+   */
+  GEMINI_RPM?: string;
   DEFAULT_TZ?: string;
   /**
    * Test-only override for sendBurst's inter-chunk sleep (see telegram.ts).
@@ -82,6 +91,12 @@ export interface Settings {
   quiet_start_hour: number;
   quiet_end_hour: number;
   next_checkin_at: number | null;
+  /** Local hour for the once-a-day messages; null switches one off. */
+  brief_hour: number | null;
+  closeout_hour: number | null;
+  /** Local date (YYYY-MM-DD) each was last sent on — see migrations/003. */
+  last_brief_on: string | null;
+  last_closeout_on: string | null;
 }
 
 export interface Stats {
@@ -100,6 +115,11 @@ export interface Intent {
     | 'snooze'
     | 'list'
     | 'delete'
+    /** Move an existing reminder to a different time. Distinct from `snooze`,
+     *  which pushes an instance that has ALREADY fired. */
+    | 'reschedule'
+    /** Fix the wording of an existing reminder without touching its schedule. */
+    | 'rename'
     | 'set_intensity'
     | 'chill'
     | 'create_goal'
@@ -156,6 +176,13 @@ export type Effect =
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
+  /**
+   * Both titles are carried because the reply has to name the one that is
+   * gone as well as the one that replaced it. Neither sits at the top level
+   * under the key `title`, so facts.ts must sweep them explicitly — same trap
+   * as `duplicateOf` above.
+   */
+  | { kind: 'reminder_renamed'; id: number; from: string; to: string }
   | { kind: 'reminder_deleted'; id: number; title: string }
   /**
    * An EXACT duplicate (same normalised title, within the dedup window) was
@@ -173,6 +200,11 @@ export type Effect =
    * empty case) would be false.
    */
   | { kind: 'needs_task_choice'; action: 'complete' | 'snooze'; open: Instance[] }
+  /**
+   * The reminder-side twin of the above: reschedule/rename knew what to do but
+   * not to which reminder, and there was more than one candidate.
+   */
+  | { kind: 'needs_reminder_choice'; action: 'reschedule' | 'rename'; rows: Reminder[] }
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
@@ -188,14 +220,27 @@ export type Effect =
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
   | { kind: 'photo_accepted'; instanceId: number; title: string; reason: string; streak: number }
   | { kind: 'photo_rejected'; instanceId: number; title: string; reason: string }
+  /** The once-a-day messages. Neither writes anything the user could be told
+   *  about, so neither belongs in WROTE — they only describe existing rows. */
+  | { kind: 'morning_brief'; rows: Reminder[]; openCount: number }
+  | { kind: 'evening_closeout'; done: number; failed: number; missed: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
   | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };
 
+/**
+ * The title a reminder gets when he asked to be reminded but never said of
+ * what ("תזכיר לי עוד 5 דקות"). Capture must never block on a question, so the
+ * reminder is created anyway — but every layer that WORDS one of these needs to
+ * recognise it, because "נו? תזכורת." at 07:00 tells him nothing at all.
+ * Defined here so quickparse, effects and voice cannot drift apart on it.
+ */
+export const UNTITLED_TITLE = 'תזכורת';
+
 /** True when this effect wrote something the bot is allowed to confirm. */
 export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
-  'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
+  'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted',
 ]);

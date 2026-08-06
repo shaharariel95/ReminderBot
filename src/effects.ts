@@ -1,6 +1,7 @@
 import * as db from './db';
 import type { Context } from './brain';
-import type { Effect, Env, Intent, Schedule } from './types';
+import type { Effect, Env, Intent, Reminder, Schedule } from './types';
+import { UNTITLED_TITLE } from './types';
 import { computeNext, wallString } from './time';
 
 /** Reminders whose next_fire_at lands within this many ms count as "the same time". */
@@ -19,10 +20,10 @@ function normalizeTitle(title: string): string {
     .toLowerCase();
 }
 
-/** "תזכורת" is the fallback title quickparse/the router use when no subject
- *  was extracted — two unrelated captures can both carry it, so it must not
- *  be allowed to near-match anything on title similarity alone. */
-const GENERIC_TITLE = normalizeTitle('תזכורת');
+/** The fallback title quickparse/the router use when no subject was extracted —
+ *  two unrelated captures can both carry it, so it must not be allowed to
+ *  near-match anything on title similarity alone. */
+const GENERIC_TITLE = normalizeTitle(UNTITLED_TITLE);
 function isGenericTitle(normalized: string): boolean {
   return normalized === GENERIC_TITLE;
 }
@@ -74,6 +75,32 @@ function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
   }
 }
 
+/**
+ * Which reminder a reschedule/rename is aimed at.
+ *
+ * Reads by id rather than searching ctx.reminders so that inbox captures —
+ * which have no fire time and so never appear there — can still be renamed and
+ * scheduled. The chat_id check is not ceremony: db.getReminder looks up by
+ * primary key alone, so without it a target_id the model hallucinated could
+ * point at another chat's row. Cancelled reminders are deliberately NOT
+ * filtered here — retimeReminder and renameReminder both exclude them in their
+ * WHERE clause, and one guard that is tested beats two that can disagree about
+ * which message the user gets.
+ */
+async function resolveReminder(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  intent: Intent,
+): Promise<Reminder | null> {
+  if (intent.target_id) {
+    const r = await db.getReminder(env, intent.target_id);
+    return r && r.chat_id === chatId ? r : null;
+  }
+  // "תעביר את זה ל-8" with exactly one reminder on file is unambiguous.
+  return ctx.reminders.length === 1 ? ctx.reminders[0] : null;
+}
+
 export async function applyIntent(
   env: Env,
   chatId: string,
@@ -85,7 +112,7 @@ export async function applyIntent(
 
   switch (intent.action) {
     case 'create_reminder': {
-      const title = intent.title?.trim() || 'תזכורת';
+      const title = intent.title?.trim() || UNTITLED_TITLE;
       const schedule = scheduleFromIntent(intent, tz);
 
       // No time is not a failure any more. Capture first, schedule later.
@@ -203,6 +230,52 @@ export async function applyIntent(
       return [
         { kind: 'reminder_deleted', id: intent.target_id, title: rem?.title ?? String(intent.target_id) },
       ];
+    }
+
+    case 'reschedule': {
+      const rem = await resolveReminder(env, chatId, ctx, intent);
+      if (!rem) {
+        if (ctx.reminders.length > 1) {
+          return [{ kind: 'needs_reminder_choice', action: 'reschedule', rows: ctx.reminders }];
+        }
+        return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+
+      const schedule = scheduleFromIntent(intent, tz);
+      if (!schedule) return [{ kind: 'nothing', why: 'no_time', userText }];
+
+      let next: number | null;
+      try {
+        next = computeNext(schedule, tz, Date.now());
+      } catch {
+        return [{ kind: 'nothing', why: 'bad_time', userText }];
+      }
+      if (next === null) return [{ kind: 'nothing', why: 'past_time', userText }];
+
+      if (!(await db.retimeReminder(env, rem.id, next, JSON.stringify(schedule)))) {
+        return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+      return [{ kind: 'reminder_retimed', id: rem.id, title: rem.title, at: next }];
+    }
+
+    case 'rename': {
+      const rem = await resolveReminder(env, chatId, ctx, intent);
+      if (!rem) {
+        if (ctx.reminders.length > 1) {
+          return [{ kind: 'needs_reminder_choice', action: 'rename', rows: ctx.reminders }];
+        }
+        return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+
+      const to = intent.title?.trim().slice(0, 120);
+      // Nothing to rename it to, and renaming it to what it already says would
+      // report a change that did not happen.
+      if (!to || to === rem.title) return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+
+      if (!(await db.renameReminder(env, rem.id, to))) {
+        return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+      return [{ kind: 'reminder_renamed', id: rem.id, from: rem.title, to }];
     }
 
     case 'create_goal': {

@@ -5,6 +5,8 @@
  * writing to the database on the strength of a corrupted string.
  */
 
+import { UNTITLED_TITLE } from './types';
+
 export type PlanSlot = 'eve' | 'tm' | 'hr' | 'none';
 
 export type Callback =
@@ -12,7 +14,9 @@ export type Callback =
   | { t: 'snooze'; instance: number; minutes: number }
   | { t: 'skip'; instance: number }
   | { t: 'retime'; reminder: number; hour: number; minute: number }
-  | { t: 'plan'; reminder: number; slot: PlanSlot };
+  | { t: 'plan'; reminder: number; slot: PlanSlot }
+  /** From the evening close-out: drop today's attempt and try again tomorrow. */
+  | { t: 'tomorrow'; instance: number };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
@@ -30,6 +34,8 @@ export function encode(c: Callback): string {
       return `r:${c.reminder}:${String(c.hour).padStart(2, '0')}:${String(c.minute).padStart(2, '0')}`;
     case 'plan':
       return `p:${c.reminder}:${c.slot}`;
+    case 'tomorrow':
+      return `m:${c.instance}`;
   }
 }
 
@@ -40,6 +46,8 @@ export function decode(s: string): Callback | null {
       return parts.length === 2 && isNat(parts[1]) ? { t: 'done', instance: +parts[1] } : null;
     case 'x':
       return parts.length === 2 && isNat(parts[1]) ? { t: 'skip', instance: +parts[1] } : null;
+    case 'm':
+      return parts.length === 2 && isNat(parts[1]) ? { t: 'tomorrow', instance: +parts[1] } : null;
     case 's':
       return parts.length === 3 && isNat(parts[1]) && isNat(parts[2])
         ? { t: 'snooze', instance: +parts[1], minutes: +parts[2] }
@@ -87,12 +95,20 @@ function positiveId(v: unknown): number | null {
  * Which buttons belong on a message. Driven by effects rather than by the
  * caller so that every path producing the same effect gets the same affordance.
  */
+/** Enough of a title to tell two buttons apart, short enough to fit on one. */
+function shortLabel(title: unknown): string {
+  const s = String(title ?? '').trim();
+  if (!s || s === UNTITLED_TITLE) return 'בלי שם';
+  return s.length > 14 ? `${s.slice(0, 13)}…` : s;
+}
+
 export function buttonsFor(
   effects: { kind: string; [k: string]: unknown }[],
 ): Button[][] | undefined {
-  const fired = effects.find((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
-  if (fired) {
-    const instance = positiveId(fired.instanceId);
+  const fired = effects.filter((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
+
+  if (fired.length === 1) {
+    const instance = positiveId(fired[0].instanceId);
     if (instance === null) return undefined;
     return [
       [
@@ -101,6 +117,26 @@ export function buttonsFor(
         { text: 'לא היום', data: { t: 'skip', instance } },
       ],
     ];
+  }
+
+  // Several fired at once. One row per task, each labelled — a single shared
+  // "עשיתי" would be a lie about which one he closed, and this used to be a
+  // `.find()`, which quietly gave buttons to the first task and none to the
+  // rest. A task whose id is unusable is skipped rather than taking the whole
+  // keyboard down with it: the others are still actionable.
+  if (fired.length > 1) {
+    const rows = fired.flatMap((f) => {
+      const instance = positiveId(f.instanceId);
+      if (instance === null) return [];
+      return [
+        [
+          { text: `✓ ${shortLabel(f.title)}`, data: { t: 'done', instance } },
+          { text: '10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
+          { text: 'לא היום', data: { t: 'skip', instance } },
+        ] as Button[],
+      ];
+    });
+    return rows.length ? rows : undefined;
   }
 
   const created = effects.find((e) => e.kind === 'reminder_created' && e.altHour !== undefined);
@@ -116,6 +152,19 @@ export function buttonsFor(
         },
       ],
     ];
+  }
+
+  // The close-out's whole point is that a miss costs one tap, not a re-typed
+  // reminder. One row per item still open at the end of the day.
+  const closeout = effects.find((e) => e.kind === 'evening_closeout');
+  if (closeout) {
+    const missed = Array.isArray(closeout.missed) ? closeout.missed : [];
+    const rows = missed.flatMap((m: { id?: unknown; title?: unknown }) => {
+      const instance = positiveId(m?.id);
+      if (instance === null) return [];
+      return [[{ text: `מחר · ${shortLabel(m?.title)}`, data: { t: 'tomorrow', instance } }] as Button[]];
+    });
+    return rows.length ? rows : undefined;
   }
 
   const captured = effects.find((e) => e.kind === 'reminder_captured');
