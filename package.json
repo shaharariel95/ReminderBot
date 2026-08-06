@@ -14,7 +14,8 @@
     "test:bot": "npx tsx test/bot.test.ts",
     "test:facts": "npx tsx test/facts.test.ts",
     "test:validate": "npx tsx test/validate.test.ts",
-    "test": "npm run test:time && npm run test:parse && npm run test:voice && npm run test:validate && npm run test:bot && npm run test:facts"
+    "test:buttons": "npx tsx test/buttons.test.ts",
+    "test": "npm run test:time && npm run test:parse && npm run test:voice && npm run test:validate && npm run test:buttons && npm run test:bot && npm run test:facts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",
