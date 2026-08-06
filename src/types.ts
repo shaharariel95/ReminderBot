@@ -166,6 +166,13 @@ export type Effect =
   | { kind: 'instance_done'; id: number; title: string; streak: number }
   | { kind: 'instance_skipped'; id: number; title: string }
   | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }
+  /**
+   * complete/snooze couldn't resolve which open instance the user meant AND
+   * there was more than one candidate — asking is correct here; claiming
+   * "no open task" (the `nothing/no_open_task` case, kept for the genuinely
+   * empty case) would be false.
+   */
+  | { kind: 'needs_task_choice'; action: 'complete' | 'snooze'; open: Instance[] }
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }

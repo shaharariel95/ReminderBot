@@ -183,6 +183,13 @@ section(
     { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
     { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
     { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
+    {
+      kind: 'needs_task_choice', action: 'complete',
+      open: [
+        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+      ],
+    },
   ];
 
   for (const e of samples) {

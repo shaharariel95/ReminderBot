@@ -297,6 +297,72 @@ async function main() {
     rig.restore();
   }
 
+  // =========================================================================
+  section('disambiguation — complete with two+ open instances and no resolvable target_id');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const now = Date.now();
+    const id1 = seedInstance(rig, 'לקחת בגד ים', now - 1000);
+    const id2 = seedInstance(rig, 'לזרוק זבל', now - 2000);
+
+    const ctx = await ctxFor(rig);
+    eq('two instances are open', ctx.open.length, 2);
+
+    const result = await applyIntent(rig.env, CHAT, ctx, { action: 'complete' }, 'סיימתי');
+    eq('a needs_task_choice effect is returned, not a false "no open task"', result[0].kind, 'needs_task_choice');
+    if (result[0].kind === 'needs_task_choice') {
+      eq('action is "complete"', result[0].action, 'complete');
+      eq('both open instances are carried', result[0].open.map((i) => i.id).sort(), [id1, id2].sort());
+    }
+
+    // Neither instance was touched.
+    const stillOpen = rig.db.prepare("SELECT COUNT(*) c FROM instances WHERE status='open'").get() as any;
+    eq('neither instance was closed', stillOpen.c, 2);
+    rig.restore();
+  }
+
+  section('disambiguation — snooze with two+ open instances and an unresolvable target_id');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const now = Date.now();
+    seedInstance(rig, 'לקחת בגד ים', now - 1000);
+    seedInstance(rig, 'לזרוק זבל', now - 2000);
+
+    const ctx = await ctxFor(rig);
+    // target_id given but stale/unresolvable (matches nothing open).
+    const result = await applyIntent(rig.env, CHAT, ctx, { action: 'snooze', target_id: 999999 }, 'דחה');
+    eq('a needs_task_choice effect is returned for snooze too', result[0].kind, 'needs_task_choice');
+    if (result[0].kind === 'needs_task_choice') eq('action is "snooze"', result[0].action, 'snooze');
+    rig.restore();
+  }
+
+  section('disambiguation — regression: a single open instance still resolves without asking');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedInstance(rig, 'לקחת בגד ים', Date.now() - 1000);
+    const ctx = await ctxFor(rig);
+
+    const result = await applyIntent(rig.env, CHAT, ctx, { action: 'complete' }, 'סיימתי');
+    eq('a lone open instance is completed directly, no disambiguation needed', result[0].kind, 'instance_done');
+    check('it closed the right instance', result[0].kind === 'instance_done' && result[0].id === id);
+    rig.restore();
+  }
+
+  section('disambiguation — regression: zero open instances still says "no open task", not a choice list');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const ctx = await ctxFor(rig);
+
+    const result = await applyIntent(rig.env, CHAT, ctx, { action: 'complete' }, 'סיימתי');
+    eq('the genuinely-empty case keeps its existing message', result[0].kind, 'nothing');
+    check('with the right reason', result[0].kind === 'nothing' && result[0].why === 'no_open_task');
+    rig.restore();
+  }
+
   done();
 }
 

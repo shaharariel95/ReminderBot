@@ -156,7 +156,13 @@ export async function applyIntent(
       const inst =
         ctx.open.find((i) => i.id === intent.target_id) ??
         (ctx.open.length === 1 ? ctx.open[0] : null);
-      if (!inst) return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      if (!inst) {
+        // More than one open task and no way to tell which: asking is
+        // truthful, "no open task" (below) is not — those tasks are right
+        // there. The genuinely-empty case keeps its existing message.
+        if (ctx.open.length > 1) return [{ kind: 'needs_task_choice', action: 'complete', open: ctx.open }];
+        return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
       await db.closeInstance(env, inst.id, 'done', userText.slice(0, 500) || 'דיווח');
       const fresh = await db.stats(env, chatId);
       return [{ kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak }];
@@ -166,7 +172,10 @@ export async function applyIntent(
       const inst =
         ctx.open.find((i) => i.id === intent.target_id) ??
         (ctx.open.length === 1 ? ctx.open[0] : null);
-      if (!inst) return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      if (!inst) {
+        if (ctx.open.length > 1) return [{ kind: 'needs_task_choice', action: 'snooze', open: ctx.open }];
+        return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
       const minutes = Math.min(720, Math.max(5, intent.snooze_minutes ?? 30));
       await db.snoozeInstance(env, inst.id, minutes);
       return [

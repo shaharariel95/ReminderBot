@@ -42,6 +42,8 @@ function one(e: Effect, tz: string): string {
       return `"${e.title}" ירדה להיום. בלי כישלון.`;
     case 'instance_snoozed':
       return `דחיתי את "${e.title}" ב-${e.minutes} דקות — ${hhmm(e.until, tz)}.`;
+    case 'needs_task_choice':
+      return `איזו מהן? ${e.open.map((i) => `#${i.id} "${i.title}"`).join(' · ')}`;
     case 'goal_created':
       return `רשמתי מטרה: "${e.title}".${e.why ? ` (${e.why})` : ''} אין לה שעה — אני אעלה אותה לבד.`;
     case 'goal_progress':

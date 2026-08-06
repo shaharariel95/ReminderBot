@@ -73,6 +73,19 @@ section('duplicateOf.title — the trap: a nested title must still reach facts.t
   );
 }
 
+section('needs_task_choice — instance titles come from ctx.open, already swept');
+{
+  const openInstances = [
+    { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null },
+    { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null },
+  ];
+  const f = buildFacts(ctx({ open: openInstances }), [
+    { kind: 'needs_task_choice', action: 'complete', open: openInstances },
+  ], TZ);
+  check('the first open instance title is allowed', f.titles.includes('לקחת בגד ים'));
+  check('the second open instance title is allowed', f.titles.includes('לזרוק זבל'));
+}
+
 section('wrote — the gate on confirmation language');
 eq('a create counts as a write',
   buildFacts(ctx(), [{ kind: 'reminder_captured', id: 1, title: 'x' }], TZ).wrote, true);
@@ -84,6 +97,11 @@ eq('a bare chat turn does not', buildFacts(ctx(), [], TZ).wrote, false);
 eq(
   'reminder_duplicate does not count as a write — nothing was inserted',
   buildFacts(ctx(), [{ kind: 'reminder_duplicate', id: 1, title: 'x', at: AT }], TZ).wrote,
+  false,
+);
+eq(
+  'needs_task_choice does not count as a write — it only asks a question',
+  buildFacts(ctx(), [{ kind: 'needs_task_choice', action: 'complete', open: [] }], TZ).wrote,
   false,
 );
 

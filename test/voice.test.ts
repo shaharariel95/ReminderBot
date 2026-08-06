@@ -46,6 +46,13 @@ const samples: Effect[] = [
   { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
   { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
   { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
+  {
+    kind: 'needs_task_choice', action: 'complete',
+    open: [
+      { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+      { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+    ],
+  },
 ];
 
 for (const e of samples) {
@@ -77,16 +84,32 @@ check('goal_closed renders "done" and "dropped" differently', (() => {
 check('reminder_duplicate names the existing reminder and its time',
   render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT }).includes('לקחת בגד ים') &&
   render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT }).includes('07:05'));
+check('needs_task_choice lists every open instance, not just one',
+  (() => {
+    const t = render({
+      kind: 'needs_task_choice', action: 'complete',
+      open: [
+        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+      ],
+    });
+    return t.includes('לקחת בגד ים') && t.includes('לזרוק זבל');
+  })());
 
-section('WROTE invariant — the new non-writing effect uses no CLAIM verb');
+section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
 {
-  // reminder_duplicate is deliberately absent from WROTE (types.ts): nothing
-  // was inserted. If voice.ts's wording for it contained a CLAIM verb
-  // (validate.ts's lexicon), the deterministic baseline would reject itself
-  // the instant facts.wrote is false.
+  // reminder_duplicate and needs_task_choice are deliberately absent from
+  // WROTE (types.ts): nothing was inserted for either. If voice.ts's wording
+  // for them contained a CLAIM verb (validate.ts's lexicon), the deterministic
+  // baseline would reject itself the instant facts.wrote is false.
   const claims = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה/;
   check('reminder_duplicate\'s baseline contains no CLAIM verb',
     !claims.test(render({ kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT })));
+  check('needs_task_choice\'s baseline contains no CLAIM verb',
+    !claims.test(render({
+      kind: 'needs_task_choice', action: 'complete',
+      open: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null }],
+    })));
 }
 
 section('reminder_created with duplicateOf warns about the near-duplicate');
