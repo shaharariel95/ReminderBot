@@ -656,6 +656,58 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('the per-minute governor spends its last calls on routing, not on wording');
+  {
+    // The free tier limits requests per MINUTE, and the old guard counted per
+    // DAY — so it never fired and a burst just ate 429s. With one call left,
+    // the reminder must still be created; only the personality is sacrificed.
+    const rig = createRig();
+    seedSettings(rig);
+    // Budget 10/minute, 7 already spent. Routing (ceiling 10) still fits at 8;
+    // wording (ceiling 7, being decorative) does not. The numbers are chosen so
+    // that a call is refused ONLY because of the decorative discount — with a
+    // flat ceiling both would go through, which is exactly the regression this
+    // pins.
+    const frozen = wallToUtc(2026, 8, 7, 12, 0, TZ);
+    rig.env.GEMINI_RPM = '10';
+    rig.db
+      .prepare('INSERT INTO rate_window (bucket, calls) VALUES (?, 7)')
+      .run(`${new Date(frozen).toISOString().slice(0, 16)}|${rig.env.GEMINI_MODEL}`);
+
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'לרוץ', schedule_type: 'daily', time: '07:00' }],
+    });
+    rig.speakQueue.push('this must never be reached');
+
+    await withNow(frozen, async () => {
+      // A recurring phrase, so quickparse hands it to the router rather than
+      // answering it deterministically.
+      await runWebhook(rig, 'תזכיר לי כל יום ב-7 לרוץ');
+    });
+
+    const kinds = rig.geminiCalls.map((c) => c.kind);
+    check('the router was still consulted', kinds.includes('router'), JSON.stringify(kinds));
+    check('but the decorative speak call was dropped', !kinds.includes('speak'), JSON.stringify(kinds));
+    eq('the reminder exists — the write survived the squeeze', reminders(rig).length, 1);
+    check('and he was still told, in the deterministic voice',
+      rig.texts().join('\n').includes('לרוץ'), JSON.stringify(rig.texts()));
+    rig.restore();
+  }
+
+  section('a used-up minute stops calling the model at all');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.env.GEMINI_RPM = '0.5'; // below 1: even the first non-decorative call is over
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+
+    await runWebhook(rig, 'תזכיר לי כל יום ב-7 לרוץ');
+    eq('no request was made to the model', rig.geminiCalls.length, 0);
+    check('and the bot still answered', rig.texts().length > 0, JSON.stringify(rig.texts()));
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('the morning brief lists today, once, and only once');
   {
     const rig = createRig();

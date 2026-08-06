@@ -25,6 +25,9 @@ GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 # (unprompted check-ins) stop calling the model and ship voice.ts output
 # directly. Reminders and nags are never throttled.
 GEMINI_SOFT_LIMIT = "200"
+# The axis the free tier actually enforces: requests per MINUTE, per model.
+# Real ceiling is 20; 18 leaves room for the retry a 429 would otherwise cost.
+GEMINI_RPM = "18"
 
 # Secrets — set with `npx wrangler secret put <NAME>`. Never put them in this file.
 #   TELEGRAM_BOT_TOKEN

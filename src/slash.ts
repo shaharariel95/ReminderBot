@@ -58,6 +58,11 @@ export async function handleSlash(
         `שימוש היום — ${primary}: ${await db.usageToday(env, primary)}, ` +
           `${fallback}: ${await db.usageToday(env, fallback)}`,
         `תשובות שנפסלו היום: ${await db.usageToday(env, '_rejections')}`,
+        // The daily counters above are the axis that never binds. This is the
+        // one that does, and seeing it live is the whole reason /diag exists.
+        `תקרת דקה: ${env.GEMINI_RPM ?? 18} לכל מודל · בדקה הזאת: ${await db
+          .rateWindowNow(env, primary)
+          .catch(() => '?')}`,
       );
       try {
         const t0 = Date.now();

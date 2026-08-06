@@ -314,5 +314,10 @@ export async function speak(
     contents.push({ role: 'user', parts: [{ text: '(המשך)' }] });
   }
 
-  return generate(env, { system, contents, temperature: 1.05, maxOutputTokens: 2000 });
+  // Decorative: the baseline this rewrites is already true and already
+  // shippable, so when the minute's budget runs short this is the call that
+  // should go, leaving room for the routing that decides what actually happens.
+  return generate(env, {
+    system, contents, temperature: 1.05, maxOutputTokens: 2000, decorative: true,
+  });
 }

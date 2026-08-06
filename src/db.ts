@@ -587,6 +587,43 @@ export async function usageToday(env: Env, model: string): Promise<number> {
 }
 
 /** Counts validator rejections so /diag can report how often the model lies. */
+/**
+ * Count one call against the current minute's window and return the new total.
+ *
+ * Counts ATTEMPTS, not successes — unlike recordUsage, which only fires on a
+ * reply that came back with text. A 429 costs the same quota as a 200, so a
+ * counter that ignores failures would happily keep hammering a limit it had
+ * already blown through.
+ *
+ * The first call of a new minute prunes every older window: the bucket key puts
+ * the minute first precisely so that this is one range delete rather than a
+ * scan, and doing it here means no cron job has to remember to.
+ */
+export async function bumpRateWindow(env: Env, minute: string, model: string): Promise<number> {
+  const bucket = `${minute}|${model}`;
+  const row = await env.DB.prepare(
+    `INSERT INTO rate_window (bucket, calls) VALUES (?, 1)
+       ON CONFLICT(bucket) DO UPDATE SET calls = calls + 1
+       RETURNING calls`,
+  )
+    .bind(bucket)
+    .first<{ calls: number }>();
+  const calls = row?.calls ?? 1;
+  if (calls === 1) {
+    await env.DB.prepare('DELETE FROM rate_window WHERE bucket < ?').bind(`${minute}|`).run();
+  }
+  return calls;
+}
+
+/** Calls already spent in the current minute for `model` — read-only, for /diag. */
+export async function rateWindowNow(env: Env, model: string): Promise<number> {
+  const minute = new Date().toISOString().slice(0, 16);
+  const row = await env.DB.prepare('SELECT calls FROM rate_window WHERE bucket = ?')
+    .bind(`${minute}|${model}`)
+    .first<{ calls: number }>();
+  return row?.calls ?? 0;
+}
+
 export async function recordRejection(env: Env): Promise<void> {
   await recordUsage(env, '_rejections');
 }

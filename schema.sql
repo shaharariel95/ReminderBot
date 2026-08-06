@@ -90,6 +90,14 @@ CREATE TABLE settings (
   last_closeout_on TEXT
 );
 
+-- One row per minute per model. The free tier limits requests per MINUTE, not
+-- per day, so this is the counter that actually protects anything. Old rows are
+-- pruned by the first call of each new minute — see db.bumpRateWindow.
+CREATE TABLE rate_window (
+  bucket TEXT    PRIMARY KEY,           -- "2026-08-07T14:32|gemini-3.5-flash"
+  calls  INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per model per day. Small, and it lets /diag tell the truth about quota.
 CREATE TABLE usage (
   day   TEXT    NOT NULL,                          -- "2026-08-04" UTC

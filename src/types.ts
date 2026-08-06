@@ -6,7 +6,16 @@ export interface Env {
   OWNER_CHAT_ID: string;
   GEMINI_MODEL?: string;
   GEMINI_MODEL_FALLBACK?: string;
+  /** Calls per DAY before the bot stops consulting the model at all. */
   GEMINI_SOFT_LIMIT?: string;
+  /**
+   * Calls per MINUTE, per model. This is the axis the free tier actually
+   * limits — /diag caught it returning `limit: 20` with "please retry in 56s"
+   * while the daily budget still had hundreds left, so the daily guard above
+   * had never once fired. Kept a little under the real ceiling so a burst
+   * degrades to the deterministic baseline instead of to a 429.
+   */
+  GEMINI_RPM?: string;
   DEFAULT_TZ?: string;
   /**
    * Test-only override for sendBurst's inter-chunk sleep (see telegram.ts).
