@@ -394,7 +394,7 @@ async function sendOutcome(
   }
 
   try {
-    const rows = buttonsFor(effects as unknown as { kind: string }[]);
+    const rows = buttonsFor(effects);
     const sent = await sendBurst(env, chatId, text, rows ? keyboard(rows) : undefined);
     if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
     return sent.length > 0;
