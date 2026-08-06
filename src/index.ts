@@ -11,9 +11,9 @@ import {
   getPhotoBase64,
   react,
   sendBurst,
-  sendChatAction,
   sendMessage,
   settleButtons,
+  withTyping,
 } from './telegram';
 import { buttonsFor, decode, keyboard } from './buttons';
 import {
@@ -104,7 +104,11 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     }
   }
 
-  await sendChatAction(env, chatId);
+  // Instant acknowledgment. The considered reply follows; this lands in ~200ms
+  // and is the difference between "present" and "processing". Fires before
+  // the model is ever consulted, on the user's own message — there is no
+  // equivalent on the cron path, since there's no incoming message to react to.
+  if (msg.message_id) await react(env, chatId, msg.message_id, '👀');
 
   // Any inbound message ends a chill period. If he is talking, he is available.
   const ctx = await buildContext(env, chatId);
@@ -378,7 +382,9 @@ async function sendOutcome(
   if (await modelAllowed(env, priority)) {
     try {
       const history = await db.recentMessages(env, chatId, 8);
-      const dressed = await speak(env, facts, history, baseline, toneNote);
+      const dressed = await withTyping(env, chatId, () =>
+        speak(env, facts, history, baseline, toneNote),
+      );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
       const verdict = validate(dressed, facts, baseline);

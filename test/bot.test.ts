@@ -34,7 +34,10 @@ async function runWebhook(rig: Rig, text: string): Promise<void> {
       'content-type': 'application/json',
       'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
     },
-    body: JSON.stringify({ message: { chat: { id: Number(CHAT) }, text } }),
+    // A real Telegram message always carries a message_id — handleUpdate's
+    // instant reaction (Task 12) is keyed off it, so a fixture without one
+    // would silently skip the reaction on every webhook test.
+    body: JSON.stringify({ message: { chat: { id: Number(CHAT) }, text, message_id: 999 } }),
   });
   await worker.fetch(req, rig.env, ctx);
   await Promise.all(pending);
@@ -761,6 +764,99 @@ async function main() {
     const sent = rig.sent.filter((s) => s.method === 'sendMessage');
     check('an inbox capture offers scheduling slots',
       sent.some((s) => JSON.stringify(s.markup ?? '').includes('"p:')),
+      `markup: ${JSON.stringify(sent.map((s) => s.markup))}`);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('aliveness — typing, pacing, reactions');
+  {
+    const { pacingDelay } = await import('../src/telegram');
+    const short = pacingDelay(10, () => 0.5);
+    const long = pacingDelay(120, () => 0.5);
+    check(`a short line pauses at least 900ms (${short})`, short >= 900);
+    check(`a long line pauses longer than a short one (${long} > ${short})`, long > short);
+    check(`pauses are capped at 5s (${long})`, long <= 5000);
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    rig.speakQueue.push('קבעתי.');
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+    check('the user message got an instant reaction',
+      rig.methods().includes('setMessageReaction'),
+      `methods: ${rig.methods().join(', ')}`);
+    // rig.sent and rig.geminiCalls are separate logs; timeline interleaves
+    // both so "before the model was consulted" is a real ordering check,
+    // not an assumption from reading the code.
+    const reactIdx = rig.timeline.indexOf('tg:setMessageReaction');
+    const speakIdx = rig.timeline.indexOf('gemini:speak');
+    check('the reaction fires before the model is consulted',
+      reactIdx !== -1 && speakIdx !== -1 && reactIdx < speakIdx,
+      `timeline: ${rig.timeline.join(', ')}`);
+    rig.restore();
+  }
+  {
+    // Cron has no incoming user message, so there is nothing to react to —
+    // and no reaction should be attempted on that path.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    rig.speakQueue.push('נו? לרוץ.');
+    await runCron(rig);
+    check('a cron-fired reminder never reacts',
+      !rig.methods().includes('setMessageReaction'),
+      `methods: ${rig.methods().join(', ')}`);
+    rig.restore();
+  }
+  {
+    // withTyping must return promptly once fn() settles — measured with a
+    // real elapsed-time assertion, not inferred from reading the code. The
+    // brief's own withTyping sets `live = false` but that does not interrupt
+    // an in-flight setTimeout, so a naive version blocks here for up to
+    // intervalMs after fn() has already resolved. A large gap between
+    // intervalMs and fnDelayMs makes that failure mode unmistakable: the
+    // correct version finishes near fnDelayMs, the buggy one near intervalMs.
+    const { withTyping } = await import('../src/telegram');
+    const rig = createRig();
+    seedSettings(rig);
+    const fnDelayMs = 50;
+    const intervalMs = 300;
+    const start = Date.now();
+    await withTyping(rig.env, CHAT, () => new Promise((r) => setTimeout(r, fnDelayMs)), intervalMs);
+    const elapsed = Date.now() - start;
+    check(`withTyping returns promptly after fn() settles (${elapsed}ms for a ${fnDelayMs}ms fn, ${intervalMs}ms interval)`,
+      elapsed < intervalMs / 2,
+      `elapsed=${elapsed}ms — a slow return means stopping the heartbeat isn't cancelling its pending timer`);
+    rig.restore();
+  }
+  {
+    // The heartbeat must actually re-fire during a long call, not just once
+    // up front — otherwise Telegram's ~5s indicator expiry still shows dead
+    // air on any reply slower than that.
+    const { withTyping } = await import('../src/telegram');
+    const rig = createRig();
+    seedSettings(rig);
+    const intervalMs = 15;
+    await withTyping(rig.env, CHAT, () => new Promise((r) => setTimeout(r, intervalMs * 4)), intervalMs);
+    const beats = rig.methods().filter((m) => m === 'sendChatAction').length;
+    check(`the heartbeat re-fires more than once for a call longer than the interval (${beats} beats)`,
+      beats > 1,
+      `methods: ${rig.methods().join(', ')}`);
+    rig.restore();
+  }
+  {
+    // Keyboard placement must survive the sendBurst rewrite: still attached
+    // only to the final chunk of a multi-message burst.
+    const { sendBurst } = await import('../src/telegram');
+    const rig = createRig();
+    const marker = { inline_keyboard: [[{ text: 'x', callback_data: 'x' }]] };
+    const chunks = await sendBurst(rig.env, CHAT, 'חלק א\n\nחלק ב\n\nחלק ג', marker);
+    eq('all three chunks were sent', chunks.length, 3);
+    const sent = rig.sent.filter((s) => s.method === 'sendMessage');
+    eq('three messages went out', sent.length, 3);
+    check('only the last chunk carries the keyboard',
+      !sent[0].markup && !sent[1].markup && JSON.stringify(sent[2].markup) === JSON.stringify(marker),
       `markup: ${JSON.stringify(sent.map((s) => s.markup))}`);
     rig.restore();
   }

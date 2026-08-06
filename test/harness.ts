@@ -7,8 +7,17 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { setBurstSleepForTests } from '../src/telegram';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// sendBurst's inter-chunk pacing (900ms-5s per gap, see pacingDelay in
+// src/telegram.ts) is real production behaviour, but no test in this suite
+// asserts anything about its actual wall-clock timing — only pacingDelay's
+// return value and sendBurst's chunk/markup output are checked. Installed
+// once per test process (every test file imports this module), before any
+// test can call sendBurst, so a multi-chunk reply never costs real time here.
+setBurstSleepForTests(async () => {});
 
 // ------------------------------------------------------------------ D1 shim
 
@@ -84,6 +93,13 @@ export interface Rig {
   db: DatabaseSync;
   /** Every Telegram sendMessage that actually went out. */
   sent: Sent[];
+  /**
+   * Every outbound call (Telegram methods as `tg:<method>`, Gemini calls as
+   * `gemini:<kind>`) in the single order they actually happened, across both
+   * kinds — `sent` and `geminiCalls` are separate arrays and can't answer
+   * "did the reaction fire before the model was consulted?" on their own.
+   */
+  timeline: string[];
   /** Every Gemini call, so a test can assert what the model was actually told. */
   geminiCalls: GeminiCall[];
   /** Plain text of the messages the user would have seen, in order. */
@@ -132,6 +148,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     },
     db: sqlite,
     sent: [],
+    timeline: [],
     geminiCalls: [],
     texts: () => rig.sent.filter((s) => s.method === 'sendMessage').map((s) => s.text ?? ''),
     methods: () => rig.sent.map((s) => s.method),
@@ -167,6 +184,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
         return json({ ok: false, description: 'test rig: telegram down' });
       }
       rig.sent.push({ method, chat_id: body.chat_id, text: body.text, markup: body.reply_markup });
+      rig.timeline.push(`tg:${method}`);
       return json({ ok: true, result: {} });
     }
 
@@ -182,6 +200,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
         kind: isRouter ? 'router' : 'speak',
         system: body?.systemInstruction?.parts?.[0]?.text ?? '',
       });
+      rig.timeline.push(`gemini:${isRouter ? 'router' : 'speak'}`);
       const queue = isRouter ? rig.routerQueue : rig.speakQueue;
       if (!queue.length) {
         throw new Error(
@@ -254,7 +273,9 @@ export async function withNow<T>(ms: number, fn: () => Promise<T>): Promise<T> {
 
 /** A Telegram update carrying a text message from the owner. */
 export function textUpdate(chatId: string, text: string): unknown {
-  return { message: { chat: { id: Number(chatId) }, text } };
+  // A real message always has a message_id — handleUpdate's instant reaction
+  // (Task 12) is keyed off it.
+  return { message: { chat: { id: Number(chatId) }, text, message_id: 999 } };
 }
 
 /** A Telegram update for an inline button tap. */
