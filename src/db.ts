@@ -296,6 +296,39 @@ export async function getReminder(env: Env, id: number): Promise<Reminder | null
   return env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first<Reminder>();
 }
 
+/** Close an open instance. Returns false if it was already closed — the guard
+ *  that makes a double-tapped button a no-op rather than a double count. */
+export async function closeIfOpen(
+  env: Env,
+  id: number,
+  status: 'done' | 'failed' | 'skipped',
+  proof: string | null = null,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE instances SET status = ?, proof = ?, closed_at = ?, next_nag_at = NULL WHERE id = ? AND status = 'open'",
+  )
+    .bind(status, proof, Date.now(), id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+export async function getInstance(env: Env, id: number): Promise<Instance | null> {
+  return env.DB.prepare('SELECT * FROM instances WHERE id = ?').bind(id).first<Instance>();
+}
+
+export async function retimeReminder(
+  env: Env,
+  id: number,
+  at: number,
+  schedule: string,
+): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE reminders SET next_fire_at = ?, schedule = ?, status = 'scheduled', active = 1 WHERE id = ?",
+  )
+    .bind(at, schedule, id)
+    .run();
+}
+
 export async function addMessage(
   env: Env,
   chatId: string,

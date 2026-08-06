@@ -6,8 +6,26 @@ import { buildFacts } from './facts';
 import { validate } from './validate';
 import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
 import { quickParse } from './quickparse';
-import { getPhotoBase64, sendBurst, sendChatAction, sendMessage } from './telegram';
-import { afterQuietHours, computeNext, formatLocal, isQuietHour, nextCheckinTime } from './time';
+import {
+  answerCallback,
+  getPhotoBase64,
+  react,
+  sendBurst,
+  sendChatAction,
+  sendMessage,
+  settleButtons,
+} from './telegram';
+import { decode } from './buttons';
+import {
+  afterQuietHours,
+  computeNext,
+  formatLocal,
+  isQuietHour,
+  nextCheckinTime,
+  wallParts,
+  wallString,
+  wallToUtc,
+} from './time';
 import { renderBaseline } from './voice';
 import type { Effect, Env, Intent, Schedule } from './types';
 
@@ -27,7 +45,12 @@ export default {
     }
 
     const update = (await req.json().catch(() => null)) as any;
-    if (update) ctx.waitUntil(handleUpdate(update, env).catch((e) => console.error('update', e)));
+    if (update) {
+      const job = update.callback_query
+        ? handleCallback(update, env)
+        : handleUpdate(update, env);
+      ctx.waitUntil(job.catch((e) => console.error('update', e)));
+    }
     // Always 200 fast, or Telegram retries the same update.
     return new Response('ok');
   },
@@ -149,6 +172,123 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
   await db.pruneMessages(env, chatId);
 }
 
+/** Snooze minutes taken straight off a button, unlike applyIntent's model-derived
+ *  path — decode() bounds hour/minute but not this, so a crafted callback_data
+ *  like 's:1:999999999' would otherwise reach db.snoozeInstance unclamped. */
+const clampSnooze = (minutes: number) => Math.min(720, Math.max(5, minutes));
+
+/**
+ * An inline button tap. Zero model calls: the effect is known from the payload,
+ * and voice.ts already has correct Hebrew for it. This is the fastest path in
+ * the bot and the reason it feels responsive.
+ */
+async function handleCallback(update: any, env: Env): Promise<void> {
+  const q = update.callback_query;
+  const chatId = String(q?.message?.chat?.id ?? '');
+  const fromId = String(q?.from?.id ?? '');
+
+  // Answer first — Telegram spins for 30s otherwise — but only for the owner.
+  // This is a new unauthenticated inbound path that writes to D1, so a
+  // leaked or guessed message id must not be a free write: check auth
+  // before touching the database, and before even answering the spinner,
+  // so a stranger's callback_query_id leaks nothing back either.
+  if (!chatId || !env.OWNER_CHAT_ID || fromId !== env.OWNER_CHAT_ID || chatId !== env.OWNER_CHAT_ID) {
+    console.log(`ignored callback from ${fromId}`);
+    return;
+  }
+  await answerCallback(env, q.id);
+
+  const cb = decode(String(q.data ?? ''));
+  if (!cb) {
+    console.warn(`undecodable callback_data: ${q.data}`);
+    return;
+  }
+
+  const ctx = await buildContext(env, chatId);
+  const effects: Effect[] = [];
+
+  switch (cb.t) {
+    case 'done': {
+      const inst = await db.getInstance(env, cb.instance);
+      if (inst && (await db.closeIfOpen(env, cb.instance, 'done', 'כפתור'))) {
+        const fresh = await db.stats(env, chatId);
+        effects.push({ kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak });
+      }
+      break;
+    }
+    case 'skip': {
+      const inst = await db.getInstance(env, cb.instance);
+      if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'כפתור'))) {
+        effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+      }
+      break;
+    }
+    case 'snooze': {
+      const inst = await db.getInstance(env, cb.instance);
+      if (inst && inst.status === 'open') {
+        const minutes = clampSnooze(cb.minutes);
+        await db.snoozeInstance(env, cb.instance, minutes);
+        effects.push({
+          kind: 'instance_snoozed', id: inst.id, title: inst.title,
+          until: Date.now() + minutes * 60_000, minutes,
+        });
+      }
+      break;
+    }
+    case 'retime': {
+      const rem = await db.getReminder(env, cb.reminder);
+      if (rem) {
+        const p = wallParts(Date.now(), rem.tz);
+        let at = wallToUtc(p.year, p.month, p.day, cb.hour, cb.minute, rem.tz);
+        if (at <= Date.now()) at += 86_400_000;
+        const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+        await db.retimeReminder(env, rem.id, at, JSON.stringify(schedule));
+        effects.push({ kind: 'reminder_retimed', id: rem.id, title: rem.title, at });
+      }
+      break;
+    }
+    case 'plan': {
+      const rem = await db.getReminder(env, cb.reminder);
+      if (rem && rem.status === 'inbox') {
+        if (cb.slot === 'none') {
+          effects.push({ kind: 'listed_inbox', rows: await db.listInbox(env, chatId) });
+        } else {
+          const at = slotToInstant(cb.slot, rem.tz);
+          const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
+          if (await db.scheduleInboxItem(env, rem.id, at, JSON.stringify(schedule))) {
+            effects.push({ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at });
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  // Always settle, even when the tap produced no effect (already closed,
+  // stale data): the user must see the tap registered either way.
+  await settleButtons(
+    env, chatId, Number(q.message.message_id),
+    String(q.message.text ?? ''),
+    effects.length ? '✓' : '—',
+  );
+  // priority 'skip' — the effect and its Hebrew wording are already known
+  // (voice.ts), so the whole point of a button is that it never touches the
+  // model. This is what keeps a tap free of both latency and quota.
+  if (effects.length) await sendOutcome(env, chatId, ctx, effects, undefined, 'skip');
+}
+
+/** Inbox quick-schedule slots, resolved in the reminder's own timezone. */
+function slotToInstant(slot: 'eve' | 'tm' | 'hr', tz: string): number {
+  const now = Date.now();
+  if (slot === 'hr') return now + 3_600_000;
+  const p = wallParts(now, tz);
+  if (slot === 'eve') {
+    const at = wallToUtc(p.year, p.month, p.day, 20, 0, tz);
+    return at > now ? at : at + 86_400_000;
+  }
+  return wallToUtc(p.year, p.month, p.day + 1, 9, 0, tz);
+}
+
 /** Judge a submitted photo against the open instance it is meant to prove. */
 async function applyPhoto(
   env: Env,
@@ -199,7 +339,7 @@ async function sendOutcome(
   ctx: Context,
   effects: Effect[],
   toneNote?: string,
-  priority: 'high' | 'low' = 'high',
+  priority: 'high' | 'low' | 'skip' = 'high',
 ): Promise<boolean> {
   const facts = buildFacts(ctx, effects, ctx.settings.tz);
   const baseline = renderBaseline(effects, ctx.settings.tz);
@@ -243,9 +383,13 @@ async function sendOutcome(
 /**
  * Reminders always get the model. Unprompted check-ins are the first thing to
  * degrade when the daily budget is running down — they are the least important
- * message the user receives, and a blunt one is no worse than none.
+ * message the user receives, and a blunt one is no worse than none. Button taps
+ * ('skip') never get the model at all: the effect and its Hebrew are already
+ * fully known, so there is nothing for a rewrite to add — only latency and
+ * quota to spend.
  */
-async function modelAllowed(env: Env, priority: 'high' | 'low'): Promise<boolean> {
+async function modelAllowed(env: Env, priority: 'high' | 'low' | 'skip'): Promise<boolean> {
+  if (priority === 'skip') return false;
   if (priority === 'high') return true;
   const limit = Number(env.GEMINI_SOFT_LIMIT ?? '200');
   if (!Number.isFinite(limit) || limit <= 0) return true;

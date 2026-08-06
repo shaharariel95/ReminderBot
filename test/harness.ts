@@ -87,6 +87,8 @@ export interface Rig {
   geminiCalls: GeminiCall[];
   /** Plain text of the messages the user would have seen, in order. */
   texts(): string[];
+  /** Bot API methods called, for asserting answerCallbackQuery and edits fired. */
+  methods(): string[];
   /** Router JSON responses, consumed in order. */
   routerQueue: unknown[];
   /** speak() text responses, consumed in order. Strings, or Error to throw. */
@@ -131,6 +133,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     sent: [],
     geminiCalls: [],
     texts: () => rig.sent.filter((s) => s.method === 'sendMessage').map((s) => s.text ?? ''),
+    methods: () => rig.sent.map((s) => s.method),
     routerQueue: [],
     speakQueue: [],
     geminiDown: false,
@@ -251,4 +254,16 @@ export async function withNow<T>(ms: number, fn: () => Promise<T>): Promise<T> {
 /** A Telegram update carrying a text message from the owner. */
 export function textUpdate(chatId: string, text: string): unknown {
   return { message: { chat: { id: Number(chatId) }, text } };
+}
+
+/** A Telegram update for an inline button tap. */
+export function callbackUpdate(chatId: string, data: string, fromId = chatId): unknown {
+  return {
+    callback_query: {
+      id: 'cb1',
+      from: { id: Number(fromId) },
+      message: { message_id: 555, chat: { id: Number(chatId) } },
+      data,
+    },
+  };
 }

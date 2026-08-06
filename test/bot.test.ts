@@ -9,7 +9,7 @@ import worker from '../src/index';
 import { quickParse } from '../src/quickparse';
 import { buildSystemPrompt } from '../src/persona';
 import { wallToUtc } from '../src/time';
-import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
+import { callbackUpdate, check, createRig, done, eq, section, withNow, type Rig } from './harness';
 import type { Settings, Stats } from '../src/types';
 import * as db from '../src/db';
 import { applyIntent } from '../src/effects';
@@ -35,6 +35,21 @@ async function runWebhook(rig: Rig, text: string): Promise<void> {
       'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
     },
     body: JSON.stringify({ message: { chat: { id: Number(CHAT) }, text } }),
+  });
+  await worker.fetch(req, rig.env, ctx);
+  await Promise.all(pending);
+}
+
+async function runUpdate(rig: Rig, update: unknown): Promise<void> {
+  const pending: Promise<unknown>[] = [];
+  const ctx: any = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {} };
+  const req = new Request('https://x/tg', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
+    },
+    body: JSON.stringify(update),
   });
   await worker.fetch(req, rig.env, ctx);
   await Promise.all(pending);
@@ -588,6 +603,60 @@ async function main() {
       `sent: ${out}`,
     );
     check('the fallback capture is also mentioned', out.includes('תפסתי'), `sent: ${out}`);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
+  section('buttons — a tap closes the task with no model call');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const rid = seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    rig.speakQueue.push('נו? לרוץ.');
+    await runCron(rig);
+    const inst = rig.db.prepare("SELECT id FROM instances WHERE status='open'").get() as any;
+    check('an open instance exists', !!inst);
+
+    const before = rig.geminiCalls.length;
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
+
+    check('the spinner was answered', rig.methods().includes('answerCallbackQuery'));
+    check('the buttons were removed', rig.methods().some((m) => m.startsWith('editMessage')));
+    eq('no model call was made', rig.geminiCalls.length, before);
+    const row = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
+    eq('the instance is done', row.status, 'done');
+    rig.restore();
+  }
+
+  section('buttons — double tap is a no-op, not a double count');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    rig.speakQueue.push('נו?');
+    await runCron(rig);
+    const inst = rig.db.prepare("SELECT id FROM instances WHERE status='open'").get() as any;
+
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
+    const streakAfterFirst = (await db.stats(rig.env, CHAT)).currentStreak;
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`));
+    eq('streak did not move on the second tap',
+      (await db.stats(rig.env, CHAT)).currentStreak, streakAfterFirst);
+    rig.restore();
+  }
+
+  section('buttons — a tap from anyone else is ignored');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    rig.speakQueue.push('נו?');
+    await runCron(rig);
+    const inst = rig.db.prepare("SELECT id FROM instances WHERE status='open'").get() as any;
+
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${inst.id}`, '99999'));
+    const row = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(inst.id) as any;
+    eq('a stranger cannot close a task', row.status, 'open');
     rig.restore();
   }
 
