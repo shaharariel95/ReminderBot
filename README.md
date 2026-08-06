@@ -223,10 +223,14 @@ per-reminder columns.
 Everything lives in `src/persona.ts`. Edit, `npm run deploy`, done.
 `INTENSITY` is the 1–3 snark dial, `NAG_LADDER` is the shrinking ladder above.
 
-It replies in **bursts of 2–3 short messages** rather than paragraphs
-(`sendBurst` in `src/telegram.ts` splits on blank lines). The rhythm carries a
-surprising amount of the character — the same words in one block read like a
-form letter.
+It replies in **bursts of short messages** rather than paragraphs (`sendBurst` in
+`src/telegram.ts` splits on blank lines), paced at roughly 22 characters per
+second with jitter. The rhythm carries a surprising amount of the character.
+
+The persona no longer decides *what* to say. `src/voice.ts` produces a correct,
+blunt Hebrew message from what the database actually did; the model rewrites it
+in character; `src/validate.ts` throws the rewrite away if it invented a time, a
+task, or a confirmation. `/diag` reports how often that happens.
 
 Two guardrails in there are load-bearing, and I'd leave them:
 

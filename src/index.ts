@@ -144,7 +144,9 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
       toneNote =
         'עקיפת מצוקה. תוריד את הדמות לגמרי. בלי עוקצנות, בלי משימות. תהיה בנאדם.';
     } else if (image && photoComplete) {
-      effects = await applyPhoto(env, chatId, ctx, photoComplete, image, text);
+      const photoResult = await applyPhoto(env, chatId, ctx, photoComplete, image, text);
+      effects = photoResult.effects;
+      toneNote = photoResult.toneNote;
     } else {
       // Applied in order, so "סיימתי, ותזכיר לי עוד שעה" closes the task before
       // the new reminder is written.
@@ -324,25 +326,31 @@ async function applyPhoto(
   intent: Intent,
   image: { data: string; mimeType: string },
   caption: string,
-): Promise<Effect[]> {
+): Promise<{ effects: Effect[]; toneNote?: string }> {
   const inst =
     ctx.open.find((i) => i.id === intent.target_id) ?? (ctx.open.length ? ctx.open[0] : null);
-  if (!inst) return [{ kind: 'nothing', why: 'no_open_task', userText: caption }];
+  if (!inst) return { effects: [{ kind: 'nothing', why: 'no_open_task', userText: caption }] };
 
   const verdict = await judgePhoto(env, inst.title, image, caption);
   if (verdict.verdict !== 'accepted') {
-    return [
-      { kind: 'photo_rejected', instanceId: inst.id, title: inst.title, reason: verdict.reason },
-    ];
+    return {
+      effects: [
+        { kind: 'photo_rejected', instanceId: inst.id, title: inst.title, reason: verdict.reason },
+      ],
+      toneNote: 'תעיר לו על הניסיון, בעוקצנות. המשימה עדיין פתוחה ושניכם יודעים את זה.',
+    };
   }
   await db.closeInstance(env, inst.id, 'done', `תמונה: ${verdict.reason}`);
   const fresh = await db.stats(env, chatId);
-  return [
-    {
-      kind: 'photo_accepted', instanceId: inst.id, title: inst.title,
-      reason: verdict.reason, streak: fresh.currentStreak,
-    },
-  ];
+  return {
+    effects: [
+      {
+        kind: 'photo_accepted', instanceId: inst.id, title: inst.title,
+        reason: verdict.reason, streak: fresh.currentStreak,
+      },
+    ],
+    toneNote: 'תן קרדיט אמיתי וקצר. הוא טרח לצלם, שזה ייחשב לו.',
+  };
 }
 
 /**
