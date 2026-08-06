@@ -105,6 +105,21 @@ function instances(rig: Rig): { id: number; status: string }[] {
   return rig.db.prepare('SELECT id, status FROM instances').all() as any;
 }
 
+/** A Telegram update carrying a photo with a caption from the owner. The
+ *  harness's fetch stub answers getPhotoBase64's getFile + file-download hops
+ *  with a fake JPEG, so this reaches applyPhoto with a real (non-null) image
+ *  instead of short-circuiting. */
+function photoUpdate(caption: string): unknown {
+  return {
+    message: {
+      chat: { id: Number(CHAT) },
+      caption,
+      photo: [{ file_id: 'test-photo', file_size: 1000 }],
+      message_id: 999,
+    },
+  };
+}
+
 async function buildTestContext(rig: Rig): Promise<Context> {
   const [settings, stats, rems, goals, open] = await Promise.all([
     db.getSettings(rig.env, CHAT),
@@ -907,6 +922,56 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('photo verdicts — the tone note reaches the model');
+  {
+    // Task 6 refactored applyPhoto down to Effect[] only, which silently
+    // dropped the per-verdict tone note that used to reach speak() on both
+    // the accept and reject paths. Task 13 restored it. Nothing guarded that
+    // restoration before this block — a future refactor could drop it again
+    // exactly as quietly.
+    const rig = createRig();
+    seedSettings(rig);
+    const reminderId = seedReminder(rig, 'לקפל כביסה', Date.now() + 3_600_000);
+    const instId = seedInstance(rig, reminderId, 'לקפל כביסה', Date.now() - 1000);
+
+    rig.routerQueue.push({ actions: [{ action: 'complete', target_id: instId }] });
+    rig.routerQueue.push({ verdict: 'accepted', reason: 'רואים כביסה מקופלת בסלסלה' });
+    rig.speakQueue.push('כל הכבוד.');
+
+    await runUpdate(rig, photoUpdate('סיימתי'));
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    const toneSection = speakCall?.system.split('## הנחיית טון לתשובה הזאת')[1];
+    check(
+      'an accepted photo carries its own tone note into the rewrite',
+      toneSection !== undefined && toneSection.includes('תן קרדיט אמיתי וקצר'),
+      `tone section: ${toneSection?.slice(0, 200) ?? '(no "## הנחיית טון" heading found — toneNote is undefined)'}`,
+    );
+    rig.restore();
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const reminderId = seedReminder(rig, 'לקפל כביסה', Date.now() + 3_600_000);
+    const instId = seedInstance(rig, reminderId, 'לקפל כביסה', Date.now() - 1000);
+
+    rig.routerQueue.push({ actions: [{ action: 'complete', target_id: instId }] });
+    rig.routerQueue.push({ verdict: 'rejected', reason: 'זו תמונה של חתול, לא של כביסה' });
+    rig.speakQueue.push('זה לא זה.');
+
+    await runUpdate(rig, photoUpdate('סיימתי'));
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    const toneSection = speakCall?.system.split('## הנחיית טון לתשובה הזאת')[1];
+    check(
+      'a rejected photo carries its own tone note into the rewrite',
+      toneSection !== undefined && toneSection.includes('תעיר לו על הניסיון'),
+      `tone section: ${toneSection?.slice(0, 200) ?? '(no "## הנחיית טון" heading found — toneNote is undefined)'}`,
+    );
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('persona — the prompt matches its new job');
   {
     const settings: Settings = {
@@ -920,7 +985,9 @@ async function main() {
     check('it is told it may not add facts', p.includes('אל תוסיף'));
     check('it is told the rewrite will be discarded if it does', p.includes('תיזרק'));
     check('the burst length rule allows a single message', p.includes('הודעה אחת'));
-    check('no unconditional confirmation rule survives', !p.includes('היא כבר נקבעה'));
+    // The "no unconditional confirmation rule survives" tombstone already
+    // lives in the BUG-1 section above — same phrase, same buildSystemPrompt
+    // call shape. Not repeated here to avoid two copies of one tombstone.
   }
 
   done();

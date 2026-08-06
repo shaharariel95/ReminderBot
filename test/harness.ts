@@ -185,7 +185,20 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     const body = init?.body ? JSON.parse(init.body) : {};
 
     if (url.includes('api.telegram.org')) {
+      // getPhotoBase64's second hop: a raw GET to Telegram's file CDN, not a
+      // bot-API JSON method — handled before the generic branch below so a
+      // photo-flow test reaches applyPhoto with a real (if fake) image
+      // instead of silently short-circuiting at getFile's missing file_path.
+      if (url.includes('/file/bot')) {
+        return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg' },
+        });
+      }
       const method = url.split('/').pop()!;
+      if (method === 'getFile') {
+        return json({ ok: true, result: { file_path: 'photos/test-rig-fake.jpg' } });
+      }
       // Only sendMessage simulates the outage — sendChatAction already
       // swallows its own errors in telegram.ts, so failing it too would not
       // exercise anything new.

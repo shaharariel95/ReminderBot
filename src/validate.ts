@@ -17,6 +17,11 @@ export interface Verdict {
  * dropped entirely because it collides with ordinary chat ("סידרתי לך את
  * הבלגן"). "רשמתי" already contains "שמתי" as a substring, so the common
  * claim form is still caught.
+ *
+ * persona.ts rule 2 ("אמת לפני אופי") states the same active/passive
+ * claim-of-write principle in prose, so the model has a prompt-side reason
+ * not to attempt a rewrite this lexicon will discard. If this regex changes,
+ * check whether that rule's examples still cover it.
  */
 const CLAIM = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה/;
 
