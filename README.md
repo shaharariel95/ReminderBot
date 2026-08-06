@@ -21,7 +21,7 @@ below.
 
 ```
 Telegram ──webhook──> Worker /tg
-    ├─ message ────────> route() (Gemini, temp 0, JSON) → decides WHAT
+    ├─ message ────────> route() (Gemini, temp 0.2, JSON) → decides WHAT
     │                    applyIntent() (plain TS, effects.ts) → touches the DB → Effect[]
     └─ callback_query ─> buttons.ts decode() → touches the DB → Effect[]
                           (no model call — the effect and its Hebrew are already known)
@@ -48,7 +48,9 @@ of cron triggers.
 
 **The router and the personality are separate calls.** The personality never
 gets write access to the database, and the scheduler never has to sound like a
-form letter. `route()` returns structured JSON at temperature 0; `applyIntent()`
+form letter. `route()` returns structured JSON at temperature 0.2 (the lowest
+that stays clear of Gemini's RECITATION filter on constrained decoding — see
+`src/gemini.ts`); `applyIntent()`
 is ordinary TypeScript that touches the database and returns a list of
 `Effect`s — a typed record of what actually happened.
 
@@ -56,8 +58,10 @@ is ordinary TypeScript that touches the database and returns a list of
 every `Effect` into correct, deterministic Hebrew before the model ever sees it
 — that baseline is what actually gets sent if anything downstream fails. The
 model's only job is making that text sound like נו?; `validate.ts` compares the
-rewrite against the same allow-lists the baseline was built from (times, titles,
-numbers) and discards it if it invented one. A button tap skips the model
+rewrite against the same allow-lists the baseline was built from — clock-format
+times (`HH:MM`) and titles — and discards it if it invented one. That check is
+narrower than "any fact": a hallucinated streak count or nag round isn't in an
+allow-list at all, so it isn't caught this way. A button tap skips the model
 entirely — the effect and its Hebrew are already fully known, so a tap is both
 free of quota and the fastest path in the bot.
 
@@ -372,6 +376,7 @@ on `validate.test.ts` to catch it indirectly.
 |---|---|
 | `src/index.ts` | Webhook handler (messages + button callbacks) + cron tick + nag loop + check-ins |
 | `src/brain.ts` | `route()`, `speak()`, `judgePhoto()` |
+| `src/quickparse.ts` | Deterministic fast path for "remind me to X in N minutes" — skips the router (and its failure modes) for the single most common phrasing |
 | `src/effects.ts` | `applyIntent()` — intent → database, returns the `Effect[]` that happened |
 | `src/facts.ts` | `buildFacts()` — the allow-lists (times, titles) the validator enforces |
 | `src/voice.ts` | `renderBaseline()` — deterministic, correct Hebrew for every `Effect` |

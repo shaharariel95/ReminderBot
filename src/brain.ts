@@ -5,7 +5,7 @@ import { describeSchedule, formatLocal, wallString } from './time';
 
 /**
  * Two-stage brain, on purpose:
- *   route()  — temperature 0, structured JSON, decides WHAT happens. Deterministic-ish.
+ *   route()  — temperature 0.2, structured JSON, decides WHAT happens. Deterministic-ish.
  *   speak()  — temperature 1, decides HOW it is said. Never touches the database.
  * Keeping them apart means the personality can never accidentally delete a reminder,
  * and the scheduler can never accidentally sound like a form letter.
