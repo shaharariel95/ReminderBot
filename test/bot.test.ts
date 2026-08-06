@@ -573,6 +573,39 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('a multi-item tick sees its own earlier writes — Finding 2');
+  {
+    // tick() used to build one `ctx` up front and reuse it, unrefreshed,
+    // across every send in the `due` loop — even though the first due
+    // reminder's own db.createInstance had, by the time the second reminder's
+    // message was built, already opened an instance the persona's "מצב נוכחי"
+    // block should be able to see. Two due reminders in one tick: the second
+    // reminder's system prompt must show the first reminder's instance as
+    // open, not describe the tick as it stood before either fired.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'משימה א', Date.now() - 2000);
+    seedReminder(rig, 'משימה ב', Date.now() - 1000);
+    rig.speakQueue.push('נו? משימה א.');
+    rig.speakQueue.push('נו? משימה ב.');
+
+    await runCron(rig);
+
+    const speakCalls = rig.geminiCalls.filter((c) => c.kind === 'speak');
+    eq('one speak call per due reminder', speakCalls.length, 2);
+
+    const openSection = (system: string) =>
+      system.split('משימות פתוחות שנשלחו אליו')[1]?.split('המטרות המתמשכות')[0] ?? '';
+
+    check(
+      'the second reminder\'s context already shows the first reminder\'s instance as open — not stale from before this tick\'s writes',
+      openSection(speakCalls[1]?.system ?? '').includes('משימה א'),
+      `second call's open section: ${openSection(speakCalls[1]?.system ?? '')}`,
+    );
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('effects already committed survive a later write failing');
   {
     // The old catch block OVERWROTE `effects` with a generic capture whenever

@@ -27,7 +27,7 @@ import {
   wallToUtc,
 } from './time';
 import { renderBaseline } from './voice';
-import type { Effect, Env, Intent, Schedule } from './types';
+import type { Effect, Env, Facts, Intent, Schedule } from './types';
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -367,6 +367,13 @@ async function applyPhoto(
  * their state mutations (closeInstance, bumpNag) had already committed. That
  * is a reminder marked delivered that the user never received — the original
  * bug this project exists to fix.
+ *
+ * buildFacts/renderBaseline are pure functions over an exhaustively-typed
+ * union — there is no throwing case constructible today — but they sit
+ * inside the same guard as everything else here anyway: this whole function
+ * exists to keep one bad turn from aborting the rest of a tick, and a future
+ * edit to voice.ts or facts.ts reintroducing a throw path should degrade to
+ * the generic fallback below, not take the tick down with it.
  */
 async function sendOutcome(
   env: Env,
@@ -376,8 +383,19 @@ async function sendOutcome(
   toneNote?: string,
   priority: 'high' | 'low' | 'none' = 'high',
 ): Promise<boolean> {
-  const facts = buildFacts(ctx, effects, ctx.settings.tz);
-  const baseline = renderBaseline(effects, ctx.settings.tz);
+  let facts: Facts | null = null;
+  let baseline: string;
+  try {
+    facts = buildFacts(ctx, effects, ctx.settings.tz);
+    baseline = renderBaseline(effects, ctx.settings.tz);
+  } catch (err) {
+    console.error('buildFacts/renderBaseline', err);
+    // No facts means nothing for speak()/validate() to check a rewrite
+    // against, so this skips the model entirely below and ships a message
+    // that is still true, if generic — never silence, never an invented one.
+    baseline = 'קרתה תקלה אצלי עם ההודעה הזאת. תבדוק /diag אם זה חוזר.';
+  }
+
   if (!baseline.trim()) {
     // Every known effect kind renders non-empty text (see voice.ts); this is
     // defence against a future kind that doesn't, so the silence leaves a
@@ -387,11 +405,11 @@ async function sendOutcome(
   }
 
   let text = baseline;
-  if (await modelAllowed(env, priority)) {
+  if (facts && (await modelAllowed(env, priority))) {
     try {
       const history = await db.recentMessages(env, chatId, 8);
       const dressed = await withTyping(env, chatId, () =>
-        speak(env, facts, history, baseline, toneNote),
+        speak(env, facts!, history, baseline, toneNote),
       );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
@@ -485,8 +503,16 @@ async function tick(env: Env): Promise<void> {
     return;
   }
 
-  // Everything is single-user, so one context covers the whole tick.
-  const ctx = await buildContext(env, chatId);
+  // Everything is single-user, so one context covers the whole tick — except
+  // that `due` and `nags` below each write to the rows the context describes
+  // (setNextFire/createInstance, closeInstance/bumpNag) before sending. `ctx`
+  // is therefore re-fetched right before each send that follows a write in
+  // this tick, so a second due reminder's "מצב נוכחי" reflects the instance
+  // the first one just opened, and a give-up's streak reflects the close that
+  // just happened — instead of describing the tick as it stood before any of
+  // this tick's own writes landed. Phase 2's morning brief/evening close-out
+  // will make multi-item ticks the normal case, not the exception.
+  let ctx = await buildContext(env, chatId);
   const muted = !!ctx.settings.muted_until && ctx.settings.muted_until > now;
   const quiet = isQuietHour(
     now,
@@ -508,6 +534,7 @@ async function tick(env: Env): Promise<void> {
     const instanceId = await db.createInstance(env, r, now);
     if (muted) continue;
 
+    ctx = await buildContext(env, chatId);
     const delivered = await sendOutcome(env, chatId, ctx,
       [{ kind: 'reminder_fired', id: r.id, title: r.title, instanceId, requiresProof: r.requires_proof === 1 }],
       NAG_LADDER[0]);
@@ -537,6 +564,7 @@ async function tick(env: Env): Promise<void> {
 
     if (inst.nag_count >= maxNags) {
       await db.closeInstance(env, inst.id, 'failed');
+      ctx = await buildContext(env, chatId);
       await sendOutcome(env, chatId, ctx,
         [{ kind: 'gave_up', instanceId: inst.id, title: inst.title, rounds: inst.nag_count }],
         GIVE_UP);
@@ -545,6 +573,7 @@ async function tick(env: Env): Promise<void> {
 
     const level = Math.min(3, inst.nag_count + 1);
     await db.bumpNag(env, inst.id, now + interval * 60_000);
+    ctx = await buildContext(env, chatId);
     await sendOutcome(env, chatId, ctx,
       [{ kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at, round: level }],
       NAG_LADDER[level] ?? NAG_LADDER[3]);
