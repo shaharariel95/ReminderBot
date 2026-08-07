@@ -90,7 +90,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       }
     }
     if (e.kind === 'evening_closeout') {
-      for (const i of e.missed) titles.add(i.title);
+      for (const i of [...e.missed, ...e.dropped]) titles.add(i.title);
     }
     if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
     if (e.kind === 'checkin_goal') addQuotable(e.lastProgress);

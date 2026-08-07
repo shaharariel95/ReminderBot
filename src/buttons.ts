@@ -158,7 +158,13 @@ export function buttonsFor(
   // reminder. One row per item still open at the end of the day.
   const closeout = effects.find((e) => e.kind === 'evening_closeout');
   if (closeout) {
-    const missed = Array.isArray(closeout.missed) ? closeout.missed : [];
+    // Dropped tasks get a button too — they are the ones that most need one.
+    // Something still open can be answered by talking; something the bot has
+    // already given up on has no other way back.
+    const missed = [
+      ...(Array.isArray(closeout.missed) ? closeout.missed : []),
+      ...(Array.isArray(closeout.dropped) ? closeout.dropped : []),
+    ];
     const rows = missed.flatMap((m: { id?: unknown; title?: unknown }) => {
       const instance = positiveId(m?.id);
       if (instance === null) return [];

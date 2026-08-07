@@ -214,7 +214,12 @@ export type Effect =
   | { kind: 'listed_reminders'; rows: Reminder[]; openCount: number }
   | { kind: 'listed_goals'; rows: Goal[] }
   | { kind: 'listed_inbox'; rows: Reminder[] }
-  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean }
+  /**
+   * `misses` is how many times in a row this same reminder has already fired
+   * without being done. Carried so the wording can name the pattern instead of
+   * repeating the identical ping for the fifth time as though it were the first.
+   */
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number }
   | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
   | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
@@ -223,7 +228,13 @@ export type Effect =
   /** The once-a-day messages. Neither writes anything the user could be told
    *  about, so neither belongs in WROTE — they only describe existing rows. */
   | { kind: 'morning_brief'; rows: Reminder[]; openCount: number }
-  | { kind: 'evening_closeout'; done: number; failed: number; missed: Instance[] }
+  /**
+   * `missed` is still open; `dropped` was nagged the full ladder and closed as
+   * failed today. Both are carried as rows rather than counts so the reply can
+   * NAME them — a close-out that can only say "2 נפלו" is how an ignored task
+   * quietly stops existing.
+   */
+  | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
   | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };

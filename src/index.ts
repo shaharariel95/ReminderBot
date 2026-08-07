@@ -254,8 +254,18 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       }
       case 'tomorrow': {
         const inst = await db.getInstance(env, cb.instance);
-        if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'נדחה למחר'))) {
-          effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+        if (inst) {
+          // Two kinds of thing carry this button. One is still open and needs
+          // closing; the other the bot already gave up on hours ago and is
+          // closed already. Gating the whole branch on closeIfOpen made the
+          // button a no-op for exactly the tasks that most need it — the ones
+          // with no other way back.
+          if (
+            inst.status === 'open' &&
+            (await db.closeIfOpen(env, cb.instance, 'skipped', 'נדחה למחר'))
+          ) {
+            effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+          }
           const rem = await db.getReminder(env, inst.reminder_id);
           // A recurring reminder already has tomorrow covered by its own rule —
           // overwriting it with a one-off would silently end the recurrence,
@@ -615,12 +625,16 @@ async function tick(env: Env): Promise<void> {
     }
     await db.setNextFire(env, r.id, next);
 
+    // Read the run of past misses BEFORE opening this one, so the instance
+    // being created now cannot count itself.
+    const misses = await db.missStreak(env, r.id).catch(() => 0);
     const instanceId = await db.createInstance(env, r, now);
-    console.log(`fired reminder ${r.id} → instance ${instanceId}`);
+    console.log(`fired reminder ${r.id} → instance ${instanceId}${misses ? ` (${misses} missed)` : ''}`);
     if (muted) continue;
     fired.push({
       kind: 'reminder_fired', id: r.id, title: r.title, instanceId,
       requiresProof: r.requires_proof === 1,
+      ...(misses > 0 ? { misses } : {}),
     });
   }
 
@@ -721,14 +735,15 @@ async function sendMorningBrief(env: Env, chatId: string, now: number, tz: strin
 async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: string): Promise<void> {
   await db.markDailySent(env, chatId, 'closeout', localDateKey(now, tz));
   const { from } = localDayBounds(now, tz);
-  const [tally, missed] = await Promise.all([
+  const [tally, missed, dropped] = await Promise.all([
     db.dayTally(env, chatId, from, now),
     db.openInstances(env, chatId),
+    db.droppedBetween(env, chatId, from, now),
   ]);
-  if (!tally.done && !tally.failed && !missed.length) return;
+  if (!tally.done && !missed.length && !dropped.length) return;
   const ctx = await buildContext(env, chatId);
   await sendOutcome(env, chatId, ctx, [
-    { kind: 'evening_closeout', done: tally.done, failed: tally.failed, missed },
+    { kind: 'evening_closeout', done: tally.done, missed, dropped },
   ]);
 }
 

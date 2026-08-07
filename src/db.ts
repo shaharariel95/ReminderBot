@@ -271,6 +271,56 @@ export async function dayTally(
 }
 
 /**
+ * Instances the bot gave up on inside [from, to) — nagged the full ladder and
+ * never got an answer.
+ *
+ * These used to be unreachable the moment they were written: `status='failed'`
+ * is excluded from openInstances, and every other reader of that status treats
+ * it as a number to count. So a task you ignored three times stopped existing,
+ * which is the exact failure a nagging bot is supposed to prevent.
+ */
+export async function droppedBetween(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<Instance[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM instances
+      WHERE chat_id = ? AND status = 'failed'
+        AND closed_at IS NOT NULL AND closed_at >= ? AND closed_at < ?
+      ORDER BY closed_at`,
+  )
+    .bind(chatId, from, to)
+    .all<Instance>();
+  return res.results ?? [];
+}
+
+/**
+ * How many times in a row this reminder has fired without ever being closed as
+ * done — counting both the ones nagged into failure and the ones waved off with
+ * "לא היום", because from the outside they are the same fact: it isn't happening.
+ *
+ * Stops at the first 'done'. Open instances are excluded: the one firing right
+ * now has not been answered yet and must not count itself.
+ */
+export async function missStreak(env: Env, reminderId: number): Promise<number> {
+  const res = await env.DB.prepare(
+    `SELECT status FROM instances
+      WHERE reminder_id = ? AND status IN ('done','failed','skipped')
+      ORDER BY closed_at DESC LIMIT 20`,
+  )
+    .bind(reminderId)
+    .all<{ status: string }>();
+  let n = 0;
+  for (const r of res.results ?? []) {
+    if (r.status === 'done') break;
+    n++;
+  }
+  return n;
+}
+
+/**
  * Record that a once-a-day message went out for local date `day`.
  * Written BEFORE the send in tick(), deliberately: a failed send costs one
  * message, whereas a failed write would repeat that message every minute for
