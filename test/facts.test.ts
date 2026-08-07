@@ -64,7 +64,7 @@ section('duplicateOf.title — the trap: a nested title must still reach facts.t
   const created: Effect = {
     kind: 'reminder_created', id: 2, title: 'לקחת בגד ים', at: AT,
     schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
-    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף', at: AT },
   };
   const f = buildFacts(ctx(), [created], TZ);
   check(

@@ -1,4 +1,4 @@
-/** Run with `npm run test:voice`. */
+﻿/** Run with `npm run test:voice`. */
 import { renderBaseline } from '../src/voice';
 import { CLAIM } from '../src/validate';
 import { wallToUtc } from '../src/time';
@@ -280,7 +280,7 @@ check('the created reminder still states its own title and time, plus the existi
   const t = render({
     kind: 'reminder_created', id: 2, title: 'לקחת בגד ים', at: AT,
     schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
-    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף', at: AT },
   });
   return t.includes('לקחת בגד ים') && t.includes('לקחת בגד ים לחוף');
 })());

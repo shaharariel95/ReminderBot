@@ -52,7 +52,11 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     // effect. duplicateOf is nested inside reminder_created, so its title
     // needs an explicit sweep — otherwise a truthful mention of the existing
     // similar reminder gets discarded by validate.ts as an invented task.
-    if (e.kind === 'reminder_created' && e.duplicateOf) titles.add(e.duplicateOf.title);
+    if (e.kind === 'reminder_created' && e.duplicateOf) {
+      titles.add(e.duplicateOf.title);
+      // Its TIME is nested too, and the warning is worthless without it.
+      addTime(e.duplicateOf.at);
+    }
     // Same reason: a rename carries `from`/`to`, never `title`, so without this
     // the model gets discarded for naming either side of a change it just made.
     if (e.kind === 'reminder_renamed') {

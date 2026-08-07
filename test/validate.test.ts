@@ -306,19 +306,33 @@ section('duplicateOf.title — the nested-title trap, proven with a genuine roun
     kind: 'reminder_created', id: 2, title: 'לקחת בגד ים לים',
     at: new Date('2026-08-05T04:05:00Z').getTime(),   // 07:05 Asia/Jerusalem
     schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
-    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+    duplicateOf: {
+      id: 11, title: 'לקחת בגד ים לחוף',
+      // A DIFFERENT time from the reminder's own (21:00 vs 07:05). Reusing the
+      // same instant would let the top-level `at` sweep cover for the nested
+      // one, masking a missing sweep exactly as overlapping titles would.
+      at: new Date('2026-08-05T18:00:00Z').getTime(), // 21:00 Asia/Jerusalem
+    },
   };
   const f = facts([created]);
   check('facts.titles sweeps duplicateOf.title even though it is nested',
     f.titles.includes('לקחת בגד ים לחוף'), `titles: ${JSON.stringify(f.titles)}`);
+  check('and facts.times sweeps its time, which is nested just as deeply',
+    f.times.includes('21:00'), `times: ${JSON.stringify(f.times)}`);
 
-  const leanBaseline = 'קבעתי ל-07:05.'; // never quotes either title
+  const leanBaseline = 'קבעתי ל-07:05.'; // never quotes either title, never says 21:00
   const paraphrase = 'קבעתי, אבל שים לב שכבר יש לך "לקחת בגד ים לחוף" בסביבה.';
   const v = validate(paraphrase, f, leanBaseline);
   check(
     'a paraphrase naming the existing similar reminder round-trips through facts.titles, not the baseline fold',
     v.ok, v.reason,
   );
+  // The warning is worthless without the time, so the model has to be able to
+  // state it even when the baseline it was handed did not.
+  const withTime = validate(
+    'קבעתי. יש לך גם "לקחת בגד ים לחוף" ב-21:00.', f, leanBaseline,
+  );
+  check('and may state the other reminder\'s time for the same reason', withTime.ok, withTime.reason);
 }
 
 section('ambiguous-hour altHour never reaches validate() — it is a button label only');

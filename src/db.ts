@@ -220,6 +220,31 @@ export async function findNearbyReminders(
   return res.results ?? [];
 }
 
+/**
+ * Scheduled reminders firing inside [from, to), excluding one id.
+ *
+ * Used for the same-DAY duplicate check, where the window is far too wide to
+ * refuse anything on — "take the pill at 09:00 and again at 21:00" is a
+ * perfectly ordinary pair of reminders. It can only ever produce a warning.
+ */
+export async function remindersSameDay(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+  exceptId: number,
+): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminders
+      WHERE chat_id = ? AND status = 'scheduled' AND id != ?
+        AND next_fire_at IS NOT NULL AND next_fire_at >= ? AND next_fire_at < ?
+      ORDER BY next_fire_at`,
+  )
+    .bind(chatId, exceptId, from, to)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
 export async function listReminders(env: Env, chatId: string): Promise<Reminder[]> {
   const res = await env.DB.prepare(
     "SELECT * FROM reminders WHERE chat_id = ? AND status = 'scheduled' ORDER BY next_fire_at IS NULL, next_fire_at",

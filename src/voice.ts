@@ -55,7 +55,11 @@ function one(e: Effect, tz: string): string {
       }
       return `קבעתי: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
         e.requiresProof ? ' דורש תמונה.' : ''
-      }${e.duplicateOf ? ` שים לב, גם יש לך "${e.duplicateOf.title}" בערך באותו זמן.` : ''}`;
+      }${
+        e.duplicateOf
+          ? ` שים לב, יש לך גם "${e.duplicateOf.title}" ב-${hhmm(e.duplicateOf.at, tz)}.`
+          : ''
+      }`;
     case 'reminder_captured':
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'

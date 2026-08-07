@@ -166,12 +166,18 @@ export type Effect =
       kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule;
       requiresProof: boolean; altHour?: number;
       /**
-       * Set when a NEAR (not exact) duplicate already exists nearby in time.
-       * The reminder was still created — this only warns. Note: this title is
-       * nested, not top-level, so facts.ts must sweep it explicitly (see the
-       * comment there) or a truthful mention of it gets discarded by validate.ts.
+       * A similar reminder that already exists — either within seconds of this
+       * one, or elsewhere on the same day. The reminder was still created;
+       * this only warns, because "the pill at 09:00 and again at 21:00" is an
+       * ordinary pair and refusing it would be worse than mentioning it.
+       *
+       * `at` is carried so the warning can state WHEN the other one is, which
+       * is the whole difference between a useful nudge and a vague one. Note
+       * that neither this title nor this time sits at the top level of the
+       * effect, so facts.ts must sweep both explicitly (see the comment there)
+       * or a truthful mention gets discarded by validate.ts.
        */
-      duplicateOf?: { id: number; title: string };
+      duplicateOf?: { id: number; title: string; at: number };
     }
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
