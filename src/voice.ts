@@ -90,6 +90,18 @@ function one(e: Effect, tz: string): string {
       return `עדכנתי את "${e.title}": ${e.note}`;
     case 'goal_closed':
       return e.status === 'done' ? `"${e.title}" — סגור.` : `הורדתי את "${e.title}".`;
+    case 'profile_noted':
+      return `רשמתי לפניי: ${e.note}`;
+    case 'profile_known':
+      // Nothing was written. "רשמתי" here would be a claim about a write that
+      // did not happen, which is the one thing this whole pipeline forbids.
+      return `זה כבר אצלי: ${e.note}`;
+    case 'profile_forgotten':
+      return `שכחתי את זה: ${e.note}`;
+    case 'listed_profile':
+      return e.rows.length
+        ? ['מה שאני יודע עליך:', ...e.rows.map((r) => `#${r.id} ${r.note}`)].join('\n')
+        : 'אני לא יודע עליך כלום עדיין. תגיד לי משהו שכדאי שאזכור.';
     case 'checkins_set':
       return e.enabled
         ? `שיחות יזומות פעילות${e.perDay ? `, ${e.perDay} ביום` : ''}.`
@@ -188,6 +200,8 @@ function one(e: Effect, tz: string): string {
           return 'אין לי תזכורת כזאת.';
         case 'unknown_goal':
           return 'לא ברור לי על איזו מטרה מדובר.';
+        case 'unknown_note':
+          return 'אין לי כזה דבר רשום עליך.';
         case 'chat':
           return 'נו?';
       }

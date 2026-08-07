@@ -710,6 +710,89 @@ async function main() {
     rig.restore();
   }
 
+  // =========================================================================
+  section('profile — a stated fact is stored once, and re-stating it claims nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+
+    const first = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'remember', note: 'אני קם ב-6 כל בוקר' },
+      'אני קם ב-6 כל בוקר',
+    );
+    eq('the first telling is stored', first[0].kind, 'profile_noted');
+
+    const again = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'remember', note: 'אני קם ב-6 כל בוקר' },
+      'אני קם ב-6 כל בוקר',
+    );
+    // profile_noted is in WROTE; profile_known deliberately is not. Returning
+    // the former here would licence "רשמתי" for a turn that wrote nothing.
+    eq('the second is reported as already known', again[0].kind, 'profile_known');
+
+    const rows = rig.db.prepare('SELECT COUNT(*) c FROM profile').get() as any;
+    eq('and only one row exists', rows.c, 1);
+    rig.restore();
+  }
+
+  section('profile — forgetting works by what he said, not only by id');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+    await db.addProfileNote(rig.env, CHAT, 'אני שונא לרוץ בבוקר');
+
+    const gone = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'forget', note: 'קם ב-6' },
+      'תשכח שאני קם ב-6',
+    );
+    eq('the matching note is removed', gone[0].kind, 'profile_forgotten');
+    check('and it is the right one',
+      gone[0].kind === 'profile_forgotten' && gone[0].note === 'אני קם ב-6 כל בוקר',
+      JSON.stringify(gone[0]));
+
+    const left = await db.listProfileNotes(rig.env, CHAT);
+    eq('the other one is untouched', left.length, 1);
+    eq('and it is the one he did not mention', left[0].note, 'אני שונא לרוץ בבוקר');
+    rig.restore();
+  }
+
+  section('profile — forgetting something that was never said writes nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'forget', note: 'משהו שמעולם לא אמרתי' },
+      'x',
+    );
+    eq('it says so instead of deleting something at random', result[0].kind, 'nothing');
+    check('with a reason of its own', result[0].kind === 'nothing' && result[0].why === 'unknown_note');
+    eq('nothing was deleted', (await db.listProfileNotes(rig.env, CHAT)).length, 1);
+    rig.restore();
+  }
+
+  section('profile — notes are capped so they cannot crowd out the prompt');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const long = 'א'.repeat(500);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'remember', note: long }, long,
+    );
+    check('the stored note is truncated',
+      result[0].kind === 'profile_noted' && result[0].note.length === db.PROFILE_NOTE_MAX,
+      JSON.stringify((result[0] as any).note?.length));
+    const stored = await db.listProfileNotes(rig.env, CHAT);
+    eq('in the database too, not just in the effect', stored[0].note.length, db.PROFILE_NOTE_MAX);
+    rig.restore();
+  }
+
   done();
 }
 

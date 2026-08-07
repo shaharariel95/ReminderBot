@@ -29,8 +29,10 @@ export async function handleSlash(
         '/goals — המטרות שלך (אלה בלי שעה)',
         '/inbox — דברים שתפסתי בלי שעה',
         '/stats — רצף, בוצעו, נפלו',
+        '/profile — מה אני יודע עליך',
         '',
         'שליטה בי:',
+        '/remember [טקסט] — עובדה קבועה עליך שכדאי שאזכור',
         '/daily [בוקר] [ערב] — שעות הסיכום היומי. "off" מכבה.',
         '/chill [שעות] — שתיקה מוחלטת זמנית (ברירת מחדל 4). כל הודעה ממך מבטלת.',
         '/checkins on|off|1-8 — כמה אני פותח שיחות מעצמי',
@@ -106,6 +108,40 @@ export async function handleSlash(
           return `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${r.requires_proof ? ' · דורש הוכחה' : ''}`;
         })
         .join('\n');
+    }
+
+    case '/remember': {
+      const note = text.trim().slice('/remember'.length).trim();
+      if (!note) {
+        return 'תגיד לי מה לזכור. למשל: /remember אני קם ב-6 כל בוקר';
+      }
+      const id = await db.addProfileNote(env, chatId, note);
+      return id === null
+        ? `זה כבר אצלי: ${note.slice(0, db.PROFILE_NOTE_MAX)}`
+        : `רשמתי לפניי: ${note.slice(0, db.PROFILE_NOTE_MAX)}`;
+    }
+
+    case '/profile': {
+      const rest = text.trim().slice('/profile'.length).trim();
+      if (rest.toLowerCase() === 'clear') {
+        await db.clearProfile(env, chatId);
+        return 'ניקיתי הכל. אני לא יודע עליך כלום.';
+      }
+      const forget = /^forget\s+(\d+)$/i.exec(rest);
+      if (forget) {
+        const ok = await db.deleteProfileNote(env, chatId, Number(forget[1]));
+        return ok ? 'שכחתי.' : 'אין לי כזה מספר.';
+      }
+      const notes = await db.listProfileNotes(env, chatId);
+      if (!notes.length) {
+        return 'אני לא יודע עליך כלום עדיין.\nלהוספה: /remember [משהו קבוע עליך]';
+      }
+      return [
+        'מה שאני יודע עליך:',
+        ...notes.map((n) => `#${n.id} ${n.note}`),
+        '',
+        'למחיקה: /profile forget [מספר] · לניקוי הכל: /profile clear',
+      ].join('\n');
     }
 
     case '/today': {

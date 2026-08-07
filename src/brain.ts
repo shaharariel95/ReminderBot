@@ -24,6 +24,8 @@ const ACTION_SCHEMA = {
         'delete',
         'reschedule',
         'rename',
+        'remember',
+        'forget',
         'set_intensity',
         'chill',
         'create_goal',
@@ -36,6 +38,7 @@ const ACTION_SCHEMA = {
       ],
     },
     title: { type: 'STRING' },
+    note: { type: 'STRING' },
     why: { type: 'STRING' },
     goal_id: { type: 'INTEGER' },
     checkins_enabled: { type: 'BOOLEAN' },
@@ -185,6 +188,10 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 - "rename" — שינוי הניסוח של תזכורת קיימת בלי לגעת בשעה ("תשנה את זה ל'לקחת את הכלב'", "זה לא חלב זה לחם", וגם תשובה לשאלה שלך "על מה התזכורת?"). target_id = reminder id + title = הנוסח החדש.
 - "delete" — ביטול תזכורת. target_id = reminder id.
 - "list" — הוא שואל מה יש לו (תזכורות).
+- "remember" — הוא מספר לך עובדה קבועה על עצמו, כזאת שתישאר נכונה גם בעוד חודש: "אני קם ב-6", "יום שלישי זה יום ארוך אצלי", "אני שונא לרוץ בבוקר", "אשתי עובדת במשמרות". note = העובדה במילים שלו, קצר.
+  זה לא תזכורת (אין שעה שצריך לצלצל בה) וזה לא מטרה (אין מה להשיג). זה רק כדי שתכיר אותו.
+  אירוע חד-פעמי ("היום אני עייף", "אתמול הייתי חולה") זה **לא** remember — זה chat.
+- "forget" — הוא מבקש שתמחק עובדה כזאת ("תשכח שאני קם ב-6", "זה כבר לא נכון"). note = מה למחוק, או target_id אם הוא נקב במספר.
 
 הבחנה חשובה בין תזכורת למטרה:
 - **תזכורת** = משהו עם שעה. "תזכיר לי ב-7 לרוץ". → create_reminder.
@@ -297,6 +304,7 @@ export async function speak(
     buildSystemPrompt(
       facts.settings, facts.stats, facts.nowLabel,
       remindersSummary(ctx), goalsSummary(ctx), openSummary(ctx),
+      facts.profile,
     ) +
     `\n\n## מה שקרה עכשיו — זו האמת, אל תוסיף עליה\n${baseline}` +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +

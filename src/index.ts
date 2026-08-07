@@ -476,13 +476,25 @@ async function sendOutcome(
   let text = baseline;
   if (facts && (await modelAllowed(env, priority))) {
     try {
-      const recent = history ? history.slice(-8) : await db.recentMessages(env, chatId, 8);
+      const [recent, notes] = await Promise.all([
+        history ? Promise.resolve(history.slice(-8)) : db.recentMessages(env, chatId, 8),
+        db.listProfileNotes(env, chatId).catch(() => []),
+      ]);
+      // Read here rather than in buildContext so the paths that never speak —
+      // every button tap — do not pay for it. The notes go into `quotable` as
+      // well as `profile`: the model is shown them, so it may truthfully quote
+      // one back, and the validator has to know that is allowed.
+      const spoken: Facts = {
+        ...facts,
+        profile: notes.map((n) => n.note),
+        quotable: [...facts.quotable, ...notes.map((n) => n.note)],
+      };
       const dressed = await withTyping(env, chatId, () =>
-        speak(env, facts!, recent, baseline, toneNote),
+        speak(env, spoken, recent, baseline, toneNote),
       );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
-      const verdict = validate(dressed, facts, baseline);
+      const verdict = validate(dressed, spoken, baseline);
       if (verdict.ok) {
         text = dressed;
       } else {

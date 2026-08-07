@@ -527,6 +527,69 @@ export async function renameReminder(env: Env, id: number, title: string): Promi
   return (res.meta.changes ?? 0) > 0;
 }
 
+// ------------------------------------------------------------------ profile
+
+/** Cap per note and per prompt, so the profile can never crowd out the rest of
+ *  the system prompt no matter how much he tells it. */
+export const PROFILE_NOTE_MAX = 200;
+export const PROFILE_LIMIT = 20;
+
+/**
+ * Store a stated fact about him. Returns null when an identical note is
+ * already on file — saying the same thing twice must not produce two rows, and
+ * more importantly must not produce a confirmation implying something new was
+ * learned.
+ */
+export async function addProfileNote(
+  env: Env,
+  chatId: string,
+  note: string,
+): Promise<number | null> {
+  const clean = note.trim().slice(0, PROFILE_NOTE_MAX);
+  if (!clean) return null;
+  const existing = await env.DB.prepare(
+    'SELECT id FROM profile WHERE chat_id = ? AND note = ?',
+  )
+    .bind(chatId, clean)
+    .first<{ id: number }>();
+  if (existing) return null;
+  const res = await env.DB.prepare(
+    'INSERT INTO profile (chat_id, note, created_at) VALUES (?, ?, ?)',
+  )
+    .bind(chatId, clean, Date.now())
+    .run();
+  return Number(res.meta.last_row_id);
+}
+
+/** Newest first — the most recently stated fact is the most likely to be current. */
+export async function listProfileNotes(
+  env: Env,
+  chatId: string,
+  limit = PROFILE_LIMIT,
+): Promise<{ id: number; note: string }[]> {
+  const res = await env.DB.prepare(
+    'SELECT id, note FROM profile WHERE chat_id = ? ORDER BY id DESC LIMIT ?',
+  )
+    .bind(chatId, limit)
+    .all<{ id: number; note: string }>();
+  return res.results ?? [];
+}
+
+export async function deleteProfileNote(
+  env: Env,
+  chatId: string,
+  id: number,
+): Promise<boolean> {
+  const res = await env.DB.prepare('DELETE FROM profile WHERE id = ? AND chat_id = ?')
+    .bind(id, chatId)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+export async function clearProfile(env: Env, chatId: string): Promise<void> {
+  await env.DB.prepare('DELETE FROM profile WHERE chat_id = ?').bind(chatId).run();
+}
+
 export async function addMessage(
   env: Env,
   chatId: string,

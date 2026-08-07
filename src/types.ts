@@ -120,6 +120,10 @@ export interface Intent {
     | 'reschedule'
     /** Fix the wording of an existing reminder without touching its schedule. */
     | 'rename'
+    /** Store a durable fact he stated about himself. Not a reminder, not a
+     *  goal — nothing fires, nothing is chased. It only informs the tone. */
+    | 'remember'
+    | 'forget'
     | 'set_intensity'
     | 'chill'
     | 'create_goal'
@@ -149,6 +153,8 @@ export interface Intent {
   checkin_per_day?: number;
   distress?: boolean;
   reason?: string;
+  /** The durable fact for `remember`, in his own words. */
+  note?: string;
   /**
    * Set when the hour was written without am/pm and we committed to the literal
    * reading. Value is the other reading's hour, offered as a one-tap correction.
@@ -214,6 +220,15 @@ export type Effect =
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
+  /**
+   * A durable fact about him was stored, or removed. `already` distinguishes
+   * "I've noted that" from "I already knew that" — nothing was written in the
+   * second case, so it is deliberately NOT in WROTE.
+   */
+  | { kind: 'profile_noted'; id: number; note: string }
+  | { kind: 'profile_known'; note: string }
+  | { kind: 'profile_forgotten'; note: string }
+  | { kind: 'listed_profile'; rows: { id: number; note: string }[] }
   | { kind: 'checkins_set'; enabled: boolean; perDay: number | null }
   | { kind: 'muted'; until: number; hours: number }
   | { kind: 'intensity_set'; level: number }
@@ -243,7 +258,7 @@ export type Effect =
   | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
-  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };
+  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'unknown_note' | 'chat'; userText: string };
 
 /**
  * The title a reminder gets when he asked to be reminded but never said of
@@ -259,7 +274,7 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
-  'intensity_set', 'photo_accepted',
+  'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten',
 ]);
 
 /**
@@ -284,6 +299,13 @@ export interface Facts {
    * never shortened or paraphrased, so it is matched in one direction only.
    */
   quotable: string[];
+  /**
+   * Durable facts he has stated about himself. Read lazily — only when a turn
+   * is actually going to consult the model — so the button path, which never
+   * speaks, does not pay for them. buildFacts therefore leaves this empty and
+   * sendOutcome fills it in before speak()/validate().
+   */
+  profile: string[];
   /** True when at least one effect wrote to the database. */
   wrote: boolean;
 }

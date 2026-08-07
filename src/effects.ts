@@ -294,6 +294,33 @@ export async function applyIntent(
       return [{ kind: 'reminder_renamed', id: rem.id, from: rem.title, to }];
     }
 
+    case 'remember': {
+      const note = (intent.note ?? intent.title ?? userText).trim();
+      if (!note) return [{ kind: 'nothing', why: 'chat', userText }];
+      const id = await db.addProfileNote(env, chatId, note);
+      // Already on file. Nothing was written, so this must not be reported as
+      // if something had been — hence a separate effect kind outside WROTE
+      // rather than a `profile_noted` with a flag on it.
+      if (id === null) return [{ kind: 'profile_known', note: note.slice(0, db.PROFILE_NOTE_MAX) }];
+      return [{ kind: 'profile_noted', id, note: note.slice(0, db.PROFILE_NOTE_MAX) }];
+    }
+
+    case 'forget': {
+      const notes = await db.listProfileNotes(env, chatId);
+      const wanted = (intent.note ?? intent.title ?? '').trim();
+      const hit =
+        notes.find((n) => n.id === intent.target_id) ??
+        (wanted
+          ? notes.find(
+              (n) => n.note.includes(wanted) || wanted.includes(n.note),
+            )
+          : undefined);
+      if (!hit || !(await db.deleteProfileNote(env, chatId, hit.id))) {
+        return [{ kind: 'nothing', why: 'unknown_note', userText }];
+      }
+      return [{ kind: 'profile_forgotten', note: hit.note }];
+    }
+
     case 'create_goal': {
       if (!intent.title) return [{ kind: 'nothing', why: 'unknown_goal', userText }];
       const id = await db.addGoal(env, chatId, intent.title, intent.why ?? null);

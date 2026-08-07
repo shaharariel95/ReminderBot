@@ -41,6 +41,10 @@ const samples: Effect[] = [
   { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
   { kind: 'morning_brief', rows: [], openCount: 0 },
   { kind: 'evening_closeout', done: 0, missed: [], dropped: [] },
+  { kind: 'profile_noted', id: 1, note: 'אני קם ב-6' },
+  { kind: 'profile_known', note: 'אני קם ב-6' },
+  { kind: 'profile_forgotten', note: 'אני קם ב-6' },
+  { kind: 'listed_profile', rows: [] },
   { kind: 'distress', text: 'אני שבור' },
   { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
   { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },
@@ -255,6 +259,19 @@ section('a reminder that keeps not happening says so');
     grouped.includes('4'), grouped);
   check('and the task without a run is not accused of one',
     !/לזרוק זבל.*ברצף/.test(grouped), grouped);
+}
+
+section('being told something twice is not the same as writing it down');
+{
+  const stored = render({ kind: 'profile_noted', id: 1, note: 'אני קם ב-6' });
+  const known = render({ kind: 'profile_known', note: 'אני קם ב-6' });
+  check('storing a new fact confirms it plainly', stored.includes('אני קם ב-6'), stored);
+  check('and re-stating a known one reads differently', stored !== known, known);
+  // profile_noted IS in WROTE and may say "רשמתי". profile_known is NOT, and
+  // saying it there would be a claim about a write that did not happen — the
+  // one thing this whole pipeline exists to make impossible.
+  check('the "already knew that" wording contains no CLAIM verb', !CLAIM.test(known), known);
+  check('but it still repeats the fact back', known.includes('אני קם ב-6'), known);
 }
 
 section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');

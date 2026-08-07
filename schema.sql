@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS reminders;
 DROP TABLE IF EXISTS messages;
 DROP TABLE IF EXISTS goals;
 DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS profile;
 
 CREATE TABLE reminders (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +70,16 @@ CREATE TABLE goals (
   created_at       INTEGER NOT NULL
 );
 CREATE INDEX idx_goals_chat ON goals(chat_id, status, last_checkin_at);
+
+-- Durable facts he has STATED about himself — see migrations/005. Not a
+-- conversation summary, and not anything the bot inferred.
+CREATE TABLE profile (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id    TEXT    NOT NULL,
+  note       TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_profile_chat ON profile(chat_id, id DESC);
 
 CREATE TABLE settings (
   chat_id          TEXT PRIMARY KEY,

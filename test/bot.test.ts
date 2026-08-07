@@ -667,6 +667,76 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('what he told you about himself reaches the prompt, and outlives the conversation');
+  {
+    // The whole point of the table. A note stored today has to still be in the
+    // system prompt after the messages that produced it have been pruned away,
+    // otherwise it is just conversation history under another name.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+    await db.addProfileNote(rig.env, CHAT, 'יום שלישי זה יום ארוך בעבודה');
+    rig.speakQueue.push('סבבה.');
+
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('the first note is in the system prompt',
+      speakCall?.system.includes('אני קם ב-6 כל בוקר') === true, speakCall?.system.slice(0, 200));
+    check('and so is the second',
+      speakCall?.system.includes('יום שלישי זה יום ארוך בעבודה') === true, '');
+    rig.restore();
+  }
+  {
+    // ...but only when there is something to say. An empty profile must not
+    // leave an empty heading in the prompt inviting the model to fill it.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.speakQueue.push('סבבה.');
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('no profile section at all when nothing is on file',
+      speakCall?.system.includes('מה שאתה יודע עליו') === false, '');
+    rig.restore();
+  }
+  {
+    // Button taps never consult the model, so they must not pay for the read.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6');
+    const remId = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000);
+    const instId = seedInstance(rig, remId, 'לרוץ', Date.now() - 1000);
+    rig.sql.length = 0;
+
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${instId}`));
+
+    eq('a button tap does not read the profile',
+      rig.sql.filter((s) => /FROM profile/.test(s)).length, 0);
+    rig.restore();
+  }
+
+  section('/remember and /profile work without the model');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+
+    await runWebhook(rig, '/remember אני קם ב-6 כל בוקר');
+    await runWebhook(rig, '/remember אני קם ב-6 כל בוקר');
+    await runWebhook(rig, '/profile');
+
+    eq('no model call for any of it', rig.geminiCalls.length, 0);
+    const texts = rig.texts();
+    check('the first is stored', texts[0].includes('רשמתי'), texts[0]);
+    check('the second is recognised as already known, not stored again',
+      texts[1].includes('כבר אצלי'), texts[1]);
+    const rows = rig.db.prepare('SELECT COUNT(*) c FROM profile').get() as any;
+    eq('one row, not two', rows.c, 1);
+    check('and /profile lists it', texts[2].includes('אני קם ב-6 כל בוקר'), texts[2]);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('a turn does not pay for the same answer twice');
   {
     // Conversation history was read once to give the router context and then
