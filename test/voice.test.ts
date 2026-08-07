@@ -1,4 +1,4 @@
-/** Run with `npm run test:voice`. */
+﻿/** Run with `npm run test:voice`. */
 import { renderBaseline } from '../src/voice';
 import { CLAIM } from '../src/validate';
 import { wallToUtc } from '../src/time';
@@ -40,7 +40,11 @@ const samples: Effect[] = [
   { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
   { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
   { kind: 'morning_brief', rows: [], openCount: 0 },
-  { kind: 'evening_closeout', done: 0, failed: 0, missed: [] },
+  { kind: 'evening_closeout', done: 0, missed: [], dropped: [] },
+  { kind: 'profile_noted', id: 1, note: 'אני קם ב-6' },
+  { kind: 'profile_known', note: 'אני קם ב-6' },
+  { kind: 'profile_forgotten', note: 'אני קם ב-6' },
+  { kind: 'listed_profile', rows: [] },
   { kind: 'distress', text: 'אני שבור' },
   { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
   { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },
@@ -194,19 +198,80 @@ section('the daily messages describe the day without claiming to have changed it
   check('an empty day still says something rather than nothing',
     renderBaseline([{ kind: 'morning_brief', rows: [], openCount: 0 }], TZ).trim().length > 0);
 
+  const inst = (id: number, title: string, status: 'open' | 'failed') => ({
+    id, reminder_id: 1, chat_id: '1', title, fired_at: AT, next_nag_at: null,
+    nag_count: 0, status, proof: null, closed_at: null,
+  });
+
   const closeout = renderBaseline([{
-    kind: 'evening_closeout', done: 2, failed: 0,
-    missed: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null }],
+    kind: 'evening_closeout', done: 2,
+    missed: [inst(9, 'לזרוק זבל', 'open')], dropped: [],
   }], TZ);
   check('the close-out counts what was closed', closeout.includes('2'), closeout);
   check('and names what was not', closeout.includes('לזרוק זבל'), closeout);
   check('the close-out claims no write', !CLAIM.test(closeout), closeout);
 
-  const clean = renderBaseline([{ kind: 'evening_closeout', done: 3, failed: 0, missed: [] }], TZ);
+  // The gap this section exists for: a task nagged the full ladder and given
+  // up on used to be reachable only as a NUMBER. "2 נפלו" is not something he
+  // can act on, and there is a button underneath it that assumes he can.
+  const withDropped = renderBaseline([{
+    kind: 'evening_closeout', done: 0,
+    missed: [], dropped: [inst(11, 'לרוץ', 'failed'), inst(12, 'להתקשר לאמא', 'failed')],
+  }], TZ);
+  check('tasks the bot gave up on are named, not counted',
+    withDropped.includes('לרוץ') && withDropped.includes('להתקשר לאמא'), withDropped);
+  check('and are distinguished from the ones still open',
+    !withDropped.includes('עדיין פתוח'), withDropped);
+
+  const both = renderBaseline([{
+    kind: 'evening_closeout', done: 1,
+    missed: [inst(9, 'לזרוק זבל', 'open')], dropped: [inst(11, 'לרוץ', 'failed')],
+  }], TZ);
+  check('a day with both kinds lists both, separately',
+    both.includes('עדיין פתוח') && both.includes('ויתרתי') &&
+    both.includes('לזרוק זבל') && both.includes('לרוץ'), both);
+
+  const clean = renderBaseline([{ kind: 'evening_closeout', done: 3, missed: [], dropped: [] }], TZ);
   check('a day with no loose ends says so', clean.includes('אין זנבות'), clean);
-  const nothing = renderBaseline([{ kind: 'evening_closeout', done: 0, failed: 0, missed: [] }], TZ);
+  const nothing = renderBaseline([{ kind: 'evening_closeout', done: 0, missed: [], dropped: [] }], TZ);
   check('and a day with nothing closed does not pretend otherwise',
     nothing.includes('לא סגרת כלום'), nothing);
+}
+
+section('a reminder that keeps not happening says so');
+{
+  const fire = (misses?: number) =>
+    renderBaseline([{ kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false, ...(misses === undefined ? {} : { misses }) }], TZ);
+
+  check('a first miss changes nothing — a bad day is not a pattern', fire(1) === fire(), fire(1));
+  check('two is still not a pattern', fire(2) === fire(), fire(2));
+  check('three in a row is', fire(3) !== fire(), fire(3));
+  check('and the run is stated as a number he can argue with', fire(4).includes('4'), fire(4));
+  // reminder_fired is not in WROTE, so the extra sentence is bound by the same
+  // lexicon rule as the rest of it.
+  check('the pattern note claims no write', !CLAIM.test(fire(5)), fire(5));
+
+  const grouped = renderBaseline([
+    { kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false, misses: 4 },
+    { kind: 'reminder_fired', id: 2, title: 'לזרוק זבל', instanceId: 10, requiresProof: false },
+  ], TZ);
+  check('a long run is still named when several fire at once',
+    grouped.includes('4'), grouped);
+  check('and the task without a run is not accused of one',
+    !/לזרוק זבל.*ברצף/.test(grouped), grouped);
+}
+
+section('being told something twice is not the same as writing it down');
+{
+  const stored = render({ kind: 'profile_noted', id: 1, note: 'אני קם ב-6' });
+  const known = render({ kind: 'profile_known', note: 'אני קם ב-6' });
+  check('storing a new fact confirms it plainly', stored.includes('אני קם ב-6'), stored);
+  check('and re-stating a known one reads differently', stored !== known, known);
+  // profile_noted IS in WROTE and may say "רשמתי". profile_known is NOT, and
+  // saying it there would be a claim about a write that did not happen — the
+  // one thing this whole pipeline exists to make impossible.
+  check('the "already knew that" wording contains no CLAIM verb', !CLAIM.test(known), known);
+  check('but it still repeats the fact back', known.includes('אני קם ב-6'), known);
 }
 
 section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
@@ -232,7 +297,7 @@ check('the created reminder still states its own title and time, plus the existi
   const t = render({
     kind: 'reminder_created', id: 2, title: 'לקחת בגד ים', at: AT,
     schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
-    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף' },
+    duplicateOf: { id: 11, title: 'לקחת בגד ים לחוף', at: AT },
   });
   return t.includes('לקחת בגד ים') && t.includes('לקחת בגד ים לחוף');
 })());

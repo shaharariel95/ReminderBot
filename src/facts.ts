@@ -52,7 +52,11 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     // effect. duplicateOf is nested inside reminder_created, so its title
     // needs an explicit sweep — otherwise a truthful mention of the existing
     // similar reminder gets discarded by validate.ts as an invented task.
-    if (e.kind === 'reminder_created' && e.duplicateOf) titles.add(e.duplicateOf.title);
+    if (e.kind === 'reminder_created' && e.duplicateOf) {
+      titles.add(e.duplicateOf.title);
+      // Its TIME is nested too, and the warning is worthless without it.
+      addTime(e.duplicateOf.at);
+    }
     // Same reason: a rename carries `from`/`to`, never `title`, so without this
     // the model gets discarded for naming either side of a change it just made.
     if (e.kind === 'reminder_renamed') {
@@ -90,7 +94,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       }
     }
     if (e.kind === 'evening_closeout') {
-      for (const i of e.missed) titles.add(i.title);
+      for (const i of [...e.missed, ...e.dropped]) titles.add(i.title);
     }
     if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
     if (e.kind === 'checkin_goal') addQuotable(e.lastProgress);
@@ -99,6 +103,13 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       addQuotable(e.previous);
     }
     if (e.kind === 'goal_created') addQuotable(e.why);
+    // Profile notes are prose in his own words, not task titles, so they go in
+    // `quotable` — matched one-directionally, which is what keeps a short note
+    // from becoming a wildcard that authorises any longer quote.
+    if (e.kind === 'profile_noted' || e.kind === 'profile_known' || e.kind === 'profile_forgotten') {
+      addQuotable(e.note);
+    }
+    if (e.kind === 'listed_profile') for (const r of e.rows) addQuotable(r.note);
     if (e.kind === 'nothing') addQuotable(e.userText);
   }
 
@@ -113,6 +124,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     times: [...times],
     titles: [...titles],
     quotable: [...quotable],
+    // Filled in by sendOutcome, and only when the model is actually consulted.
+    profile: [],
     wrote: effects.some((e) => WROTE.has(e.kind)),
   };
 }

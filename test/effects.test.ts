@@ -142,13 +142,76 @@ async function main() {
     rig.restore();
   }
 
-  section('duplicate detection — clearly outside the window is NOT a duplicate');
+  section('duplicate detection — outside the window is warned about, never refused');
   {
     // Two `once` schedules only carry HH:MM (no seconds — see time.ts's parse
     // regex), so the meaningful boundary to test at this granularity is
-    // whole minutes. Five minutes apart is unambiguously outside any 60s
-    // window and exercises the self-review question directly: a legitimate
-    // second reminder must never be silently refused.
+    // whole minutes. Five minutes apart is outside the 60s window, so the
+    // insert must go through — but it IS the same thing on the same day, which
+    // is what the wider check exists to notice.
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+
+    await withNow(base - 3_600_000, async () => {
+      const first = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת בגד ים', schedule_type: 'once', once_at: '2026-08-07T09:00' },
+        'x',
+      );
+      const firstId = (first[0] as any).id as number;
+      const second = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת בגד ים', schedule_type: 'once', once_at: '2026-08-07T09:05' },
+        'x',
+      );
+      eq('a same-title reminder 5 minutes outside the window creates normally', second[0].kind, 'reminder_created');
+      check(
+        'but is flagged against the one already on the same day, with its time',
+        second[0].kind === 'reminder_created' &&
+          second[0].duplicateOf?.id === firstId &&
+          second[0].duplicateOf?.at === wallToUtc(2026, 8, 7, 9, 0, TZ),
+        `got: ${JSON.stringify(second[0])}`,
+      );
+    });
+    eq('both rows exist — a legitimate second reminder is never silently refused', reminderRows(rig).length, 2);
+    rig.restore();
+  }
+
+  section('duplicate detection — the same-day check warns, it never refuses');
+  {
+    // The realistic case the 60-second window was never going to catch: he
+    // asked for the same thing twice, hours apart, having forgotten the first.
+    // It still has to be CREATED, because "the pill at 09:00 and again at
+    // 21:00" is an ordinary pair and refusing it would be far worse than
+    // mentioning it.
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+
+    await withNow(base - 3_600_000, async () => {
+      const first = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת כדור', schedule_type: 'once', once_at: '2026-08-07T09:00' },
+        'x',
+      );
+      const firstId = (first[0] as any).id as number;
+      const second = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת כדור', schedule_type: 'once', once_at: '2026-08-07T21:00' },
+        'x',
+      );
+      eq('twelve hours apart still creates', second[0].kind, 'reminder_created');
+      check('and warns, naming the other one and when it is',
+        second[0].kind === 'reminder_created' && second[0].duplicateOf?.id === firstId,
+        `got: ${JSON.stringify(second[0])}`);
+    });
+    eq('both were written — the user decides, not the bot', reminderRows(rig).length, 2);
+    rig.restore();
+  }
+
+  section('duplicate detection — a different task on the same day is not a duplicate');
+  {
     const rig = createRig();
     seedSettings(rig);
     const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
@@ -156,19 +219,44 @@ async function main() {
     await withNow(base - 3_600_000, async () => {
       await applyIntent(
         rig.env, CHAT, await ctxFor(rig),
-        { action: 'create_reminder', title: 'לקחת בגד ים', schedule_type: 'once', once_at: '2026-08-07T09:00' },
+        { action: 'create_reminder', title: 'לקחת כדור', schedule_type: 'once', once_at: '2026-08-07T09:00' },
         'x',
       );
       const second = await applyIntent(
         rig.env, CHAT, await ctxFor(rig),
-        { action: 'create_reminder', title: 'לקחת בגד ים', schedule_type: 'once', once_at: '2026-08-07T09:05' },
+        { action: 'create_reminder', title: 'להתקשר לאמא', schedule_type: 'once', once_at: '2026-08-07T21:00' },
         'x',
       );
-      eq('a same-title reminder 5 minutes outside the window creates normally', second[0].kind, 'reminder_created');
-      check('and does not carry a duplicateOf warning',
-        second[0].kind === 'reminder_created' && second[0].duplicateOf === undefined);
+      check('an unrelated task on the same day is left alone',
+        second[0].kind === 'reminder_created' && second[0].duplicateOf === undefined,
+        `got: ${JSON.stringify(second[0])}`);
     });
-    eq('both rows exist — a legitimate second reminder is never silently refused', reminderRows(rig).length, 2);
+    rig.restore();
+  }
+
+  section('duplicate detection — the next DAY is a different day');
+  {
+    // The window is the local calendar day. A daily habit created two days
+    // running must not accuse itself.
+    const rig = createRig();
+    seedSettings(rig);
+    const base = wallToUtc(2026, 8, 7, 9, 0, TZ);
+
+    await withNow(base - 3_600_000, async () => {
+      await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת כדור', schedule_type: 'once', once_at: '2026-08-07T09:00' },
+        'x',
+      );
+      const second = await applyIntent(
+        rig.env, CHAT, await ctxFor(rig),
+        { action: 'create_reminder', title: 'לקחת כדור', schedule_type: 'once', once_at: '2026-08-08T09:00' },
+        'x',
+      );
+      check('tomorrow is not today',
+        second[0].kind === 'reminder_created' && second[0].duplicateOf === undefined,
+        `got: ${JSON.stringify(second[0])}`);
+    });
     rig.restore();
   }
 
@@ -619,6 +707,89 @@ async function main() {
       eq('a cancelled reminder is not a rename target', result[0].kind, 'nothing');
     });
     eq('its title is unchanged', rowById(rig, id).title, 'לרוץ');
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('profile — a stated fact is stored once, and re-stating it claims nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+
+    const first = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'remember', note: 'אני קם ב-6 כל בוקר' },
+      'אני קם ב-6 כל בוקר',
+    );
+    eq('the first telling is stored', first[0].kind, 'profile_noted');
+
+    const again = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'remember', note: 'אני קם ב-6 כל בוקר' },
+      'אני קם ב-6 כל בוקר',
+    );
+    // profile_noted is in WROTE; profile_known deliberately is not. Returning
+    // the former here would licence "רשמתי" for a turn that wrote nothing.
+    eq('the second is reported as already known', again[0].kind, 'profile_known');
+
+    const rows = rig.db.prepare('SELECT COUNT(*) c FROM profile').get() as any;
+    eq('and only one row exists', rows.c, 1);
+    rig.restore();
+  }
+
+  section('profile — forgetting works by what he said, not only by id');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+    await db.addProfileNote(rig.env, CHAT, 'אני שונא לרוץ בבוקר');
+
+    const gone = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'forget', note: 'קם ב-6' },
+      'תשכח שאני קם ב-6',
+    );
+    eq('the matching note is removed', gone[0].kind, 'profile_forgotten');
+    check('and it is the right one',
+      gone[0].kind === 'profile_forgotten' && gone[0].note === 'אני קם ב-6 כל בוקר',
+      JSON.stringify(gone[0]));
+
+    const left = await db.listProfileNotes(rig.env, CHAT);
+    eq('the other one is untouched', left.length, 1);
+    eq('and it is the one he did not mention', left[0].note, 'אני שונא לרוץ בבוקר');
+    rig.restore();
+  }
+
+  section('profile — forgetting something that was never said writes nothing');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'forget', note: 'משהו שמעולם לא אמרתי' },
+      'x',
+    );
+    eq('it says so instead of deleting something at random', result[0].kind, 'nothing');
+    check('with a reason of its own', result[0].kind === 'nothing' && result[0].why === 'unknown_note');
+    eq('nothing was deleted', (await db.listProfileNotes(rig.env, CHAT)).length, 1);
+    rig.restore();
+  }
+
+  section('profile — notes are capped so they cannot crowd out the prompt');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const long = 'א'.repeat(500);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'remember', note: long }, long,
+    );
+    check('the stored note is truncated',
+      result[0].kind === 'profile_noted' && result[0].note.length === db.PROFILE_NOTE_MAX,
+      JSON.stringify((result[0] as any).note?.length));
+    const stored = await db.listProfileNotes(rig.env, CHAT);
+    eq('in the database too, not just in the effect', stored[0].note.length, db.PROFILE_NOTE_MAX);
     rig.restore();
   }
 

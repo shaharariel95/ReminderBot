@@ -120,6 +120,10 @@ export interface Intent {
     | 'reschedule'
     /** Fix the wording of an existing reminder without touching its schedule. */
     | 'rename'
+    /** Store a durable fact he stated about himself. Not a reminder, not a
+     *  goal — nothing fires, nothing is chased. It only informs the tone. */
+    | 'remember'
+    | 'forget'
     | 'set_intensity'
     | 'chill'
     | 'create_goal'
@@ -149,6 +153,8 @@ export interface Intent {
   checkin_per_day?: number;
   distress?: boolean;
   reason?: string;
+  /** The durable fact for `remember`, in his own words. */
+  note?: string;
   /**
    * Set when the hour was written without am/pm and we committed to the literal
    * reading. Value is the other reading's hour, offered as a one-tap correction.
@@ -166,12 +172,18 @@ export type Effect =
       kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule;
       requiresProof: boolean; altHour?: number;
       /**
-       * Set when a NEAR (not exact) duplicate already exists nearby in time.
-       * The reminder was still created — this only warns. Note: this title is
-       * nested, not top-level, so facts.ts must sweep it explicitly (see the
-       * comment there) or a truthful mention of it gets discarded by validate.ts.
+       * A similar reminder that already exists — either within seconds of this
+       * one, or elsewhere on the same day. The reminder was still created;
+       * this only warns, because "the pill at 09:00 and again at 21:00" is an
+       * ordinary pair and refusing it would be worse than mentioning it.
+       *
+       * `at` is carried so the warning can state WHEN the other one is, which
+       * is the whole difference between a useful nudge and a vague one. Note
+       * that neither this title nor this time sits at the top level of the
+       * effect, so facts.ts must sweep both explicitly (see the comment there)
+       * or a truthful mention gets discarded by validate.ts.
        */
-      duplicateOf?: { id: number; title: string };
+      duplicateOf?: { id: number; title: string; at: number };
     }
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
@@ -208,13 +220,27 @@ export type Effect =
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
+  /**
+   * A durable fact about him was stored, or removed. `already` distinguishes
+   * "I've noted that" from "I already knew that" — nothing was written in the
+   * second case, so it is deliberately NOT in WROTE.
+   */
+  | { kind: 'profile_noted'; id: number; note: string }
+  | { kind: 'profile_known'; note: string }
+  | { kind: 'profile_forgotten'; note: string }
+  | { kind: 'listed_profile'; rows: { id: number; note: string }[] }
   | { kind: 'checkins_set'; enabled: boolean; perDay: number | null }
   | { kind: 'muted'; until: number; hours: number }
   | { kind: 'intensity_set'; level: number }
   | { kind: 'listed_reminders'; rows: Reminder[]; openCount: number }
   | { kind: 'listed_goals'; rows: Goal[] }
   | { kind: 'listed_inbox'; rows: Reminder[] }
-  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean }
+  /**
+   * `misses` is how many times in a row this same reminder has already fired
+   * without being done. Carried so the wording can name the pattern instead of
+   * repeating the identical ping for the fifth time as though it were the first.
+   */
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number }
   | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
   | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
@@ -223,10 +249,16 @@ export type Effect =
   /** The once-a-day messages. Neither writes anything the user could be told
    *  about, so neither belongs in WROTE — they only describe existing rows. */
   | { kind: 'morning_brief'; rows: Reminder[]; openCount: number }
-  | { kind: 'evening_closeout'; done: number; failed: number; missed: Instance[] }
+  /**
+   * `missed` is still open; `dropped` was nagged the full ladder and closed as
+   * failed today. Both are carried as rows rather than counts so the reply can
+   * NAME them — a close-out that can only say "2 נפלו" is how an ignored task
+   * quietly stops existing.
+   */
+  | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
-  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'chat'; userText: string };
+  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'unknown_note' | 'chat'; userText: string };
 
 /**
  * The title a reminder gets when he asked to be reminded but never said of
@@ -242,7 +274,7 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
-  'intensity_set', 'photo_accepted',
+  'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten',
 ]);
 
 /**
@@ -267,6 +299,13 @@ export interface Facts {
    * never shortened or paraphrased, so it is matched in one direction only.
    */
   quotable: string[];
+  /**
+   * Durable facts he has stated about himself. Read lazily — only when a turn
+   * is actually going to consult the model — so the button path, which never
+   * speaks, does not pay for them. buildFacts therefore leaves this empty and
+   * sendOutcome fills it in before speak()/validate().
+   */
+  profile: string[];
   /** True when at least one effect wrote to the database. */
   wrote: boolean;
 }

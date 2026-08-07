@@ -34,6 +34,18 @@ function untitled(title: string): boolean {
   return title.trim() === UNTITLED_TITLE;
 }
 
+/**
+ * Below this, a run of misses is just life. At and above it, sending the
+ * identical ping for the fifth time as though it were the first is the bot
+ * failing at its actual job — the point is not to remind, it is to notice.
+ */
+const MISS_THRESHOLD = 3;
+
+function missNote(misses: number | undefined): string {
+  if (!misses || misses < MISS_THRESHOLD) return '';
+  return `\n\n${misses} פעמים ברצף שזה לא קורה. אולי השעה לא נכונה, אולי זה לא באמת חשוב לך — תחליט.`;
+}
+
 function one(e: Effect, tz: string): string {
   switch (e.kind) {
     case 'reminder_created':
@@ -43,7 +55,11 @@ function one(e: Effect, tz: string): string {
       }
       return `קבעתי: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
         e.requiresProof ? ' דורש תמונה.' : ''
-      }${e.duplicateOf ? ` שים לב, גם יש לך "${e.duplicateOf.title}" בערך באותו זמן.` : ''}`;
+      }${
+        e.duplicateOf
+          ? ` שים לב, יש לך גם "${e.duplicateOf.title}" ב-${hhmm(e.duplicateOf.at, tz)}.`
+          : ''
+      }`;
     case 'reminder_captured':
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
@@ -74,6 +90,18 @@ function one(e: Effect, tz: string): string {
       return `עדכנתי את "${e.title}": ${e.note}`;
     case 'goal_closed':
       return e.status === 'done' ? `"${e.title}" — סגור.` : `הורדתי את "${e.title}".`;
+    case 'profile_noted':
+      return `רשמתי לפניי: ${e.note}`;
+    case 'profile_known':
+      // Nothing was written. "רשמתי" here would be a claim about a write that
+      // did not happen, which is the one thing this whole pipeline forbids.
+      return `זה כבר אצלי: ${e.note}`;
+    case 'profile_forgotten':
+      return `שכחתי את זה: ${e.note}`;
+    case 'listed_profile':
+      return e.rows.length
+        ? ['מה שאני יודע עליך:', ...e.rows.map((r) => `#${r.id} ${r.note}`)].join('\n')
+        : 'אני לא יודע עליך כלום עדיין. תגיד לי משהו שכדאי שאזכור.';
     case 'checkins_set':
       return e.enabled
         ? `שיחות יזומות פעילות${e.perDay ? `, ${e.perDay} ביום` : ''}.`
@@ -110,13 +138,13 @@ function one(e: Effect, tz: string): string {
       return e.rows.length
         ? ['בלי שעה:', ...e.rows.map((r) => `#${r.id} ${r.title}`)].join('\n')
         : 'האינבוקס ריק.';
-    case 'reminder_fired':
-      if (untitled(e.title)) {
-        return `נו? ביקשת שאזכיר לך משהו עכשיו. לא אמרת מה.${
-          e.requiresProof ? '\n\nותשלח תמונה.' : ''
-        }`;
-      }
-      return `נו? ${e.title}.${e.requiresProof ? '\n\nותשלח תמונה.' : ''}`;
+    case 'reminder_fired': {
+      const proof = e.requiresProof ? '\n\nותשלח תמונה.' : '';
+      const head = untitled(e.title)
+        ? 'נו? ביקשת שאזכיר לך משהו עכשיו. לא אמרת מה.'
+        : `נו? ${e.title}.`;
+      return `${head}${missNote(e.misses)}${proof}`;
+    }
     case 'nagged':
       return untitled(e.title)
         ? `נו? אותו דבר בלי שם מ-${hhmm(e.since, tz)} עדיין פתוח.`
@@ -146,16 +174,15 @@ function one(e: Effect, tz: string): string {
     }
     case 'evening_closeout': {
       const closed = e.done === 0 ? 'לא סגרת כלום היום' : `סגרת ${e.done} היום`;
-      if (!e.missed.length) {
-        return e.failed
-          ? `${closed}. ${e.failed} נפלו. מחר.`
-          : `${closed}. אין זנבות.`;
-      }
-      const lines = e.missed.map((i) => {
-        const name = untitled(i.title) ? 'משהו שלא אמרת מה זה' : i.title;
-        return `· ${name}`;
-      });
-      return `${closed}. עדיין פתוח:\n${lines.join('\n')}`;
+      if (!e.missed.length && !e.dropped.length) return `${closed}. אין זנבות.`;
+      const name = (i: { title: string }) =>
+        `· ${untitled(i.title) ? 'משהו שלא אמרת מה זה' : i.title}`;
+      const parts = [`${closed}.`];
+      if (e.missed.length) parts.push('עדיין פתוח:', ...e.missed.map(name));
+      // Named, not counted. "2 נפלו" tells him nothing he can act on, and the
+      // whole point of the button underneath is that he can act on it.
+      if (e.dropped.length) parts.push('ויתרתי על אלה היום:', ...e.dropped.map(name));
+      return parts.join('\n');
     }
     case 'distress':
       return 'אני פה. מה קורה?';
@@ -173,6 +200,8 @@ function one(e: Effect, tz: string): string {
           return 'אין לי תזכורת כזאת.';
         case 'unknown_goal':
           return 'לא ברור לי על איזו מטרה מדובר.';
+        case 'unknown_note':
+          return 'אין לי כזה דבר רשום עליך.';
         case 'chat':
           return 'נו?';
       }
@@ -188,7 +217,11 @@ function one(e: Effect, tz: string): string {
 function firedTogether(items: Extract<Effect, { kind: 'reminder_fired' }>[]): string {
   const lines = items.map((e) => {
     const name = untitled(e.title) ? 'משהו שלא אמרת מה זה' : e.title;
-    return `· ${name}${e.requiresProof ? ' (עם תמונה)' : ''}`;
+    // The pattern still gets named here, just inline — a task on its fifth
+    // consecutive miss does not stop mattering because something else fired
+    // in the same minute.
+    const run = e.misses && e.misses >= MISS_THRESHOLD ? ` (${e.misses} ברצף שלא)` : '';
+    return `· ${name}${run}${e.requiresProof ? ' (עם תמונה)' : ''}`;
   });
   return [`נו? ${items.length} דברים עכשיו:`, ...lines].join('\n');
 }

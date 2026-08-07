@@ -667,6 +667,76 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('what he told you about himself reaches the prompt, and outlives the conversation');
+  {
+    // The whole point of the table. A note stored today has to still be in the
+    // system prompt after the messages that produced it have been pruned away,
+    // otherwise it is just conversation history under another name.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6 כל בוקר');
+    await db.addProfileNote(rig.env, CHAT, 'יום שלישי זה יום ארוך בעבודה');
+    rig.speakQueue.push('סבבה.');
+
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('the first note is in the system prompt',
+      speakCall?.system.includes('אני קם ב-6 כל בוקר') === true, speakCall?.system.slice(0, 200));
+    check('and so is the second',
+      speakCall?.system.includes('יום שלישי זה יום ארוך בעבודה') === true, '');
+    rig.restore();
+  }
+  {
+    // ...but only when there is something to say. An empty profile must not
+    // leave an empty heading in the prompt inviting the model to fill it.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.speakQueue.push('סבבה.');
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('no profile section at all when nothing is on file',
+      speakCall?.system.includes('מה שאתה יודע עליו') === false, '');
+    rig.restore();
+  }
+  {
+    // Button taps never consult the model, so they must not pay for the read.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.addProfileNote(rig.env, CHAT, 'אני קם ב-6');
+    const remId = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000);
+    const instId = seedInstance(rig, remId, 'לרוץ', Date.now() - 1000);
+    rig.sql.length = 0;
+
+    await runUpdate(rig, callbackUpdate(CHAT, `d:${instId}`));
+
+    eq('a button tap does not read the profile',
+      rig.sql.filter((s) => /FROM profile/.test(s)).length, 0);
+    rig.restore();
+  }
+
+  section('/remember and /profile work without the model');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+
+    await runWebhook(rig, '/remember אני קם ב-6 כל בוקר');
+    await runWebhook(rig, '/remember אני קם ב-6 כל בוקר');
+    await runWebhook(rig, '/profile');
+
+    eq('no model call for any of it', rig.geminiCalls.length, 0);
+    const texts = rig.texts();
+    check('the first is stored', texts[0].includes('רשמתי'), texts[0]);
+    check('the second is recognised as already known, not stored again',
+      texts[1].includes('כבר אצלי'), texts[1]);
+    const rows = rig.db.prepare('SELECT COUNT(*) c FROM profile').get() as any;
+    eq('one row, not two', rows.c, 1);
+    check('and /profile lists it', texts[2].includes('אני קם ב-6 כל בוקר'), texts[2]);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('a turn does not pay for the same answer twice');
   {
     // Conversation history was read once to give the router context and then
@@ -898,6 +968,111 @@ async function main() {
       check('the still-open task has a one-tap "tomorrow" button',
         markup.includes(`m:${openId}`), markup);
     });
+    rig.restore();
+  }
+
+  section('a task the bot gave up on is still named at the end of the day');
+  {
+    // The hole this closes: gave_up writes status='failed', openInstances only
+    // returns 'open', and every other reader of 'failed' treats it as a number.
+    // A task ignored three times stopped existing — the exact failure a nagging
+    // bot is supposed to prevent.
+    const rig = createRig();
+    const evening = wallToUtc(2026, 8, 7, 21, 10, TZ);
+    seedSettings(rig, { closeout_hour: 21 });
+    const remId = seedReminder(rig, 'לרוץ', wallToUtc(2026, 8, 8, 7, 0, TZ));
+    const instId = seedInstance(rig, remId, 'לרוץ', wallToUtc(2026, 8, 7, 7, 0, TZ));
+    rig.db.prepare("UPDATE instances SET status='failed', closed_at=? WHERE id=?")
+      .run(wallToUtc(2026, 8, 7, 8, 0, TZ), instId);
+    rig.geminiDown = true;
+
+    await withNow(evening, async () => {
+      await runCron(rig);
+      const text = rig.texts().join('\n');
+      check('the close-out names it', text.includes('לרוץ'), text);
+
+      const markup = JSON.stringify(rig.sent.map((s) => s.markup ?? null));
+      check('and offers the same one-tap way back', markup.includes(`m:${instId}`), markup);
+    });
+    rig.restore();
+  }
+
+  section('"tomorrow" works on a task already given up on, not just an open one');
+  {
+    // closeIfOpen returns false for an instance that is already closed. Gating
+    // the whole branch on it made the button a silent no-op for precisely the
+    // tasks with no other way back.
+    const rig = createRig();
+    seedSettings(rig);
+    const firedAt = wallToUtc(2026, 8, 7, 7, 0, TZ);
+    const remId = seedReminder(rig, 'לרוץ', firedAt);
+    const instId = seedInstance(rig, remId, 'לרוץ', firedAt);
+    rig.db.prepare("UPDATE instances SET status='failed', closed_at=? WHERE id=?")
+      .run(wallToUtc(2026, 8, 7, 8, 0, TZ), instId);
+
+    await withNow(wallToUtc(2026, 8, 7, 21, 10, TZ), async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `m:${instId}`));
+    });
+
+    eq('the reminder is re-armed for the same time tomorrow',
+      reminders(rig).find((r) => r.id === remId)?.next_fire_at,
+      wallToUtc(2026, 8, 8, 7, 0, TZ));
+    eq('and the failed instance is left as the record of what happened',
+      instances(rig).find((i) => i.id === instId)?.status, 'failed');
+    rig.restore();
+  }
+
+  section('a reminder that keeps being missed says so when it fires');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    // Three prior firings, none of them ever closed as done.
+    for (const [n, status] of [[1, 'failed'], [2, 'skipped'], [3, 'failed']] as const) {
+      const i = seedInstance(rig, remId, 'לרוץ', Date.now() - n * 86_400_000);
+      rig.db.prepare('UPDATE instances SET status=?, closed_at=? WHERE id=?')
+        .run(status, Date.now() - n * 86_400_000 + 3600_000, i);
+    }
+    rig.geminiDown = true;
+
+    await runCron(rig);
+
+    const text = rig.texts().join('\n');
+    check('the run is named', text.includes('3'), text);
+    check('alongside the task itself', text.includes('לרוץ'), text);
+    rig.restore();
+  }
+  {
+    // A single past miss must not trigger it — a bad day is not a pattern.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    const i = seedInstance(rig, remId, 'לרוץ', Date.now() - 86_400_000);
+    rig.db.prepare("UPDATE instances SET status='failed', closed_at=? WHERE id=?")
+      .run(Date.now() - 80_000_000, i);
+    rig.geminiDown = true;
+
+    await runCron(rig);
+    eq('one miss reads exactly like any other reminder',
+      rig.texts().join('\n').trim(), 'נו? לרוץ.');
+    rig.restore();
+  }
+  {
+    // A 'done' in the middle resets the run — otherwise the bot would accuse
+    // him of a streak he had already broken.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לרוץ', Date.now() - 1000);
+    for (const [n, status] of [[1, 'failed'], [2, 'done'], [3, 'failed'], [4, 'failed']] as const) {
+      const i = seedInstance(rig, remId, 'לרוץ', Date.now() - n * 86_400_000);
+      rig.db.prepare('UPDATE instances SET status=?, closed_at=? WHERE id=?')
+        .run(status, Date.now() - n * 86_400_000 + 3600_000, i);
+    }
+    rig.geminiDown = true;
+
+    await runCron(rig);
+    eq('the run counts back only as far as the last success',
+      rig.texts().join('\n').trim(), 'נו? לרוץ.');
     rig.restore();
   }
 

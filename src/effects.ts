@@ -2,7 +2,7 @@ import * as db from './db';
 import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
-import { computeNext, wallString } from './time';
+import { computeNext, localDayBounds, wallString } from './time';
 
 /** Reminders whose next_fire_at lands within this many ms count as "the same time". */
 const DUPLICATE_WINDOW_MS = 60_000;
@@ -150,12 +150,15 @@ export async function applyIntent(
 
       // Near-matching is skipped for generic titles on either side — "תזכורת"
       // says nothing about the subject, so similarity here is noise, not signal.
-      const near = generic
-        ? undefined
-        : nearby.find((r) => {
-            const normExisting = normalizeTitle(r.title);
-            return !isGenericTitle(normExisting) && isNearMatch(normTitle, normExisting);
-          });
+      const similar = (rows: Reminder[]) =>
+        generic
+          ? undefined
+          : rows.find((r) => {
+              const normExisting = normalizeTitle(r.title);
+              return !isGenericTitle(normExisting) && isNearMatch(normTitle, normExisting);
+            });
+
+      const near = similar(nearby);
 
       const id = await db.addReminder(env, {
         chat_id: chatId,
@@ -169,12 +172,25 @@ export async function applyIntent(
         max_nags: 3,
         next_fire_at: next,
       });
+
+      // Nothing within a minute, so widen to the whole local day. He asked for
+      // the same thing twice, hours apart, having forgotten the first — the
+      // case the 60-second window was never going to catch. Only ever a
+      // warning: at this width, refusing would break twice-daily reminders.
+      let twin = near;
+      if (!twin) {
+        const { from, to } = localDayBounds(next, tz);
+        twin = similar(await db.remindersSameDay(env, chatId, from, to, id));
+      }
+
       return [
         {
           kind: 'reminder_created', id, title, at: next, schedule,
           requiresProof: !!intent.requires_proof,
           ...(intent.ambiguous_hour === undefined ? {} : { altHour: intent.ambiguous_hour }),
-          ...(near ? { duplicateOf: { id: near.id, title: near.title } } : {}),
+          ...(twin
+            ? { duplicateOf: { id: twin.id, title: twin.title, at: twin.next_fire_at ?? next } }
+            : {}),
         },
       ];
     }
@@ -276,6 +292,33 @@ export async function applyIntent(
         return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
       }
       return [{ kind: 'reminder_renamed', id: rem.id, from: rem.title, to }];
+    }
+
+    case 'remember': {
+      const note = (intent.note ?? intent.title ?? userText).trim();
+      if (!note) return [{ kind: 'nothing', why: 'chat', userText }];
+      const id = await db.addProfileNote(env, chatId, note);
+      // Already on file. Nothing was written, so this must not be reported as
+      // if something had been — hence a separate effect kind outside WROTE
+      // rather than a `profile_noted` with a flag on it.
+      if (id === null) return [{ kind: 'profile_known', note: note.slice(0, db.PROFILE_NOTE_MAX) }];
+      return [{ kind: 'profile_noted', id, note: note.slice(0, db.PROFILE_NOTE_MAX) }];
+    }
+
+    case 'forget': {
+      const notes = await db.listProfileNotes(env, chatId);
+      const wanted = (intent.note ?? intent.title ?? '').trim();
+      const hit =
+        notes.find((n) => n.id === intent.target_id) ??
+        (wanted
+          ? notes.find(
+              (n) => n.note.includes(wanted) || wanted.includes(n.note),
+            )
+          : undefined);
+      if (!hit || !(await db.deleteProfileNote(env, chatId, hit.id))) {
+        return [{ kind: 'nothing', why: 'unknown_note', userText }];
+      }
+      return [{ kind: 'profile_forgotten', note: hit.note }];
     }
 
     case 'create_goal': {
