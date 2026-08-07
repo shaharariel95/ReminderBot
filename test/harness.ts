@@ -24,7 +24,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * when an unrelated write is added anywhere else in the turn — a positional
  * countdown breaks the moment call order shifts for any reason.
  */
-function shim(sqlite: DatabaseSync, state: { dbFailOn: RegExp | null }) {
+function shim(
+  sqlite: DatabaseSync,
+  state: { dbFailOn: RegExp | null },
+  sql_log: string[],
+) {
   const norm = (v: unknown) =>
     typeof v === 'boolean' ? (v ? 1 : 0) : typeof v === 'bigint' ? Number(v) : v;
   const out = (row: any) => {
@@ -38,6 +42,10 @@ function shim(sqlite: DatabaseSync, state: { dbFailOn: RegExp | null }) {
     prepare(sql: string) {
       const stmt = sqlite.prepare(sql);
       const bound: unknown[] = [];
+      // Logged on EXECUTION, not on prepare: what costs a D1 round trip is
+      // running the statement, and a prepared-but-unused statement costs
+      // nothing. Counting the wrong one would let a redundant query hide.
+      const note = () => sql_log.push(sql.replace(/\s+/g, ' ').trim());
       const api = {
         bind(...args: unknown[]) {
           bound.length = 0;
@@ -45,12 +53,15 @@ function shim(sqlite: DatabaseSync, state: { dbFailOn: RegExp | null }) {
           return api;
         },
         async first<T>(): Promise<T | null> {
+          note();
           return out(stmt.get(...(bound as any))) as T | null;
         },
         async all<T>(): Promise<{ results: T[] }> {
+          note();
           return { results: (stmt.all(...(bound as any)) as any[]).map(out) as T[] };
         },
         async run() {
+          note();
           if (state.dbFailOn && state.dbFailOn.test(sql)) {
             state.dbFailOn = null; // fires once, then disarms
             throw new Error('test rig: simulated D1 write failure');
@@ -127,6 +138,13 @@ export interface Rig {
    * unrelated writes elsewhere in the same turn.
    */
   dbFailOn: RegExp | null;
+  /**
+   * Every SQL statement actually EXECUTED, in order, whitespace-collapsed.
+   * Lets a test assert how much database work a turn costs — a redundant
+   * query is invisible to every other kind of assertion, since the answer it
+   * returns is correct, just paid for twice.
+   */
+  sql: string[];
   restore(): void;
 }
 
@@ -136,10 +154,11 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
   const schema = readFileSync(join(HERE, '..', 'schema.sql'), 'utf8');
   sqlite.exec(schema);
   const dbState: { dbFailOn: RegExp | null } = { dbFailOn: null };
+  const sqlLog: string[] = [];
 
   const rig: Rig = {
     env: {
-      DB: shim(sqlite, dbState),
+      DB: shim(sqlite, dbState, sqlLog),
       TELEGRAM_BOT_TOKEN: 'test-token',
       TELEGRAM_WEBHOOK_SECRET: 'test-secret',
       GEMINI_API_KEY: 'test-key',
@@ -155,6 +174,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       },
     },
     db: sqlite,
+    sql: sqlLog,
     sent: [],
     timeline: [],
     burstDelays: [],

@@ -667,6 +667,66 @@ async function main() {
   }
 
   // ------------------------------------------------------------------------
+  section('a turn does not pay for the same answer twice');
+  {
+    // Conversation history was read once to give the router context and then
+    // AGAIN inside sendOutcome, a moment later, from the same table for the
+    // same chat with nothing written in between. A duplicate query is invisible
+    // to every other kind of assertion — the answer it returns is correct, just
+    // paid for twice — so this counts the statements directly.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.speakQueue.push('סבבה.');
+
+    await runWebhook(rig, 'תזכיר לי עוד 5 דקות לאכול');
+
+    const historyReads = rig.sql.filter((s) => /SELECT role, text FROM messages/.test(s));
+    eq('conversation history is read once per turn, not twice', historyReads.length, 1);
+
+    // Pruning a 200-row table used to happen on every turn — a write, on the
+    // user's latency path, to delete almost always nothing. It moved to the
+    // cron, so answering a message must now do none at all.
+    const prunes = rig.sql.filter((s) => /DELETE FROM messages/.test(s));
+    eq('answering a message does no housekeeping', prunes.length, 0);
+    rig.restore();
+  }
+  {
+    // ...but it must still actually happen. 04:00 local, once a day.
+    const rig = createRig();
+    seedSettings(rig);
+    await withNow(wallToUtc(2026, 8, 7, 4, 0, TZ), async () => {
+      await runCron(rig);
+    });
+    eq('the cron prunes at 04:00',
+      rig.sql.filter((s) => /DELETE FROM messages/.test(s)).length, 1);
+    rig.restore();
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await withNow(wallToUtc(2026, 8, 7, 4, 1, TZ), async () => {
+      await runCron(rig);
+    });
+    eq('and not on every other tick of the day',
+      rig.sql.filter((s) => /DELETE FROM messages/.test(s)).length, 0);
+    rig.restore();
+  }
+  {
+    // The cron and button paths have no history in hand, so they must still
+    // read it — "pass it in" must not become "silently send none".
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לקום', Date.now() - 1000);
+    rig.speakQueue.push('נו? לקום.');
+
+    await runCron(rig);
+
+    const historyReads = rig.sql.filter((s) => /SELECT role, text FROM messages/.test(s));
+    eq('a caller with no history in hand still reads it', historyReads.length, 1);
+    rig.restore();
+  }
+
+  // ------------------------------------------------------------------------
   section('the hour-correction button fixes the hour without ending a recurrence');
   {
     // "כל יום ב-7" is ambiguous, so it offers [לא, 19:00]. That button used to

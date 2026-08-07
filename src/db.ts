@@ -488,25 +488,30 @@ export async function pruneMessages(env: Env, chatId: string, keep = 200): Promi
 
 export async function stats(env: Env, chatId: string): Promise<Stats> {
   const now = Date.now();
-  const row = await env.DB.prepare(
-    `SELECT
-       SUM(CASE WHEN status='done'   AND closed_at >= ?1 THEN 1 ELSE 0 END) AS done7,
-       SUM(CASE WHEN status='failed' AND closed_at >= ?1 THEN 1 ELSE 0 END) AS failed7,
-       SUM(CASE WHEN status='done'   AND closed_at >= ?2 THEN 1 ELSE 0 END) AS done30,
-       SUM(CASE WHEN status='failed' AND closed_at >= ?2 THEN 1 ELSE 0 END) AS failed30
-     FROM instances WHERE chat_id = ?3`,
-  )
-    .bind(now - 7 * DAY, now - 30 * DAY, chatId)
-    .first<{ done7: number; failed7: number; done30: number; failed30: number }>();
+  // Two independent reads of the same table. Awaiting them in sequence cost a
+  // round trip on every single message for no reason — neither depends on the
+  // other's result.
+  const [row, recent] = await Promise.all([
+    env.DB.prepare(
+      `SELECT
+         SUM(CASE WHEN status='done'   AND closed_at >= ?1 THEN 1 ELSE 0 END) AS done7,
+         SUM(CASE WHEN status='failed' AND closed_at >= ?1 THEN 1 ELSE 0 END) AS failed7,
+         SUM(CASE WHEN status='done'   AND closed_at >= ?2 THEN 1 ELSE 0 END) AS done30,
+         SUM(CASE WHEN status='failed' AND closed_at >= ?2 THEN 1 ELSE 0 END) AS failed30
+       FROM instances WHERE chat_id = ?3`,
+    )
+      .bind(now - 7 * DAY, now - 30 * DAY, chatId)
+      .first<{ done7: number; failed7: number; done30: number; failed30: number }>(),
+    // Current streak: consecutive closed instances ending in 'done', newest first.
+    env.DB.prepare(
+      `SELECT status FROM instances
+        WHERE chat_id = ? AND status IN ('done','failed')
+        ORDER BY closed_at DESC LIMIT 40`,
+    )
+      .bind(chatId)
+      .all<{ status: string }>(),
+  ]);
 
-  // Current streak: consecutive closed instances ending in 'done', newest first.
-  const recent = await env.DB.prepare(
-    `SELECT status FROM instances
-      WHERE chat_id = ? AND status IN ('done','failed')
-      ORDER BY closed_at DESC LIMIT 40`,
-  )
-    .bind(chatId)
-    .all<{ status: string }>();
   let streak = 0;
   for (const r of recent.results ?? []) {
     if (r.status === 'done') streak++;

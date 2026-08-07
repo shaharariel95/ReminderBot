@@ -176,8 +176,7 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     }
   }
 
-  await sendOutcome(env, chatId, ctx, effects, toneNote);
-  await db.pruneMessages(env, chatId);
+  await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history);
 }
 
 /** Snooze minutes taken straight off a button, unlike applyIntent's model-derived
@@ -434,6 +433,14 @@ async function sendOutcome(
   effects: Effect[],
   toneNote?: string,
   priority: 'high' | 'low' | 'none' = 'high',
+  /**
+   * Recent turns, when the caller already has them. handleUpdate reads them a
+   * moment earlier to give the router conversational context, and re-reading
+   * the same rows here was a second query for an identical answer — nothing is
+   * written to `messages` in between. Callers without one (the cron, button
+   * taps) leave it out and it is read on demand.
+   */
+  history?: { role: 'user' | 'bot'; text: string }[],
 ): Promise<boolean> {
   let facts: Facts | null = null;
   let baseline: string;
@@ -459,9 +466,9 @@ async function sendOutcome(
   let text = baseline;
   if (facts && (await modelAllowed(env, priority))) {
     try {
-      const history = await db.recentMessages(env, chatId, 8);
+      const recent = history ? history.slice(-8) : await db.recentMessages(env, chatId, 8);
       const dressed = await withTyping(env, chatId, () =>
-        speak(env, facts!, history, baseline, toneNote),
+        speak(env, facts!, recent, baseline, toneNote),
       );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
@@ -528,14 +535,28 @@ async function tick(env: Env): Promise<void> {
   const chatId = env.OWNER_CHAT_ID;
   if (!chatId || chatId === '0') return;
 
-  const due = await db.dueReminders(env, now);
-  const nags = await db.dueNags(env, now);
-  const settings = await db.getSettings(env, chatId);
+  // Three independent reads, and this runs 1,440 times a day whether or not
+  // there is anything to do — the overwhelmingly common outcome is that all
+  // three come back empty and the tick bails just below.
+  const [due, nags, settings] = await Promise.all([
+    db.dueReminders(env, now),
+    db.dueNags(env, now),
+    db.getSettings(env, chatId),
+  ]);
 
   const checkinDue =
     settings.checkins_enabled === 1 &&
     settings.next_checkin_at !== null &&
     settings.next_checkin_at <= now;
+
+  // Housekeeping, once a day, at an hour nobody is awake for. This used to run
+  // on every inbound message — a DELETE against a 200-row table, on the user's
+  // latency path, to remove almost always nothing. It is maintenance, not part
+  // of answering him, and the cron is where maintenance belongs.
+  const wall = wallParts(now, settings.tz);
+  if (wall.hour === 4 && wall.minute === 0) {
+    await db.pruneMessages(env, chatId).catch((e) => console.error('prune', e));
+  }
 
   const briefDue = dailyDue(settings.brief_hour, settings.last_brief_on, now, settings.tz);
   const closeoutDue = dailyDue(settings.closeout_hour, settings.last_closeout_on, now, settings.tz);
