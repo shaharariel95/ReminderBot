@@ -881,6 +881,95 @@ export async function allowedChats(env: Env, ownerId = env.OWNER_CHAT_ID): Promi
   return allowed;
 }
 
+export interface Pending {
+  chat_id: string;
+  name: string | null;
+  status: 'asked' | 'named' | 'denied';
+  created_at: number;
+}
+
+/**
+ * How many strangers may be waiting at once.
+ *
+ * This is the only number standing between "the bot answers people it does
+ * not know" and "anyone with a script can make it send unbounded messages to
+ * the owner". Past the cap the bot goes back to total silence, which is what
+ * it did before onboarding existed — degrading to the old, safe behaviour
+ * rather than to a new, noisy one.
+ */
+export const PENDING_MAX = 20;
+
+export async function getPending(env: Env, chatId: string): Promise<Pending | null> {
+  return env.DB.prepare('SELECT * FROM pending WHERE chat_id = ?').bind(chatId).first<Pending>();
+}
+
+/**
+ * Start the conversation with a stranger. Returns false when the queue is
+ * full, which the caller must treat as "say nothing at all".
+ */
+export async function addPending(env: Env, chatId: string): Promise<boolean> {
+  const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM pending').first<{ n: number }>();
+  if ((row?.n ?? 0) >= PENDING_MAX) return false;
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO pending (chat_id, status, created_at) VALUES (?, 'asked', ?)",
+  )
+    .bind(chatId, Date.now())
+    .run();
+  return true;
+}
+
+/** They answered. `status='asked'` in the WHERE is what makes this once-only. */
+export async function namePending(env: Env, chatId: string, name: string): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE pending SET name = ?, status = 'named' WHERE chat_id = ? AND status = 'asked'",
+  )
+    .bind(name.slice(0, 60), chatId)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/** Everyone still waiting on a decision, oldest first. Denied rows are not waiting. */
+export async function listPending(env: Env): Promise<Pending[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM pending WHERE status != 'denied' ORDER BY created_at",
+  ).all<Pending>();
+  return res.results ?? [];
+}
+
+/**
+ * Find who the owner meant, by name or by chat_id.
+ *
+ * Returns null when nothing matches AND when more than one does — an
+ * ambiguous "/allow דנה" with two Danas must ask, not guess, because guessing
+ * hands someone access meant for another person.
+ */
+export async function findPending(env: Env, needle: string): Promise<Pending[]> {
+  const want = needle.trim().toLowerCase();
+  const rows = await listPending(env);
+  return rows.filter(
+    (p) => p.chat_id === want || (p.name ?? '').trim().toLowerCase() === want,
+  );
+}
+
+/**
+ * Refuse someone, permanently. The row is kept rather than deleted: a deleted
+ * row makes their next message look like a brand-new stranger, and the owner
+ * gets asked about the same person forever.
+ */
+export async function denyPending(env: Env, chatId: string): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO pending (chat_id, status, created_at) VALUES (?, 'denied', ?) " +
+      "ON CONFLICT(chat_id) DO UPDATE SET status = 'denied'",
+  )
+    .bind(chatId, Date.now())
+    .run();
+}
+
+/** They are in; they are not waiting for anything any more. */
+export async function clearPending(env: Env, chatId: string): Promise<void> {
+  await env.DB.prepare('DELETE FROM pending WHERE chat_id = ?').bind(chatId).run();
+}
+
 /** Replace the guest list. The owner is implicit and need not be included. */
 export async function setAllowedChats(env: Env, ids: string[]): Promise<void> {
   const value = [...new Set(ids.map((s) => s.trim()).filter(Boolean))].join(',');

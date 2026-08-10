@@ -5,7 +5,7 @@
  * symptom the owner actually saw, so a regression here is legible without
  * re-deriving the bug.
  */
-import worker from '../src/index';
+import worker, { STRANGER_ASK } from '../src/index';
 import { quickParse } from '../src/quickparse';
 import { buildSystemPrompt } from '../src/persona';
 import { wallToUtc } from '../src/time';
@@ -584,8 +584,12 @@ async function main() {
     rig.speakQueue.push('נו?');
 
     await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'שלום', message_id: 1 } });
-    eq('a stranger still gets nothing at all', rig.texts().length, 0);
-    eq('and costs no model call', rig.geminiCalls.length, 0);
+    // A stranger now gets the onboarding question (see the section above) and
+    // nothing else. What matters here is what they still cannot reach: the
+    // router, the persona, and any of the owner's data.
+    eq('a stranger reaches no model at all', rig.geminiCalls.length, 0);
+    eq('and gets exactly the onboarding line, not an answer to what they said',
+      rig.texts(), [STRANGER_ASK]);
     rig.restore();
   }
   {
@@ -596,7 +600,12 @@ async function main() {
     rig.speakQueue.push('נו?');
 
     await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'שלום', message_id: 1 } });
-    check('an invited chat is answered', rig.texts().length > 0, rig.texts().join(' | '));
+    // Asserted on the REAL reply, not merely on "something was sent". A guest
+    // who fell through to onboarding also gets a message, so `length > 0`
+    // passes whether or not they were actually let in.
+    check('an invited chat gets a real answer, not the onboarding line',
+      rig.texts().includes('נו?') && !rig.texts().includes(STRANGER_ASK),
+      rig.texts().join(' | '));
     check('in their own chat, not the owner\'s',
       rig.sent.every((s) => s.chat_id === undefined || String(s.chat_id) === OTHER),
       JSON.stringify(rig.sent.map((s) => s.chat_id)));
@@ -647,6 +656,102 @@ async function main() {
     check('and can revoke',
       ((await handleSlash(rig.env, CHAT, '/deny 123')) ?? '').length > 0, '');
     check('which sticks too', !(await db.allowedChats(rig.env)).has('123'), '');
+    rig.restore();
+  }
+
+  section('a stranger is asked who they are, once, and then goes quiet again');
+  {
+    // Silence was safe but useless: someone the owner actually wanted to add
+    // had no way to say so, and the owner had to dig their chat_id out of
+    // `wrangler tail`. So an unknown chat gets asked for a name — exactly
+    // once — and then goes back to being ignored until the owner decides.
+    //
+    // This is the one place the bot talks to someone it does not know, so it
+    // is bounded hard: two replies per chat, ever, and never an echo of what
+    // they wrote.
+    const rig = createRig();
+    seedSettings(rig);
+
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'היי', message_id: 1 } });
+    const first = rig.sent.filter((s) => String(s.chat_id) === OTHER);
+    eq('the first message gets exactly one reply', first.length, 1);
+    check('which asks for a name', (first[0].text ?? '').includes('שם'), first[0].text);
+    eq('and nothing is said to the owner yet',
+      rig.sent.filter((s) => String(s.chat_id) === CHAT).length, 0);
+    eq('no model was consulted', rig.geminiCalls.length, 0);
+
+    rig.sent.length = 0;
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'דנה', message_id: 2 } });
+    const named = rig.sent.filter((s) => String(s.chat_id) === OTHER);
+    eq('answering with a name gets one acknowledgement', named.length, 1);
+    const toOwner = rig.sent.filter((s) => String(s.chat_id) === CHAT).map((s) => s.text ?? '');
+    check('and the owner is told, by name and id, without being made to go looking',
+      toOwner.some((t) => t.includes('דנה') && t.includes(OTHER)), JSON.stringify(toOwner));
+
+    rig.sent.length = 0;
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'נו?', message_id: 3 } });
+    eq('every message after that is silence again', rig.sent.length, 0);
+    rig.restore();
+  }
+  {
+    // The owner reviews by name, because that is the thing they recognise.
+    const rig = createRig();
+    seedSettings(rig);
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'היי', message_id: 1 } });
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'דנה', message_id: 2 } });
+
+    const list = await handleSlash(rig.env, CHAT, '/pending');
+    check('/pending shows the name and the id', (list ?? '').includes('דנה') && (list ?? '').includes(OTHER), list ?? '');
+    eq('a guest cannot read it', await handleSlash(rig.env, OTHER, '/pending'), null);
+
+    const ok = await handleSlash(rig.env, CHAT, '/allow דנה');
+    check('approving by name works', (ok ?? '').includes('דנה'), ok ?? '');
+    check('and they are actually in', (await db.allowedChats(rig.env)).has(OTHER), '');
+    check('and no longer pending', !(await db.listPending(rig.env)).some((p) => p.chat_id === OTHER), '');
+    rig.restore();
+  }
+  {
+    // Denying has to be permanent, or the next message re-opens the whole
+    // conversation and the owner gets asked again forever.
+    const rig = createRig();
+    seedSettings(rig);
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'היי', message_id: 1 } });
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'דנה', message_id: 2 } });
+    await handleSlash(rig.env, CHAT, '/deny דנה');
+
+    rig.sent.length = 0;
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'ובכל זאת', message_id: 3 } });
+    eq('a denied chat is never prompted again', rig.sent.length, 0);
+    check('and cannot get in', !(await db.allowedChats(rig.env)).has(OTHER), '');
+    rig.restore();
+  }
+  {
+    // The cost of talking to strangers at all: someone can point a hundred
+    // accounts at it. Past the cap the bot goes back to saying nothing, which
+    // is exactly what it did before this feature existed.
+    const rig = createRig();
+    seedSettings(rig);
+    for (let i = 0; i < db.PENDING_MAX; i++) {
+      await runUpdate(rig, { message: { chat: { id: 800000 + i }, text: 'היי', message_id: 1 } });
+    }
+    rig.sent.length = 0;
+    await runUpdate(rig, { message: { chat: { id: 999111 }, text: 'היי', message_id: 1 } });
+    eq('the queue is capped and the extra stranger gets nothing', rig.sent.length, 0);
+    rig.restore();
+  }
+  {
+    // A photo or sticker with no text is not a name. Storing '' would leave a
+    // nameless row the owner cannot act on, and re-prompting would be a loop.
+    const rig = createRig();
+    seedSettings(rig);
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'היי', message_id: 1 } });
+    rig.sent.length = 0;
+    await runUpdate(rig, {
+      message: { chat: { id: Number(OTHER) }, photo: [{ file_id: 'x', file_size: 1 }], message_id: 2 },
+    });
+    eq('a message with no text is ignored rather than stored as a name', rig.sent.length, 0);
+    check('and they are still waiting to be named',
+      (await db.listPending(rig.env)).some((p) => p.chat_id === OTHER && !p.name), '');
     rig.restore();
   }
 

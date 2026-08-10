@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS settings;
 DROP TABLE IF EXISTS profile;
 DROP TABLE IF EXISTS rejections;
 DROP TABLE IF EXISTS meta;
+DROP TABLE IF EXISTS pending;
 
 CREATE TABLE reminders (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +119,18 @@ CREATE TABLE usage (
   calls INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, model)
 );
+
+-- People who have messaged but are not allowed yet — see migrations/008. The
+-- only place the bot speaks to someone it does not know, and the table is what
+-- bounds that: capped rows, two replies per chat, and a 'denied' row is kept
+-- so a refusal cannot be reset by messaging again.
+CREATE TABLE pending (
+  chat_id    TEXT PRIMARY KEY,
+  name       TEXT,
+  status     TEXT    NOT NULL DEFAULT 'asked',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_pending_status ON pending(status, created_at);
 
 -- Deployment-level state, not user state — see migrations/007. Holds the last
 -- version the database saw, which is how a Worker with no start-up hook works

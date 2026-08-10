@@ -90,18 +90,18 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     await sendMessage(env, chatId, `chat_id: ${chatId}\nשים אותו ב-OWNER_CHAT_ID ותפרוס מחדש.`);
     return;
   }
-  // The owner plus anyone they invited. An unknown chat gets exactly what it
-  // always got — silence, before any D1 write, any model call, or any reply
-  // that would confirm the bot exists.
-  if (!(await db.allowedChats(env)).has(chatId)) {
-    console.log(`ignored message from ${chatId}`);
-    return;
-  }
-
   const text: string = (msg.text ?? msg.caption ?? '').trim();
   const hasPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
   // Stickers, voice notes, location pins etc. — nothing to reason about.
   if (!text && !hasPhoto) return;
+
+  // The owner plus anyone they invited. Everyone else falls into the
+  // onboarding path below and never reaches a model call, a reminder, or any
+  // of this chat's data.
+  if (!(await db.allowedChats(env)).has(chatId)) {
+    await greetStranger(env, chatId, text);
+    return;
+  }
 
   if (text.startsWith('/')) {
     const reply = await handleSlash(env, chatId, text);
@@ -135,6 +135,68 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     );
   }
 }
+
+/**
+ * The only conversation the bot has with someone it does not know.
+ *
+ * Ask who they are, tell the owner, then go quiet. That is the whole of it,
+ * and the limits are the design:
+ *
+ * - TWO replies per chat in their lifetime — the question, and one
+ *   acknowledgement. Message three onwards is the same silence a stranger got
+ *   before any of this existed.
+ * - A `denied` row is never re-prompted, so a refusal cannot be reset by
+ *   messaging again.
+ * - Past db.PENDING_MAX waiting strangers, nobody new is answered at all. A
+ *   flood of accounts costs a bounded number of rows and a bounded number of
+ *   messages to the owner, and then degrades to exactly the old behaviour.
+ * - Nothing they wrote is echoed anywhere except the name they chose to give,
+ *   and that only to the owner.
+ *
+ * Errors are swallowed: failing to greet a stranger must never become a
+ * failure that reaches the owner's own turn.
+ */
+async function greetStranger(env: Env, chatId: string, text: string): Promise<void> {
+  try {
+    const pending = await db.getPending(env, chatId);
+
+    if (!pending) {
+      if (!(await db.addPending(env, chatId))) {
+        console.log(`pending queue full, ignoring ${chatId}`);
+        return;
+      }
+      await sendMessage(env, chatId, STRANGER_ASK);
+      return;
+    }
+
+    // Already answered, or already refused. Either way there is nothing left
+    // to say to them.
+    if (pending.status !== 'asked') {
+      console.log(`ignored message from ${chatId} (${pending.status})`);
+      return;
+    }
+
+    // A photo or a sticker is not a name. Staying silent rather than
+    // re-asking keeps this from becoming a loop they can play with.
+    if (!text) return;
+
+    const name = text.slice(0, 60);
+    if (!(await db.namePending(env, chatId, name))) return;
+    await sendMessage(env, chatId, STRANGER_WAIT);
+    // Pushed, not left in a list to be discovered. A queue the owner has to
+    // remember to check is a queue nobody is ever let out of.
+    await sendMessage(
+      env,
+      env.OWNER_CHAT_ID,
+      `מישהו חדש רוצה להיכנס: ${name} · ${chatId}\nלאשר: /allow ${name}\nלדחות: /deny ${name}`,
+    );
+  } catch (err) {
+    console.error('greetStranger', err);
+  }
+}
+
+export const STRANGER_ASK = 'אני לא מכיר אותך. תכתוב לי שם ואעביר לאישור.';
+const STRANGER_WAIT = 'רשמתי. אם יאשרו אותך — תשמע ממני. עד אז אני שותק.';
 
 /** The last thing he hears when a turn falls over. Honest, and claims nothing. */
 const TURN_FAILED = 'נפל לי משהו באמצע ולא סיימתי את זה. תגיד שוב — ואם זה חוזר, /diag.';

@@ -2,9 +2,10 @@ import * as db from './db';
 import { describeSchedule, formatLocal, localDayBounds } from './time';
 import type { Env, Schedule } from './types';
 import { VERSION } from './version';
+import { sendMessage } from './telegram';
 
 /** Commands only the owner may run. See the gate in handleSlash for why. */
-const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed']);
+const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending']);
 
 /** Slash commands handled without burning an LLM call. */
 export async function handleSlash(
@@ -26,21 +27,67 @@ export async function handleSlash(
   switch (cmd) {
     case '/allow':
     case '/deny': {
-      const target = text.trim().split(/\s+/)[1]?.trim();
-      if (!target || !/^\d{1,20}$/.test(target)) {
-        return 'תן לי chat_id — מספר. הוא יקבל אותו אם ישלח לי הודעה כשהוא לא ברשימה (זה מופיע ב-logs), או דרך @userinfobot.';
+      // The rest of the line, not just the next word: names have spaces.
+      const target = text.trim().slice(cmd.length).trim();
+      if (!target) return 'מי? שם מתוך /pending, או chat_id.';
+
+      // A name is what the owner actually recognises; the id is the fallback
+      // for someone who never went through onboarding.
+      let chatId = /^\d{1,20}$/.test(target) ? target : null;
+      if (!chatId) {
+        const matches = await db.findPending(env, target);
+        if (!matches.length) return `אין לי "${target}" ברשימה. /pending יראה לך מי מחכה.`;
+        // Two people with the same name is the one case where guessing hands
+        // access to the wrong person.
+        if (matches.length > 1) {
+          return [
+            `יש כמה בשם "${target}". תבחר לפי מספר:`,
+            ...matches.map((m) => `· ${m.name} — ${m.chat_id}`),
+          ].join('\n');
+        }
+        chatId = matches[0].chat_id;
       }
+
+      if (cmd === '/deny') {
+        // Remembered, so their next message does not restart the whole
+        // conversation and ask you about them again.
+        await db.denyPending(env, chatId);
+      } else {
+        await db.clearPending(env, chatId);
+      }
+
       const current = await db.allowedChats(env);
       // The owner is implicit in `allowedChats` and must never end up in the
       // stored list — writing them in would make a later /deny look like it
       // could remove them.
       current.delete(env.OWNER_CHAT_ID);
-      if (cmd === '/allow') current.add(target);
-      else current.delete(target);
+      // `chatId`, never `target` — target may be a name, and a name in the
+      // allow list would match nobody and silently grant access to no one.
+      if (cmd === '/allow') current.add(chatId);
+      else current.delete(chatId);
       await db.setAllowedChats(env, [...current]);
-      return cmd === '/allow'
-        ? `${target} ברשימה. שיכתוב לי.`
-        : `${target} הוסר. התזכורות שלו נשארות במסד אבל לא יישלחו.`;
+
+      if (cmd === '/allow') {
+        // They have been waiting in silence by design, so somebody has to
+        // tell them it changed. Best-effort: a blocked bot must not turn the
+        // owner's confirmation into an error.
+        await sendMessage(env, chatId, 'אושרת. אני נו? — תגיד לי מה להזכיר לך.').catch((err) =>
+          console.error('welcome', err),
+        );
+        return `${target} (${chatId}) ברשימה. אמרתי לו.`;
+      }
+      return `${target} (${chatId}) לא נכנס. לא אשאל אותך עליו שוב.`;
+    }
+
+    case '/pending': {
+      const rows = await db.listPending(env);
+      if (!rows.length) return 'אף אחד לא מחכה.';
+      return [
+        'מחכים לאישור:',
+        ...rows.map((p) => `· ${p.name ?? '(עוד לא אמר שם)'} — ${p.chat_id}`),
+        '',
+        'לאישור: /allow [שם] · לדחייה: /deny [שם]',
+      ].join('\n');
     }
 
     case '/allowed': {
@@ -82,7 +129,7 @@ export async function handleSlash(
         '/quiet [התחלה] [סוף] — שעות שקט, למשל /quiet 23 8',
         '/offlimits [טקסט] — נושאים שאסור לי לגעת בהם. בלי טקסט = מציג. "clear" = מנקה.',
         '/diag — בדיקת תקינות (מודל, מפתח, חיבורים)',
-        '/allowed · /allow [chat_id] · /deny [chat_id] — מי עוד יכול לדבר איתי',
+        '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
         '',
         'כל השאר בשפה חופשית:',
         '"תזכיר לי כל יום ב-7 לרוץ" · "אני רוצה לפתוח תיק מסחר"',
