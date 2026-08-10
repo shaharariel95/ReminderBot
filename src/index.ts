@@ -90,7 +90,10 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     await sendMessage(env, chatId, `chat_id: ${chatId}\nשים אותו ב-OWNER_CHAT_ID ותפרוס מחדש.`);
     return;
   }
-  if (chatId !== env.OWNER_CHAT_ID) {
+  // The owner plus anyone they invited. An unknown chat gets exactly what it
+  // always got — silence, before any D1 write, any model call, or any reply
+  // that would confirm the bot exists.
+  if (!(await db.allowedChats(env)).has(chatId)) {
     console.log(`ignored message from ${chatId}`);
     return;
   }
@@ -238,23 +241,20 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   const chatId = String(q?.message?.chat?.id ?? '');
   const fromId = String(q?.from?.id ?? '');
 
-  // Answer first — Telegram spins for 30s otherwise — but only for the owner.
-  // This is a new unauthenticated inbound path that writes to D1, so a
+  // Answer first — Telegram spins for 30s otherwise — but only for someone
+  // allowed. This is an unauthenticated inbound path that writes to D1, so a
   // leaked or guessed message id must not be a free write: check auth
   // before touching the database, and before even answering the spinner,
   // so a stranger's callback_query_id leaks nothing back either.
   //
-  // No separate "!env.OWNER_CHAT_ID" clause: `chatId !== env.OWNER_CHAT_ID`
-  // already fails closed on an unset/empty OWNER_CHAT_ID by itself. `!chatId`
-  // just above guarantees chatId is a non-empty string here, and a non-empty
-  // string can never `===` a falsy value ('', undefined) — so a misconfigured
-  // deployment can't accidentally authorise anyone. (Verified by exhaustive
-  // enumeration, not just this argument: adding the clause back never changes
-  // the outcome for any chatId/fromId/OWNER_CHAT_ID combination — it is a
-  // provable tautology given the other three clauses, which is also why a
-  // "delete it and see if a test goes red" check can't distinguish it: no
-  // input exists for which it would.)
-  if (!chatId || fromId !== env.OWNER_CHAT_ID || chatId !== env.OWNER_CHAT_ID) {
+  // Both ids are checked and both must be the SAME allowed chat. `fromId` is
+  // who tapped and `chatId` is where the keyboard lives; allowing them to
+  // differ would let one guest act inside another's chat, which is the
+  // multi-user version of the leak this whole pass exists to close.
+  // db.allowedChats always contains the owner, so an unset or empty
+  // OWNER_CHAT_ID still cannot authorise a stranger.
+  const allowed = await db.allowedChats(env);
+  if (!chatId || fromId !== chatId || !allowed.has(chatId)) {
     console.log(`ignored callback from ${fromId}`);
     return;
   }
@@ -654,23 +654,57 @@ async function announceDeploy(env: Env, chatId: string): Promise<void> {
   }
 }
 
+/**
+ * One minute of work, for everybody.
+ *
+ * The two due-queries below used to read the WHOLE table with no chat filter,
+ * and the loop that followed sent everything to env.OWNER_CHAT_ID. That was
+ * harmless only because nobody else could create a row: the moment a second
+ * person existed, their reminders would have fired correctly and been
+ * delivered, titles and all, into the owner's chat.
+ *
+ * The filtering is done in SQL rather than here, and that matters: both
+ * queries carry `LIMIT 25`, so rows belonging to a chat that is no longer
+ * allowed would otherwise sit at the front of the result set forever and
+ * starve the people who are.
+ *
+ * Each chat is its own failure domain. One user's broken turn must not swallow
+ * another user's reminders, for exactly the reason one failed send never
+ * aborts the rest of a tick.
+ */
 async function tick(env: Env): Promise<void> {
   const now = Date.now();
-  const chatId = env.OWNER_CHAT_ID;
-  if (!chatId || chatId === '0') return;
 
-  // Before the early bail below, because on a quiet minute — which is almost
-  // every minute — the tick returns long before it would get here otherwise.
-  await announceDeploy(env, chatId);
+  // The deploy ping is the owner's, not every user's — it is the bot
+  // reporting on itself. Before the per-chat work, so a tick with nothing
+  // else to do still delivers it.
+  await announceDeploy(env, env.OWNER_CHAT_ID);
 
-  // Three independent reads, and this runs 1,440 times a day whether or not
-  // there is anything to do — the overwhelmingly common outcome is that all
-  // three come back empty and the tick bails just below.
-  const [due, nags, settings] = await Promise.all([
-    db.dueReminders(env, now),
-    db.dueNags(env, now),
-    db.getSettings(env, chatId),
+  const chats = [...(await db.allowedChats(env))];
+  if (!chats.length) return;
+
+  const [due, nags] = await Promise.all([
+    db.dueReminders(env, now, chats),
+    db.dueNags(env, now, chats),
   ]);
+
+  for (const chatId of chats) {
+    await tickChat(
+      env, chatId, now,
+      due.filter((r) => r.chat_id === chatId),
+      nags.filter((i) => i.chat_id === chatId),
+    ).catch((err) => console.error(`tick ${chatId}`, err));
+  }
+}
+
+async function tickChat(
+  env: Env,
+  chatId: string,
+  now: number,
+  due: Awaited<ReturnType<typeof db.dueReminders>>,
+  nags: Awaited<ReturnType<typeof db.dueNags>>,
+): Promise<void> {
+  const settings = await db.getSettings(env, chatId);
 
   const checkinDue =
     settings.checkins_enabled === 1 &&

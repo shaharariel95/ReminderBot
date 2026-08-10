@@ -3,6 +3,9 @@ import { describeSchedule, formatLocal, localDayBounds } from './time';
 import type { Env, Schedule } from './types';
 import { VERSION } from './version';
 
+/** Commands only the owner may run. See the gate in handleSlash for why. */
+const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed']);
+
 /** Slash commands handled without burning an LLM call. */
 export async function handleSlash(
   env: Env,
@@ -10,6 +13,44 @@ export async function handleSlash(
   text: string,
 ): Promise<string | null> {
   const cmd = text.trim().split(/\s+/)[0].toLowerCase().split('@')[0];
+
+  // Owner-only commands. Returning null (rather than a refusal) makes them
+  // indistinguishable from commands that do not exist — a guest learns
+  // nothing about what they are not allowed to do.
+  //
+  // /diag is on this list because it prints the API key length, the shared
+  // Gemini quota, and the last discarded rewrites, which are conversation
+  // content. The rest hand out access.
+  if (OWNER_ONLY.has(cmd) && chatId !== env.OWNER_CHAT_ID) return null;
+
+  switch (cmd) {
+    case '/allow':
+    case '/deny': {
+      const target = text.trim().split(/\s+/)[1]?.trim();
+      if (!target || !/^\d{1,20}$/.test(target)) {
+        return 'תן לי chat_id — מספר. הוא יקבל אותו אם ישלח לי הודעה כשהוא לא ברשימה (זה מופיע ב-logs), או דרך @userinfobot.';
+      }
+      const current = await db.allowedChats(env);
+      // The owner is implicit in `allowedChats` and must never end up in the
+      // stored list — writing them in would make a later /deny look like it
+      // could remove them.
+      current.delete(env.OWNER_CHAT_ID);
+      if (cmd === '/allow') current.add(target);
+      else current.delete(target);
+      await db.setAllowedChats(env, [...current]);
+      return cmd === '/allow'
+        ? `${target} ברשימה. שיכתוב לי.`
+        : `${target} הוסר. התזכורות שלו נשארות במסד אבל לא יישלחו.`;
+    }
+
+    case '/allowed': {
+      const list = [...(await db.allowedChats(env))].filter((id) => id !== env.OWNER_CHAT_ID);
+      return list.length
+        ? ['מי שיכול לדבר איתי חוץ ממך:', ...list.map((id) => `· ${id}`)].join('\n')
+        : 'רק אתה. להוספה: /allow [chat_id]';
+    }
+  }
+
   switch (cmd) {
     case '/start':
       return [
@@ -41,6 +82,7 @@ export async function handleSlash(
         '/quiet [התחלה] [סוף] — שעות שקט, למשל /quiet 23 8',
         '/offlimits [טקסט] — נושאים שאסור לי לגעת בהם. בלי טקסט = מציג. "clear" = מנקה.',
         '/diag — בדיקת תקינות (מודל, מפתח, חיבורים)',
+        '/allowed · /allow [chat_id] · /deny [chat_id] — מי עוד יכול לדבר איתי',
         '',
         'כל השאר בשפה חופשית:',
         '"תזכיר לי כל יום ב-7 לרוץ" · "אני רוצה לפתוח תיק מסחר"',

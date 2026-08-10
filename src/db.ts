@@ -392,11 +392,18 @@ export async function deleteReminder(env: Env, chatId: string, id: number): Prom
 }
 
 /** Reminders whose next_fire_at has arrived. Inbox items are excluded by status. */
-export async function dueReminders(env: Env, now: number): Promise<Reminder[]> {
+/**
+ * `chats` is not optional and not a convenience: both this and dueNags carry
+ * `LIMIT 25`, so filtering in JS after the fact would let rows belonging to a
+ * revoked chat occupy the whole page forever and starve everyone else.
+ */
+export async function dueReminders(env: Env, now: number, chats: string[]): Promise<Reminder[]> {
+  if (!chats.length) return [];
   const res = await env.DB.prepare(
-    "SELECT * FROM reminders WHERE status = 'scheduled' AND next_fire_at IS NOT NULL AND next_fire_at <= ? LIMIT 25",
+    `SELECT * FROM reminders WHERE status = 'scheduled' AND next_fire_at IS NOT NULL
+       AND next_fire_at <= ? AND chat_id IN (${chats.map(() => '?').join(',')}) LIMIT 25`,
   )
-    .bind(now)
+    .bind(now, ...chats)
     .all<Reminder>();
   return res.results ?? [];
 }
@@ -433,11 +440,14 @@ export async function openInstances(env: Env, chatId: string): Promise<Instance[
 }
 
 /** Open instances whose nag timer has elapsed. */
-export async function dueNags(env: Env, now: number): Promise<Instance[]> {
+/** Scoped to `chats` for the same starvation reason as dueReminders. */
+export async function dueNags(env: Env, now: number, chats: string[]): Promise<Instance[]> {
+  if (!chats.length) return [];
   const res = await env.DB.prepare(
-    "SELECT * FROM instances WHERE status = 'open' AND next_nag_at IS NOT NULL AND next_nag_at <= ? LIMIT 25",
+    `SELECT * FROM instances WHERE status = 'open' AND next_nag_at IS NOT NULL
+       AND next_nag_at <= ? AND chat_id IN (${chats.map(() => '?').join(',')}) LIMIT 25`,
   )
-    .bind(now)
+    .bind(now, ...chats)
     .all<Instance>();
   return res.results ?? [];
 }
@@ -840,6 +850,48 @@ export const REJECTION_KEEP = 40;
  * claim was written would re-announce the same deploy every minute until
  * someone noticed.
  */
+/**
+ * Every chat allowed to use the bot.
+ *
+ * The owner is ALWAYS in the set, whatever the database says. That is the
+ * whole safety property here: a missing row, an empty string, a botched
+ * `/deny`, or a table that has not been migrated yet all degrade to exactly
+ * the behaviour this bot had before guests existed — owner-only — rather than
+ * locking everyone out of their own reminders.
+ *
+ * Stored as one comma-separated `meta` row rather than a table of its own. It
+ * is read on every inbound message, it will hold single digits of entries, and
+ * a second table would need its own migration to say the same thing.
+ */
+export async function allowedChats(env: Env, ownerId = env.OWNER_CHAT_ID): Promise<Set<string>> {
+  const allowed = new Set<string>();
+  if (ownerId && ownerId !== '0') allowed.add(ownerId);
+  try {
+    const row = await env.DB.prepare("SELECT value FROM meta WHERE key = 'allowed_chats'")
+      .first<{ value: string }>();
+    for (const id of (row?.value ?? '').split(',')) {
+      const trimmed = id.trim();
+      if (trimmed) allowed.add(trimmed);
+    }
+  } catch (err) {
+    // Fail closed to owner-only. An unreadable guest list is not a reason to
+    // stop answering the person who owns the bot.
+    console.error('allowedChats', err);
+  }
+  return allowed;
+}
+
+/** Replace the guest list. The owner is implicit and need not be included. */
+export async function setAllowedChats(env: Env, ids: string[]): Promise<void> {
+  const value = [...new Set(ids.map((s) => s.trim()).filter(Boolean))].join(',');
+  await env.DB.prepare(
+    `INSERT INTO meta (key, value) VALUES ('allowed_chats', ?)
+       ON CONFLICT(key) DO UPDATE SET value = ?`,
+  )
+    .bind(value, value)
+    .run();
+}
+
 export async function claimVersion(env: Env, version: string): Promise<boolean> {
   const row = await env.DB.prepare(
     `INSERT INTO meta (key, value) VALUES ('version', ?)

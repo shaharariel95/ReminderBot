@@ -89,13 +89,13 @@ function seedSettings(rig: Rig, over: Partial<Settings> = {}): void {
     );
 }
 
-function seedReminder(rig: Rig, title: string, dueAt: number, schedule = '{"type":"once","at":"2099-01-01T07:05"}'): number {
+function seedReminder(rig: Rig, title: string, dueAt: number, schedule = '{"type":"once","at":"2099-01-01T07:05"}', chatId = CHAT): number {
   const r = rig.db
     .prepare(
       `INSERT INTO reminders (chat_id, title, schedule, tz, next_fire_at, status, active, created_at)
        VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
     )
-    .run(CHAT, title, schedule, TZ, dueAt, Date.now());
+    .run(chatId, title, schedule, TZ, dueAt, Date.now());
   return Number(r.lastInsertRowid);
 }
 
@@ -104,12 +104,12 @@ function reminders(rig: Rig): { id: number; title: string; schedule: string; nex
 }
 
 /** An already-open instance, so a 'complete' intent has something to close. */
-function seedInstance(rig: Rig, reminderId: number, title: string, firedAt: number): number {
+function seedInstance(rig: Rig, reminderId: number, title: string, firedAt: number, chatId = CHAT): number {
   const r = rig.db
     .prepare(
       `INSERT INTO instances (reminder_id, chat_id, title, fired_at, status) VALUES (?, ?, ?, ?, 'open')`,
     )
-    .run(reminderId, CHAT, title, firedAt);
+    .run(reminderId, chatId, title, firedAt);
   return Number(r.lastInsertRowid);
 }
 
@@ -418,13 +418,13 @@ async function main() {
     const items = await db.listInbox(rig.env, CHAT);
     eq('the item is in the inbox', items.map((i) => i.title), ['לקנות חלב']);
 
-    const due = await db.dueReminders(rig.env, Date.now() + 86_400_000);
+    const due = await db.dueReminders(rig.env, Date.now() + 86_400_000, [CHAT]);
     eq('inbox items never fire', due.length, 0);
 
     const at = Date.now() + 3_600_000;
     await db.scheduleInboxItem(rig.env, id, at, JSON.stringify({ type: 'once', at: '2099-01-01T10:00' }));
     eq('the inbox is empty once scheduled', (await db.listInbox(rig.env, CHAT)).length, 0);
-    eq('and it is now due-able', (await db.dueReminders(rig.env, at)).length, 1);
+    eq('and it is now due-able', (await db.dueReminders(rig.env, at, [CHAT])).length, 1);
     rig.restore();
   }
 
@@ -568,6 +568,165 @@ async function main() {
     check('"רשמתי" never reaches the user when nothing was written',
       !out.includes('רשמתי'), `sent: ${out}`);
     eq('and nothing was written', reminders(rig).length, 0);
+    rig.restore();
+  }
+
+  section('more than one person can use the bot, and only the ones invited');
+  const OTHER = '99999';
+  {
+    // Until now the only user was whoever OWNER_CHAT_ID named, and everyone
+    // else got silence. The allowlist keeps that as the default — an unknown
+    // chat is still ignored — but lets the owner let someone in without a
+    // redeploy.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'שלום', message_id: 1 } });
+    eq('a stranger still gets nothing at all', rig.texts().length, 0);
+    eq('and costs no model call', rig.geminiCalls.length, 0);
+    rig.restore();
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+
+    await runUpdate(rig, { message: { chat: { id: Number(OTHER) }, text: 'שלום', message_id: 1 } });
+    check('an invited chat is answered', rig.texts().length > 0, rig.texts().join(' | '));
+    check('in their own chat, not the owner\'s',
+      rig.sent.every((s) => s.chat_id === undefined || String(s.chat_id) === OTHER),
+      JSON.stringify(rig.sent.map((s) => s.chat_id)));
+    rig.restore();
+  }
+  {
+    // The owner is allowed unconditionally. If the meta row is missing, junk,
+    // or someone deletes themselves out of it, the bot must fall back to
+    // exactly what it did before this feature existed — not lock everyone out.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);   // owner deliberately absent
+    const allowed = await db.allowedChats(rig.env);
+    check('the owner is always on the list', allowed.has(CHAT), [...allowed].join(','));
+    rig.db.prepare("UPDATE meta SET value = '' WHERE key = 'allowed_chats'").run();
+    check('an empty list still leaves the owner in',
+      (await db.allowedChats(rig.env)).has(CHAT), '');
+    rig.restore();
+  }
+  {
+    // Revoking has to actually revoke — including the button path, which is a
+    // separate door into the same writes.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);
+    const remId = seedReminder(rig, 'לרוץ', Date.now() + 3_600_000, undefined, OTHER);
+    const instId = seedInstance(rig, remId, 'לרוץ', Date.now() - 1000, OTHER);
+    await db.setAllowedChats(rig.env, []);
+
+    await runUpdate(rig, callbackUpdate(OTHER, `d:${instId}`, OTHER));
+    const row = rig.db.prepare('SELECT status FROM instances WHERE id = ?').get(instId) as any;
+    eq('a revoked chat cannot close a task by tapping', row.status, 'open');
+    rig.restore();
+  }
+  {
+    // /allow, /deny and /diag are the owner's, not every user's. /diag in
+    // particular prints the API key length and the discarded rewrite texts.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);
+
+    eq('a guest cannot invite anyone', await handleSlash(rig.env, OTHER, `/allow 123`), null);
+    eq('nor read /diag', await handleSlash(rig.env, OTHER, '/diag'), null);
+    check('the owner can invite',
+      ((await handleSlash(rig.env, CHAT, '/allow 123')) ?? '').includes('123'), '');
+    check('and the invitation sticks',
+      (await db.allowedChats(rig.env)).has('123'), '');
+    check('and can revoke',
+      ((await handleSlash(rig.env, CHAT, '/deny 123')) ?? '').length > 0, '');
+    check('which sticks too', !(await db.allowedChats(rig.env)).has('123'), '');
+    rig.restore();
+  }
+
+  section('one person\'s reminders never reach another person\'s chat');
+  {
+    // The bug this exists to close. dueReminders/dueNags read the WHOLE table
+    // with no chat filter, and tick() then sent everything to
+    // env.OWNER_CHAT_ID — so the moment a second person had a row, their task
+    // titles would arrive in the owner's chat.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);
+    seedReminder(rig, 'הדבר הפרטי של מישהו אחר', Date.now() - 1000, undefined, OTHER);
+    rig.geminiDown = true;
+
+    await runCron(rig);
+
+    const toOwner = rig.sent.filter((s) => String(s.chat_id) === CHAT).map((s) => s.text ?? '');
+    const toOther = rig.sent.filter((s) => String(s.chat_id) === OTHER).map((s) => s.text ?? '');
+    check('it is delivered to the person it belongs to',
+      toOther.some((t) => t.includes('הדבר הפרטי')), JSON.stringify(rig.sent));
+    check('and never to the owner',
+      !toOwner.some((t) => t.includes('הדבר הפרטי')), JSON.stringify(toOwner));
+    rig.restore();
+  }
+  {
+    // A reminder belonging to a chat that is no longer allowed must not fire
+    // anywhere — and must not consume the LIMIT 25 that real users need.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'של מישהו שהוסר', Date.now() - 1000, undefined, OTHER);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000, undefined, CHAT);
+    rig.geminiDown = true;
+
+    await runCron(rig);
+
+    const all = rig.texts().join('\n');
+    check('the owner still gets theirs', all.includes('לרוץ'), all);
+    check('the revoked chat gets nothing', !all.includes('הוסר'), all);
+    rig.restore();
+  }
+  {
+    // Why the chat filter is in the SQL and not in JS afterwards.
+    //
+    // dueReminders carries LIMIT 25. A revoked chat's rows stay in the table
+    // and stay due forever, and they sort ahead of everyone else's — so with
+    // the filter applied after the query, a single removed user with 25 stale
+    // reminders fills the whole page every minute and nobody else's reminder
+    // ever fires again. Filtering in SQL means those rows are never selected.
+    const rig = createRig();
+    seedSettings(rig);
+    for (let i = 0; i < 25; i++) {
+      seedReminder(rig, `ישן ${i}`, Date.now() - 5000, undefined, OTHER);
+    }
+    seedReminder(rig, 'לרוץ', Date.now() - 1000, undefined, CHAT);
+    rig.geminiDown = true;
+
+    await runCron(rig);
+
+    check('a revoked chat cannot starve the page and block a real reminder',
+      rig.texts().join('\n').includes('לרוץ'), rig.texts().join(' | '));
+    rig.restore();
+  }
+  {
+    // One user's tick blowing up must not swallow another's reminders. Each
+    // chat is its own failure domain, for the same reason one failed send
+    // never aborts the rest of a tick.
+    const rig = createRig();
+    seedSettings(rig);
+    await db.setAllowedChats(rig.env, [OTHER]);
+    seedReminder(rig, 'לרוץ', Date.now() - 1000, undefined, CHAT);
+    seedReminder(rig, 'לשחות', Date.now() - 1000, undefined, OTHER);
+    rig.geminiDown = true;
+    // Break the first chat's turn specifically.
+    rig.dbFailOn = /INSERT INTO instances/;
+
+    await runCron(rig);
+
+    check('the other chat is still served when one chat throws',
+      rig.texts().join('\n').includes('לשחות'), rig.texts().join(' | '));
     rig.restore();
   }
 
