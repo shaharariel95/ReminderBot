@@ -1,4 +1,5 @@
 import type { Facts } from './types';
+import { scanDurations } from './quickparse';
 
 export interface Verdict {
   ok: boolean;
@@ -27,6 +28,38 @@ export const CLAIM = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תז
 
 const CLOCK = /\b\d{1,2}:\d{2}\b/g;
 const QUOTED = /"([^"\n]{2,80})"/g;
+
+/**
+ * When a length of time is a CLAIM about how long something has been going,
+ * rather than a figure of speech.
+ *
+ * This distinction is the whole rule, and it has to be drawn narrowly. The
+ * persona is rhetorical about durations by design — "רק תרים שיחה של חצי
+ * דקה", "חמש דקות ואתה בחוץ", "עוד חצי שעה אני פה שוב" are all good lines
+ * from the same transcript that produced the bug this rule exists for, and
+ * not one of them asserts anything. A rule that discards those costs more
+ * than the lie it prevents, so only two frames count:
+ *
+ *   כבר / עברו / מזה   before the phrase — unambiguously "it has been X"
+ *   אתה / את           straight after it  — "שעה וחצי אתה גורר את הטלפון"
+ *
+ * The second is deliberately spelled without a ו: "חמש דקות ואתה בחוץ" is a
+ * consequence, "שעה וחצי אתה גורר" is an accusation, and that one letter is
+ * the only thing separating them. Everything else is left alone. Missing a
+ * lie is the acceptable failure here; killing a true sentence is not.
+ */
+const ELAPSED_BEFORE = /(?:כבר|עברו|מזה)\s*$/;
+const ELAPSED_AFTER = /^\s*(?:אתה|את)(?![א-ת])/;
+
+/**
+ * The model is allowed to round. It is reading a wall clock and writing
+ * Hebrew, not reporting a stopwatch, so "חצי שעה" for 31 minutes is true and
+ * "שעה וחצי" for 30 is not. The floor of 10 minutes keeps short spans from
+ * being held to an impossible standard; the 25% keeps long ones honest.
+ */
+function nearEnough(claimed: number, actual: number): boolean {
+  return Math.abs(claimed - actual) <= Math.max(10, actual * 0.25);
+}
 
 /** Normalise "7:05" and "07:05" to the same key. */
 function normTime(s: string): string {
@@ -74,6 +107,23 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
     // entry like reason = "חתול" into a wildcard that swallows any longer quote.
     const knownProse = facts.quotable.some((q) => q.includes(quoted));
     if (!knownTitle && !knownProse) return { ok: false, reason: `invented task "${quoted}"` };
+  }
+
+  // Same fold as the two rules above: whatever voice.ts already said is true
+  // by construction, so a duration it stated may be echoed back regardless of
+  // how the model frames it.
+  const allowedElapsed = [...facts.elapsed, ...scanDurations(baseline).map((d) => d.minutes)];
+
+  for (const hit of scanDurations(text)) {
+    if (!ELAPSED_BEFORE.test(hit.before) && !ELAPSED_AFTER.test(hit.after)) continue;
+    if (!allowedElapsed.some((actual) => nearEnough(hit.minutes, actual))) {
+      return {
+        ok: false,
+        reason: `invented elapsed time ${hit.minutes}m (actual: ${
+          allowedElapsed.length ? allowedElapsed.map((m) => `${m}m`).join(', ') : 'nothing is open'
+        })`,
+      };
+    }
   }
 
   return { ok: true };

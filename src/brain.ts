@@ -20,6 +20,8 @@ const ACTION_SCHEMA = {
         'create_reminder',
         'complete',
         'snooze',
+        'on_my_way',
+        'annotate',
         'list',
         'delete',
         'reschedule',
@@ -101,9 +103,12 @@ export function remindersSummary(ctx: Context): string {
         /* keep raw */
       }
       const next = r.next_fire_at ? formatLocal(r.next_fire_at, r.tz) : 'לא מתוזמן';
+      // The note is the detail that makes a nag land — what it is for, what to
+      // bring. It lives on the row precisely so it is still here after the
+      // conversation that produced it has been pruned away.
       return `  #${r.id} "${r.title}" — ${sched} — הבא: ${next}${
         r.requires_proof ? ' — דורש הוכחה' : ''
-      }`;
+      }${r.notes ? ` — הערה: ${r.notes}` : ''}`;
     })
     .join('\n');
 }
@@ -182,9 +187,13 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 
   requires_proof=true אם הוא ביקש שתדרוש הוכחה או אם זו משימה פיזית שקל לשקר לגביה.
 - "snooze" — דחייה של משימה שכבר צלצלה ומחכה לדיווח. target_id = instance id, snooze_minutes.
+- "on_my_way" — הוא בדרך, יצא, התחיל, עושה את זה עכשיו ("נוסע", "בדרך", "יוצא עכשיו", "על זה", תמונה של הדרך). target_id = instance id.
+  זה לא complete — הוא לא סיים, והוא עוד יצטרך לדווח. זה גם לא snooze — snooze זה "לא עכשיו", וזה בדיוק ההפך.
 - "reschedule" — הזזה של תזכורת קיימת שעוד לא צלצלה, לזמן אחר ("תעביר את זה ל-8", "תדחה את הריצה למחר בבוקר", "בעצם ב-21:00"). target_id = reminder id מהרשימה למעלה, ואת הזמן החדש באותם שדות של create_reminder (in_minutes / once_at / time+days).
   זה לא create_reminder — אל תיצור תזכורת חדשה כשהוא רק מזיז אחת קיימת, אחרת יהיו לו שתיים.
-  זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לתזכורת שעדיין מחכה.
+  זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לת- "annotate" — פרט שמסביר תזכורת קיימת: בשביל מה היא, מה להביא, את מי לשאול. בדרך כלל זו התשובה שלו לשאלה ששאלת ("מה איבדת שם?" → "בשר אחי"). target_id = reminder id + note = הפרט, קצר, במילים שלו.
+  זה לא rename — הכותרת נשארת. זה לא remember — remember זה עובדה קבועה עליו, וזה פרט על משימה אחת.
+זכורת שעדיין מחכה.
 - "rename" — שינוי הניסוח של תזכורת קיימת בלי לגעת בשעה ("תשנה את זה ל'לקחת את הכלב'", "זה לא חלב זה לחם", וגם תשובה לשאלה שלך "על מה התזכורת?"). target_id = reminder id + title = הנוסח החדש.
 - "delete" — ביטול תזכורת. target_id = reminder id.
 - "list" — הוא שואל מה יש לו (תזכורות).
@@ -307,6 +316,17 @@ export async function speak(
       facts.profile,
     ) +
     `\n\n## מה שקרה עכשיו — זו האמת, אל תוסיף עליה\n${baseline}` +
+    // Stated outright rather than left to be derived from a start time and a
+    // wall clock. Asked to do that subtraction on 10.08.2026 the model wrote
+    // "שעה וחצי אתה גורר את הטלפון למוסך" thirty minutes in. validate.ts now
+    // catches that, but catching it costs the whole rewrite — this is what
+    // stops it being written. Omitted entirely when nothing is open: an empty
+    // heading is an invitation to fill it.
+    (facts.elapsed.length
+      ? `\n\n## כמה זמן זה כבר פתוח — המספר הזה ולא אחר\n${facts.elapsed
+          .map((m) => `${m} דקות`)
+          .join(' · ')}`
+      : '') +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
     `\n\nכתוב מחדש את מה שכתוב ב"מה שקרה עכשיו" בקול שלך.
 מותר לך לשנות ניסוח, להוסיף עוקץ, ולפצל להודעות קצרות מופרדות בשורה ריקה — לפי כלל האורך שכתוב למעלה ב"מבנה ההודעה" (אישור קצר = הודעה אחת).

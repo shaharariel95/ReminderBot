@@ -1,5 +1,6 @@
 /** Run with `npm run test:buttons`. */
 import { buttonsFor, decode, encode, keyboard, type Callback } from '../src/buttons';
+import { formatLocal, planSlotInstant, wallToUtc } from '../src/time';
 import { check, done, eq, section } from './harness';
 
 section('round trip');
@@ -114,5 +115,36 @@ eq('a reminder_created effect with no altHour offers no correction button',
   buttonsFor([{ kind: 'reminder_created', id: 12 }]), undefined);
 eq('a malformed id with altHour set yields no buttons, not a broken one',
   buttonsFor([{ kind: 'reminder_created', id: NaN, altHour: 23 }]), undefined);
+
+section('inbox slots say the time they actually mean');
+{
+  // He tapped "מחר בבוקר" on 09.08.2026 and got 09:00, having asked for 10:00.
+  // The button never said 09:00 anywhere — the hour lived only in
+  // slotToInstant, so there was nothing on screen to disagree with.
+  const TZ = 'Asia/Jerusalem';
+  const NOW = wallToUtc(2026, 8, 9, 14, 55, TZ);
+  const rows = buttonsFor([{ kind: 'reminder_captured', id: 7 }], TZ, NOW);
+  const labels = (rows ?? []).flat().map((b) => b.text);
+
+  check('the evening slot names its hour', labels.some((l) => l.includes('20:00')), labels.join(' | '));
+  check('the tomorrow slot names its hour', labels.some((l) => l.includes('09:00')), labels.join(' | '));
+  check('the "in an hour" slot names the hour it lands on',
+    labels.some((l) => l.includes('15:55')), labels.join(' | '));
+  check('"no time" stays a slot with nothing to promise',
+    labels.some((l) => l.includes('בלי זמן')), labels.join(' | '));
+
+  // The assertion that matters: the label and the write share one source, so
+  // they cannot drift apart later. Anything else is a comment that happens to
+  // render.
+  for (const slot of ['eve', 'tm', 'hr'] as const) {
+    const btn = (rows ?? []).flat().find(
+      (b) => b.data.t === 'plan' && b.data.slot === slot,
+    );
+    const at = planSlotInstant(slot, TZ, NOW);
+    check(`the ${slot} label matches what tapping it schedules`,
+      btn !== undefined && btn.text.includes(formatLocal(at, TZ).slice(-5)),
+      `${btn?.text} vs ${formatLocal(at, TZ)}`);
+  }
+}
 
 done();

@@ -6,6 +6,7 @@
  */
 
 import { UNTITLED_TITLE } from './types';
+import { formatLocal, planSlotInstant } from './time';
 
 export type PlanSlot = 'eve' | 'tm' | 'hr' | 'none';
 
@@ -16,7 +17,12 @@ export type Callback =
   | { t: 'retime'; reminder: number; hour: number; minute: number }
   | { t: 'plan'; reminder: number; slot: PlanSlot }
   /** From the evening close-out: drop today's attempt and try again tomorrow. */
-  | { t: 'tomorrow'; instance: number };
+  | { t: 'tomorrow'; instance: number }
+  /** Accept the follow-up reminder offered when a task that was ARRANGING
+   *  something got closed. Carries only the instance: the appointment is
+   *  re-derived from the same title by the same function that offered it, so
+   *  the label and the write cannot disagree. */
+  | { t: 'followup'; instance: number };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
@@ -36,6 +42,8 @@ export function encode(c: Callback): string {
       return `p:${c.reminder}:${c.slot}`;
     case 'tomorrow':
       return `m:${c.instance}`;
+    case 'followup':
+      return `f:${c.instance}`;
   }
 }
 
@@ -48,6 +56,8 @@ export function decode(s: string): Callback | null {
       return parts.length === 2 && isNat(parts[1]) ? { t: 'skip', instance: +parts[1] } : null;
     case 'm':
       return parts.length === 2 && isNat(parts[1]) ? { t: 'tomorrow', instance: +parts[1] } : null;
+    case 'f':
+      return parts.length === 2 && isNat(parts[1]) ? { t: 'followup', instance: +parts[1] } : null;
     case 's':
       return parts.length === 3 && isNat(parts[1]) && isNat(parts[2])
         ? { t: 'snooze', instance: +parts[1], minutes: +parts[2] }
@@ -102,8 +112,17 @@ function shortLabel(title: unknown): string {
   return s.length > 14 ? `${s.slice(0, 13)}…` : s;
 }
 
+/** "07:05" out of the formatted local label. */
+function hhmm(ts: number, tz: string): string {
+  const label = formatLocal(ts, tz);
+  return /(\d{2}:\d{2})/.exec(label)?.[1] ?? label;
+}
+
 export function buttonsFor(
   effects: { kind: string; [k: string]: unknown }[],
+  /** Only the inbox slots need these; every other keyboard is time-free. */
+  tz = 'Asia/Jerusalem',
+  now = Date.now(),
 ): Button[][] | undefined {
   const fired = effects.filter((e) => e.kind === 'reminder_fired' || e.kind === 'nagged');
 
@@ -137,6 +156,17 @@ export function buttonsFor(
       ];
     });
     return rows.length ? rows : undefined;
+  }
+
+  // Checked before the fired/created keyboards below can claim the message: a
+  // follow-up offer is a question, and a question with no way to say yes is
+  // just noise.
+  const followup = effects.find((e) => e.kind === 'followup_suggested');
+  if (followup) {
+    const instance = positiveId(followup.instanceId);
+    const at = Number(followup.at);
+    if (instance === null || !Number.isFinite(at)) return undefined;
+    return [[{ text: `כן, ${hhmm(at, tz)}`, data: { t: 'followup', instance } }]];
   }
 
   const created = effects.find((e) => e.kind === 'reminder_created' && e.altHour !== undefined);
@@ -177,13 +207,20 @@ export function buttonsFor(
   if (captured) {
     const reminder = positiveId(captured.id);
     if (reminder === null) return undefined;
+    // Each label carries the hour it will actually produce, read from the same
+    // function the tap writes with. "מחר בבוקר" silently meant 09:00 to one
+    // side and nothing at all to the other, and an hour he had explicitly
+    // asked for disappeared into the gap.
+    const slotLabel = (name: string, slot: 'eve' | 'tm' | 'hr') =>
+      `${name} ${hhmm(planSlotInstant(slot, tz, now), tz)}`;
     return [
       [
-        { text: 'עוד שעה', data: { t: 'plan', reminder, slot: 'hr' } },
-        { text: 'היום בערב', data: { t: 'plan', reminder, slot: 'eve' } },
+        { text: slotLabel('עוד שעה', 'hr'), data: { t: 'plan', reminder, slot: 'hr' } },
+        { text: slotLabel('הערב', 'eve'), data: { t: 'plan', reminder, slot: 'eve' } },
       ],
       [
-        { text: 'מחר בבוקר', data: { t: 'plan', reminder, slot: 'tm' } },
+        { text: slotLabel('מחר', 'tm'), data: { t: 'plan', reminder, slot: 'tm' } },
+        // The only slot with no hour to promise, so the only one without one.
         { text: 'בלי זמן', data: { t: 'plan', reminder, slot: 'none' } },
       ],
     ];

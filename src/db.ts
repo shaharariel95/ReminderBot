@@ -474,6 +474,25 @@ export async function snoozeInstance(env: Env, id: number, minutes: number): Pro
     .run();
 }
 
+/**
+ * He is doing it right now. Holds the nag ladder off for a grace window
+ * without closing anything.
+ *
+ * Mechanically this is a snooze; semantically it is the opposite, and that is
+ * why it is a separate function with a separate effect. A snooze is "not now";
+ * this is "now" — the task stays open precisely because the bot still has to
+ * hear how it went. `status = 'open'` in the WHERE clause keeps it from
+ * reopening the nag clock on something already closed.
+ */
+export async function startInstance(env: Env, id: number, minutes: number): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE instances SET next_nag_at = ? WHERE id = ? AND status = 'open'",
+  )
+    .bind(Date.now() + minutes * 60_000, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 export async function getReminder(env: Env, id: number): Promise<Reminder | null> {
   return env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first<Reminder>();
 }
@@ -523,6 +542,24 @@ export async function renameReminder(env: Env, id: number, title: string): Promi
     "UPDATE reminders SET title = ? WHERE id = ? AND status != 'cancelled'",
   )
     .bind(title, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/** Max length of a reminder note. Long enough for "בשר ויין מהמשק", short
+ *  enough that it can be shown in full on every prompt that lists reminders. */
+export const REMINDER_NOTE_MAX = 200;
+
+/**
+ * Attach the detail that makes a reminder land — what it is for, what to
+ * bring. Replaces rather than appends: a second answer to the same question is
+ * a correction, and an accreting note would be unreadable within a week.
+ */
+export async function annotateReminder(env: Env, id: number, note: string): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE reminders SET notes = ? WHERE id = ? AND status != 'cancelled'",
+  )
+    .bind(note.slice(0, REMINDER_NOTE_MAX), id)
     .run();
   return (res.meta.changes ?? 0) > 0;
 }
@@ -767,6 +804,64 @@ export async function rateWindowNow(env: Env, model: string): Promise<number> {
   return row?.calls ?? 0;
 }
 
-export async function recordRejection(env: Env): Promise<void> {
+export interface Rejection {
+  at: number;
+  reason: string;
+  text: string;
+  effects: string;
+}
+
+/**
+ * How many discarded rewrites are kept. Small on purpose: this is a debugging
+ * aid you read the tail of, not an archive, and the day it fills fastest is
+ * the day the model is misbehaving — the last moment the bot should start
+ * spending writes on its own diagnostics.
+ */
+export const REJECTION_KEEP = 40;
+
+/**
+ * Record a rewrite the validator threw away.
+ *
+ * Best-effort by construction: the caller has already decided to ship the
+ * deterministic baseline, so a failure here must cost the user nothing. The
+ * `usage` counter is bumped first and separately — it is what /diag has always
+ * shown, and it stays correct even if the detail row is the thing that fails.
+ */
+export async function recordRejection(
+  env: Env,
+  chatId: string,
+  reason: string,
+  text: string,
+  effects: string,
+): Promise<void> {
   await recordUsage(env, '_rejections');
+  await env.DB.prepare(
+    'INSERT INTO rejections (chat_id, at, reason, text, effects) VALUES (?, ?, ?, ?, ?)',
+  )
+    .bind(chatId, Date.now(), reason.slice(0, 300), text.slice(0, 1000), effects.slice(0, 200))
+    .run();
+  // Pruned here rather than on a schedule, for the same reason rate_window is:
+  // no cron job has to remember to, and the cost lands on the path that caused
+  // the growth.
+  await env.DB.prepare(
+    `DELETE FROM rejections WHERE chat_id = ? AND id NOT IN (
+       SELECT id FROM rejections WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+     )`,
+  )
+    .bind(chatId, chatId, REJECTION_KEEP)
+    .run();
+}
+
+/** The most recent discarded rewrites, newest first. */
+export async function recentRejections(
+  env: Env,
+  chatId: string,
+  limit = 3,
+): Promise<Rejection[]> {
+  const res = await env.DB.prepare(
+    'SELECT at, reason, text, effects FROM rejections WHERE chat_id = ? ORDER BY id DESC LIMIT ?',
+  )
+    .bind(chatId, limit)
+    .all<Rejection>();
+  return res.results ?? [];
 }

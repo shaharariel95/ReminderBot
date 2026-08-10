@@ -1,6 +1,6 @@
 /** Run with `npm run test:parse`. */
-import { quickParse } from '../src/quickparse';
-import { wallToUtc } from '../src/time';
+import { findFutureInstant, parseDuration, quickParse } from '../src/quickparse';
+import { wallString, wallToUtc } from '../src/time';
 
 const TZ = 'Asia/Jerusalem';
 // Sunday 02 Aug 2026, 22:52 local — the moment the production transcript broke.
@@ -270,6 +270,123 @@ console.log('\n--- "היום" pins the day, and settles the hour when it can ---
   const got = quickParse('תזכיר לי היום ב-7 בבוקר לקום', NOW, TZ);
   assertTrue('an impossible "היום" goes to the router rather than lying', got === null);
 }
+
+console.log('\n--- a day word in the TASK is subject matter, not a schedule ---');
+{
+  // 09.08.2026, 14:55. He wrote this and got a reminder at 09:00 the next
+  // morning instead of 10:00 — a silent hour lost, which he never noticed.
+  //
+  // The chain: "יום חמישי" is what the task is ABOUT (a garage appointment),
+  // but TIME_RESIDUE read it as a day the parser had failed to consume and
+  // bailed to the router; the router returned a capture with no time at all;
+  // it landed in the inbox; and the "מחר" inbox button is hardcoded to 09:00.
+  // Three layers, each individually defensible, and an hour disappeared.
+  const at1455 = wallToUtc(2026, 8, 9, 14, 55, TZ);
+  const got = quickParse(
+    'תזכיר לי מחר ב10 בבוקר לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט',
+    at1455, TZ,
+  );
+  assertTrue('the real message parses at all', got !== null);
+  assertTrue('at the hour he actually asked for', got?.once_at === '2026-08-10T10:00');
+  assertTrue('and the appointment day stays in the title where it belongs',
+    (got?.title ?? '').includes('חמישי'));
+}
+// "בבוקר של יום שני" is a noun phrase — the morning OF Monday — not a second
+// instruction about when to fire.
+// The phrase is stripped for the RESIDUE CHECK only — it stays in the title,
+// because "the morning of Monday" is exactly what he wants to be reminded about.
+check('תזכיר לי מחר ב10 לקנות חלב בבוקר של יום שני',
+  { at: '2026-08-03T10:00', title: 'לקנות חלב בבוקר של יום שני' });
+// Once "מחר" has pinned the day, a weekday later in the sentence cannot change
+// it, so it is no longer evidence of a half-understood phrase.
+check('תזכיר לי מחר ב10 בבוקר לדבר על המוסך ביום חמישי', { at: '2026-08-03T10:00' });
+
+console.log('\n--- ...but the residue guard keeps its teeth ---');
+// No day was pinned, so this weekday IS the schedule — and "בשלישי" is the
+// bare form quickparse deliberately refuses to guess at.
+check('תזכיר לי בשלישי ב-9 לרוץ', null);
+// The clock is unsettled and a stray period could still change it. Nothing
+// pinned the day here either.
+check('תזכיר לי מחר ב8 לרוץ בערב', null);
+// Two doses, not one reminder — the case the residue guard was written for.
+check('תזכיר לי ב-8 בבוקר ובערב לקחת כדור', null);
+// A weekday-derived day plus a SECOND weekday is genuinely two days, and no
+// offset word settled which one wins.
+check('תזכיר לי ביום שלישי ב-9 לרוץ ביום חמישי', null);
+
+// ------------------------------------------------------- parseDuration
+//
+// The snooze bug from the 10.08.2026 transcript: he said "עוד שעה", the router
+// returned a snooze with no snooze_minutes, effects.ts fell back to its
+// 30-minute default, and the bot then ANNOUNCED that default as though he had
+// asked for it ("הזזתי ב-30 דקות"). The default itself is fine — stating it as
+// his words is not. parseDuration is what effects.ts consults before falling
+// back, so a length he actually said is never silently replaced.
+
+console.log('\n--- parseDuration — a length he actually said ---');
+
+function dur(text: string, expected: number | null): void {
+  const got = parseDuration(text);
+  assertTrue(`"${text}" → ${expected === null ? 'null' : `${expected}m`} (got ${got})`, got === expected);
+}
+
+// The exact message that produced the bug, comma and trailing clause included.
+dur('עוד שעה, אעבוד עד קצת יותר מאוחר היום', 60);
+// The one that already worked, kept so a fix for the above cannot break it.
+dur('אני סופר עמוס בעבודה, עוד חצי שעה', 30);
+dur('עוד שעתיים', 120);
+dur('תדחה בעוד 20 דקות', 20);
+dur('תוך רבע שעה', 15);
+
+// "ב" forms — how a snooze is phrased at least as often as with "עוד", and the
+// wording /help itself advertises ("תדחה בחצי שעה").
+dur('תדחה בחצי שעה', 30);
+dur('תדחה ב-20 דקות', 20);
+dur('תדחה בעשרים דקות', 20);
+dur('תדחה בשעתיים', 120);
+
+// A clock reading is NOT a duration. "בשעה 10" must never be read as 10
+// minutes/hours — the number follows the unit there, which is what separates
+// the two forms.
+dur('תדחה לשעה 10', null);
+dur('תזכיר לי בשעה 10:00', null);
+dur('ב-10 תדחה', null);
+// No length stated at all: the caller's own default is the right answer, and
+// parseDuration must say so rather than guessing one.
+dur('תדחה', null);
+dur('אני עמוס, אחר כך', null);
+
+// ------------------------------------------------- findFutureInstant
+//
+// He set "לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט",
+// closed it on Monday morning — and nothing was ever created for Thursday,
+// which was the entire point of making the call. The bot watched the whole
+// arrangement happen and had no way to notice the appointment inside it.
+//
+// Unlike quickParse this takes no "remind me": the text here is a task title
+// or a report, not a request. It is only ever used to OFFER something behind a
+// button, which is what makes an assumed hour acceptable.
+
+console.log('\n--- findFutureInstant — the appointment inside the task ---');
+
+function fut(text: string, expected: string | null, now = wallToUtc(2026, 8, 10, 10, 26, TZ)): void {
+  const got = findFutureInstant(text, now, TZ);
+  const label = got === null ? 'null' : wallString(got, TZ);
+  assertTrue(`${label.padEnd(17)} ← ${text}`, label === (expected ?? 'null'));
+}
+
+// The real title, closed on Monday 10.08. Thursday is the 13th.
+fut('לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט', '2026-08-13T09:00');
+// An explicit clock beats the assumed hour every time.
+fut('הטיפול ביום חמישי ב-8:30', '2026-08-13T08:30');
+fut('הפגישה מחר בערב', '2026-08-11T20:00');
+// A day with no hour and no period is too little to guess from.
+fut('לדבר על המוסך ביום חמישי', null);
+// No day at all is nothing to offer.
+fut('לדבר על המוסך', null);
+fut('לקנות חלב', null);
+// Already past this week rolls forward rather than offering yesterday.
+fut('בבוקר של יום ראשון', '2026-08-16T09:00');
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
 if (failures > 0) (globalThis as any).process?.exit?.(1);

@@ -66,6 +66,26 @@ export async function handleSlash(
           .rateWindowNow(env, primary)
           .catch(() => '?')}`,
       );
+      // The count above says how often the model lied; these say what it said.
+      // Without them the number is something to worry about rather than
+      // something to fix — which is exactly what "3" meant on 10.08.2026.
+      const rejected = await db.recentRejections(env, chatId, 3).catch(() => []);
+      if (rejected.length) {
+        // One settings read for the whole block, not one per row: /diag is the
+        // command you run when something is already wrong, and it should not
+        // be the command that costs the most queries.
+        const tz = await db
+          .getSettings(env, chatId)
+          .then((s) => s.tz)
+          .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
+        lines.push('', 'אחרונות שנפסלו:');
+        for (const r of rejected) {
+          lines.push(
+            `· ${formatLocal(r.at, tz)} — ${r.reason}`,
+            `  "${r.text.replace(/\s+/g, ' ').slice(0, 120)}"`,
+          );
+        }
+      }
       try {
         const t0 = Date.now();
         const res = await fetch(

@@ -243,3 +243,28 @@ export function describeSchedule(schedule: Schedule): string {
       return `כל ${schedule.minutes} דקות`;
   }
 }
+
+/**
+ * When an inbox quick-schedule slot actually lands, in the reminder's own
+ * timezone.
+ *
+ * Lives here, rather than beside its one caller, because it has two: the
+ * handler that writes the reminder AND the button that offers it. On
+ * 09.08.2026 only the handler knew that "מחר בבוקר" meant 09:00 — the button
+ * said "מחר בבוקר" and nothing else, he tapped it having asked for 10:00, and
+ * there was nothing on screen for him to disagree with. One source means the
+ * label and the write cannot drift apart.
+ */
+export function planSlotInstant(
+  slot: 'eve' | 'tm' | 'hr',
+  tz: string,
+  now = Date.now(),
+): number {
+  if (slot === 'hr') return now + 3_600_000;
+  const p = wallParts(now, tz);
+  if (slot === 'eve') {
+    const at = wallToUtc(p.year, p.month, p.day, 20, 0, tz);
+    return at > now ? at : at + 86_400_000;
+  }
+  return wallToUtc(p.year, p.month, p.day + 1, 9, 0, tz);
+}

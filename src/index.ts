@@ -5,7 +5,7 @@ import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
 import { validate } from './validate';
 import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
-import { quickParse } from './quickparse';
+import { findFutureInstant, quickParse } from './quickparse';
 import {
   answerCallback,
   getPhotoBase64,
@@ -24,6 +24,7 @@ import {
   localDateKey,
   localDayBounds,
   nextCheckinTime,
+  planSlotInstant,
   wallParts,
   wallString,
   wallToUtc,
@@ -106,6 +107,48 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     }
   }
 
+  // Everything past here touches D1, Telegram and the model, and until this
+  // guard existed only the middle of it was protected: sendOutcome has always
+  // caught its own failures, but a throw in buildContext, addMessage or
+  // recentMessages — the reads and writes AROUND it — unwound straight out to
+  // fetch()'s `job.catch` and the turn ended without a word.
+  //
+  // Silence is the worst answer this bot can give. It is indistinguishable
+  // from being down, and it lands exactly when he has just reported doing the
+  // thing and is waiting to hear that it counted. A photo captioned "הנה הנה
+  // נוסע עכשיו" went unanswered on 10.08.2026; this is the class of path that
+  // can do that.
+  try {
+    await respondToOwner(env, chatId, msg, text, hasPhoto);
+  } catch (err) {
+    console.error('handleUpdate', err);
+    // Says only what is certainly true. Something may well have been written
+    // before the throw, so this must neither confirm nor deny the work —
+    // claiming either would be the exact failure the rest of the pipeline
+    // exists to prevent.
+    await sendMessage(env, chatId, TURN_FAILED).catch((e) =>
+      console.error('last-resort send', e),
+    );
+  }
+}
+
+/** The last thing he hears when a turn falls over. Honest, and claims nothing. */
+const TURN_FAILED = 'נפל לי משהו באמצע ולא סיימתי את זה. תגיד שוב — ואם זה חוזר, /diag.';
+
+/**
+ * One inbound message from the owner, from acknowledgment to reply.
+ *
+ * Split out of handleUpdate so the whole of it sits inside one guard. The
+ * gates above it (auth, slash commands) deliberately stay outside: they answer
+ * for themselves and have nothing half-finished to report.
+ */
+async function respondToOwner(
+  env: Env,
+  chatId: string,
+  msg: any,
+  text: string,
+  hasPhoto: boolean,
+): Promise<void> {
   // Instant acknowledgment. The considered reply follows; this lands in ~200ms
   // and is the difference between "present" and "processing". Fires before
   // the model is ever consulted, on the user's own message — there is no
@@ -252,6 +295,34 @@ async function handleCallback(update: any, env: Env): Promise<void> {
         }
         break;
       }
+      case 'followup': {
+        // The appointment is re-derived from the same title by the same
+        // function that offered it, rather than being carried in the payload:
+        // callback_data has 64 bytes and a title does not fit, and re-deriving
+        // means the label he tapped and the row that gets written cannot
+        // disagree about when.
+        const inst = await db.getInstance(env, cb.instance);
+        const settings = await db.getSettings(env, chatId);
+        const at = inst ? findFutureInstant(inst.title, Date.now(), settings.tz) : null;
+        if (inst && at !== null && at > Date.now()) {
+          const schedule: Schedule = { type: 'once', at: wallString(at, settings.tz) };
+          const id = await db.addReminder(env, {
+            chat_id: chatId,
+            title: inst.title,
+            notes: null,
+            schedule: JSON.stringify(schedule),
+            tz: settings.tz,
+            requires_proof: 0,
+            proof_type: 'any',
+            nag_interval_min: 20,
+            max_nags: 3,
+            next_fire_at: at,
+          });
+          effects.push({ kind: 'reminder_created', id, title: inst.title, at, schedule, requiresProof: false });
+        }
+        break;
+      }
+
       case 'tomorrow': {
         const inst = await db.getInstance(env, cb.instance);
         if (inst) {
@@ -333,7 +404,7 @@ async function handleCallback(update: any, env: Env): Promise<void> {
           if (cb.slot === 'none') {
             effects.push({ kind: 'listed_inbox', rows: await db.listInbox(env, chatId) });
           } else {
-            const at = slotToInstant(cb.slot, rem.tz);
+            const at = planSlotInstant(cb.slot, rem.tz);
             const schedule: Schedule = { type: 'once', at: wallString(at, rem.tz) };
             if (await db.scheduleInboxItem(env, rem.id, at, JSON.stringify(schedule))) {
               effects.push({ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at });
@@ -367,17 +438,6 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   }
 }
 
-/** Inbox quick-schedule slots, resolved in the reminder's own timezone. */
-function slotToInstant(slot: 'eve' | 'tm' | 'hr', tz: string): number {
-  const now = Date.now();
-  if (slot === 'hr') return now + 3_600_000;
-  const p = wallParts(now, tz);
-  if (slot === 'eve') {
-    const at = wallToUtc(p.year, p.month, p.day, 20, 0, tz);
-    return at > now ? at : at + 86_400_000;
-  }
-  return wallToUtc(p.year, p.month, p.day + 1, 9, 0, tz);
-}
 
 /** Judge a submitted photo against the open instance it is meant to prove. */
 async function applyPhoto(
@@ -499,7 +559,17 @@ async function sendOutcome(
         text = dressed;
       } else {
         console.warn(`validator rejected the rewrite: ${verdict.reason}`);
-        await db.recordRejection(env);
+        // Written down, not just counted. The console line above survives
+        // only as long as a `wrangler tail` someone happened to be running;
+        // this is what /diag can still read tomorrow. Best-effort — the user
+        // is getting the correct baseline either way, and a failure to log
+        // must never become a failure to answer.
+        await db
+          .recordRejection(
+            env, chatId, verdict.reason ?? 'unknown', dressed,
+            effects.map((e) => e.kind).join(','),
+          )
+          .catch((err) => console.error('recordRejection', err));
       }
     } catch (err) {
       console.error('speak', err);
@@ -507,7 +577,7 @@ async function sendOutcome(
   }
 
   try {
-    const rows = buttonsFor(effects);
+    const rows = buttonsFor(effects, ctx.settings.tz);
     const sent = await sendBurst(env, chatId, text, rows ? keyboard(rows) : undefined);
     if (sent.length) await db.addMessage(env, chatId, 'bot', sent.join('\n\n'));
     return sent.length > 0;

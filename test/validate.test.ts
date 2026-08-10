@@ -160,6 +160,9 @@ section(
     { kind: 'instance_done', id: 9, title: 'לרוץ', streak: 4 },
     { kind: 'instance_skipped', id: 9, title: 'לרוץ' },
     { kind: 'instance_snoozed', id: 9, title: 'לרוץ', until: AT, minutes: 10 },
+    { kind: 'instance_started', id: 9, title: 'לרוץ', until: AT },
+    { kind: 'reminder_annotated', id: 1, title: 'לרוץ', note: 'נעליים חדשות' },
+    { kind: 'followup_suggested', instanceId: 9, title: 'לרוץ', at: AT },
     { kind: 'goal_created', id: 3, title: 'לפתוח תיק מסחר', why: null },
     { kind: 'goal_progress', id: 3, title: 'לפתוח תיק מסחר', note: 'מילאתי טפסים', previous: null },
     { kind: 'goal_closed', id: 3, title: 'לפתוח תיק מסחר', status: 'done' },
@@ -333,6 +336,111 @@ section('duplicateOf.title — the nested-title trap, proven with a genuine roun
     'קבעתי. יש לך גם "לקחת בגד ים לחוף" ב-21:00.', f, leanBaseline,
   );
   check('and may state the other reminder\'s time for the same reason', withTime.ok, withTime.reason);
+}
+
+section('rule 4 — an elapsed-time claim must match how long it has actually been');
+{
+  // From the 10.08.2026 transcript. The reminder fired at 09:00 and was
+  // snoozed to 09:30; at 09:30 the bot opened with "שעה וחצי אתה גורר את
+  // הטלפון למוסך". It had been thirty minutes. CLOCK only ever matched
+  // HH:MM, so a false quantity written in words sailed straight through the
+  // one layer whose entire job is to stop invented facts.
+  const SINCE = wallToUtc(2026, 8, 10, 9, 0, TZ);
+  const nag: Effect = {
+    kind: 'nagged', instanceId: 9, title: 'לדבר על המוסך', since: SINCE, round: 1,
+  };
+  // Pinned so "how long has it been" is a fixed 30 minutes, not wall-clock luck.
+  const NOW = wallToUtc(2026, 8, 10, 9, 30, TZ);
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  const f = facts([nag]);
+  const b = base([nag]);
+  Date.now = realNow;
+
+  check('facts.elapsed carries the true elapsed minutes',
+    f.elapsed.includes(30), `elapsed: ${JSON.stringify(f.elapsed)}`);
+
+  check('the exact false claim from the transcript is rejected',
+    !validate('שעה וחצי אתה גורר את הטלפון למוסך.', f, b).ok);
+  check('and the rejection says what it was',
+    /שעה וחצי|90/.test(validate('שעה וחצי אתה גורר את הטלפון למוסך.', f, b).reason ?? ''),
+    validate('שעה וחצי אתה גורר את הטלפון למוסך.', f, b).reason);
+  check('a truthful claim about the same span passes',
+    validate('חצי שעה אתה גורר את הטלפון למוסך.', f, b).ok,
+    validate('חצי שעה אתה גורר את הטלפון למוסך.', f, b).reason);
+  check('"כבר" is the other frame that makes a duration a claim, and it is checked too',
+    !validate('כבר שעתיים זה פתוח.', f, b).ok);
+  check('the same frame passes on the true number',
+    validate('כבר 30 דקות זה פתוח.', f, b).ok,
+    validate('כבר 30 דקות זה פתוח.', f, b).reason);
+  check('rounding is allowed — the model is not required to say 30 to the minute',
+    validate('כבר 25 דקות זה פתוח.', f, b).ok,
+    validate('כבר 25 דקות זה פתוח.', f, b).reason);
+
+  // The whole risk of this rule is over-reach: the persona is rhetorical about
+  // durations, and every line below is GOOD output from the same transcript or
+  // one keystroke away from it. None of them is a claim about elapsed time, so
+  // none may be touched. A rule that kills these is worse than no rule.
+  check('a prescriptive duration is not a claim — "a thirty-second phone call"',
+    validate('רק תרים שיחה של חצי דקה ותשאל אם יש תור.', f, b).ok,
+    validate('רק תרים שיחה של חצי דקה ותשאל אם יש תור.', f, b).reason);
+  check('a consequence clause is not a claim — "five minutes and you are out"',
+    validate('חמש דקות ואתה בחוץ.', f, b).ok,
+    validate('חמש דקות ואתה בחוץ.', f, b).reason);
+  check('a forward-looking duration is not a claim — "in half an hour I am back"',
+    validate('עוד חצי שעה אני פה שוב.', f, b).ok,
+    validate('עוד חצי שעה אני פה שוב.', f, b).reason);
+  check('"תן לזה חמש דקות שקט" is not a claim either',
+    validate('תן לזה חמש דקות שקט.', f, b).ok,
+    validate('תן לזה חמש דקות שקט.', f, b).reason);
+
+  // Same fold the other three rules get: whatever voice.ts said is true by
+  // construction, so the model may echo it.
+  check('a duration stated by the baseline itself is allowed back',
+    validate('כבר שעתיים זה פתוח.', f, 'זה פתוח כבר שעתיים.').ok);
+}
+{
+  // Nothing this turn has a "since", so there is no elapsed time to be right
+  // about — and a confident quantity is therefore invented by definition.
+  const chat: Effect = { kind: 'nothing', why: 'chat', userText: 'מה קורה' };
+  const f = facts([chat]);
+  const b = base([chat]);
+  check('facts.elapsed is empty when nothing is open',
+    f.elapsed.length === 0, `elapsed: ${JSON.stringify(f.elapsed)}`);
+  check('an elapsed claim with no elapsed fact behind it is rejected',
+    !validate('כבר שבוע לא דיברנו.', f, b).ok);
+  check('but ordinary chat with no duration in it is untouched',
+    validate('נו? מה קורה איתך.', f, b).ok);
+}
+
+section('rule 4 — a goal check-in knows how long it has been, too');
+{
+  // 09.08.2026 14:49: "מאז יום שישי בבוקר שאמרת לה שהיא יפה לא שמענו ממך."
+  // Nothing verified that. `lastProgressAt` is the fact it was reaching for
+  // and facts.ts never swept it, so the model was guessing — and once rule 4
+  // existed, a check-in framing that guess as a claim had no elapsed value to
+  // match and got discarded wholesale. Sweeping the timestamp turns a
+  // rejection into a true sentence, which is the point.
+  const PROGRESS = wallToUtc(2026, 8, 7, 9, 0, TZ);   // Friday morning
+  const NOW = wallToUtc(2026, 8, 9, 14, 49, TZ);      // Sunday afternoon
+  const checkin: Effect = {
+    kind: 'checkin_goal', id: 3, title: 'להגיד לאישתי משהו יפה', why: null,
+    lastProgress: 'אמרתי לה שהיא יפה', lastProgressAt: PROGRESS, lastCheckinAt: null,
+  };
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  const f = facts([checkin]);
+  const b = base([checkin]);
+  Date.now = realNow;
+
+  const since = Math.round((NOW - PROGRESS) / 60_000); // 3229 minutes ≈ 2¼ days
+  check('facts.elapsed carries the time since he last moved on the goal',
+    f.elapsed.includes(since), `elapsed: ${JSON.stringify(f.elapsed)}`);
+  check('so a truthful "it has been two days" passes',
+    validate('כבר יומיים אתה שותק.', f, b).ok,
+    validate('כבר יומיים אתה שותק.', f, b).reason);
+  check('and an inflated one is still rejected',
+    !validate('כבר שבועיים אתה שותק.', f, b).ok);
 }
 
 section('ambiguous-hour altHour never reaches validate() — it is a button label only');

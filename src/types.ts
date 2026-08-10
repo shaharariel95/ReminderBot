@@ -113,6 +113,10 @@ export interface Intent {
     | 'create_reminder'
     | 'complete'
     | 'snooze'
+    /** "I'm on it / on my way." Neither done nor postponed: the task stays
+     *  open and the nag ladder is held off for a grace window. Without this,
+     *  a man reporting that he is driving to the thing gets nagged about it. */
+    | 'on_my_way'
     | 'list'
     | 'delete'
     /** Move an existing reminder to a different time. Distinct from `snooze`,
@@ -120,6 +124,9 @@ export interface Intent {
     | 'reschedule'
     /** Fix the wording of an existing reminder without touching its schedule. */
     | 'rename'
+    /** Attach the detail that makes a reminder land — what it is for, what to
+     *  bring, who to ask. Usually his answer to a question the bot asked. */
+    | 'annotate'
     /** Store a durable fact he stated about himself. Not a reminder, not a
      *  goal — nothing fires, nothing is chased. It only informs the tone. */
     | 'remember'
@@ -211,7 +218,17 @@ export type Effect =
    * "no open task" (the `nothing/no_open_task` case, kept for the genuinely
    * empty case) would be false.
    */
-  | { kind: 'needs_task_choice'; action: 'complete' | 'snooze'; open: Instance[] }
+  | { kind: 'reminder_annotated'; id: number; title: string; note: string }
+  /**
+   * A task he just closed named a future appointment that has no reminder of
+   * its own — "לדבר על המוסך לוודא שאני מגיע ביום חמישי" closed on the Monday,
+   * with nothing set for the Thursday it was arranging. Nothing is written:
+   * this is an offer, and the button is what commits it. Deliberately outside
+   * WROTE for exactly that reason.
+   */
+  | { kind: 'followup_suggested'; instanceId: number; title: string; at: number }
+  | { kind: 'instance_started'; id: number; title: string; until: number }
+  | { kind: 'needs_task_choice'; action: 'complete' | 'snooze' | 'on_my_way'; open: Instance[] }
   /**
    * The reminder-side twin of the above: reschedule/rename knew what to do but
    * not to which reminder, and there was more than one candidate.
@@ -273,6 +290,7 @@ export const UNTITLED_TITLE = 'תזכורת';
 export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
+  'instance_started', 'reminder_annotated',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten',
 ]);
@@ -291,6 +309,13 @@ export interface Facts {
   nowLabel: string;
   /** Every clock time the model may say, as "HH:MM". */
   times: string[];
+  /**
+   * How long, in minutes, each thing in play has actually been open. This is
+   * the allow-list behind elapsed-time claims ("שעה וחצי אתה גורר את
+   * הטלפון..." when it had been thirty minutes) — a class of invented fact
+   * `times` cannot see, because it is written in words and never as a clock.
+   */
+  elapsed: number[];
   /** Every task or goal title the model may quote. */
   titles: string[];
   /**

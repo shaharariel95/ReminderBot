@@ -133,20 +133,69 @@ function countTimeAnchors(t: string): number {
  * כדורים" is a perfectly good title, and only a digit wearing a "ב" prefix or
  * a colon reads as a clock.
  */
-const TIME_RESIDUE = new RegExp(
+const CLOCK_RESIDUE = new RegExp(
   [
     String.raw`(?:^|\s)ו?(?:וחצי|ורבע|בשעה|מחרתיים|מחר|היום|${PERIOD}|tomorrow|today|am|pm)(?:$|[\s.,!?])`,
     String.raw`(?:^|\s)ו?ב\s*-?\s*\d{1,2}(?::\d{2})?(?:$|[\s.,!?])`,
     String.raw`(?:^|\s)ו?ב(?:${HOUR_NAME_ALT})(?![א-ת])`,
     String.raw`\d{1,2}:\d{2}`,
-    // Both the "ביום שלישי" form we consume and the bare "בשלישי" form we
-    // deliberately refuse to guess at — either one still sitting in the title
-    // means the day was never accounted for.
+  ].join('|'),
+  'i',
+);
+
+/**
+ * Both the "ביום שלישי" form we consume and the bare "בשלישי" form we
+ * deliberately refuse to guess at — either one still sitting in the title
+ * USUALLY means the day was never accounted for. See hasTimeResidue for the
+ * one case where it means the opposite.
+ */
+const WEEKDAY_RESIDUE = new RegExp(
+  [
     String.raw`(?:^|\s)ו?ב?יום\s+(?:${WEEKDAY_ALT})(?:$|[\s.,!?])`,
     String.raw`(?:^|\s)ו?ב(?:${WEEKDAY_ALT})(?![א-ת])`,
   ].join('|'),
   'i',
 );
+
+/**
+ * "בבוקר של יום חמישי" — the morning OF Thursday. A possessive phrase like
+ * this is a noun: it names when an APPOINTMENT is, not when to fire, and it
+ * belongs in the title. Stripped before the residue check so it cannot be
+ * mistaken for a schedule the parser failed to consume.
+ *
+ * The "של" is doing all the work here. Without it, "ב-8 בבוקר ובערב" is two
+ * doses and must still bail — a conjoined period is a second instruction,
+ * a possessive one is subject matter.
+ */
+// PERIOD is an alternation, so it needs its own group before `\s+` is attached:
+// `(?:א|ב\s+)?` binds the space to the last branch only, which silently left
+// "בבוקר" behind and made this whole strip a no-op for the message it exists for.
+const SUBJECT_DAY = new RegExp(
+  String.raw`(?:(?:${PERIOD})\s+)?של\s+יום\s+(?:${WEEKDAY_ALT})(?![א-ת])`,
+  'gi',
+);
+
+/**
+ * Rule 2 from the top of the file: a time word that survived into the title
+ * means the parse was incomplete.
+ *
+ * `dayPinned` is the exception, and it is narrow. When an explicit offset word
+ * — מחר, היום, מחרתיים — already fixed the day, a weekday appearing later
+ * cannot change the answer, so it is no longer evidence of anything: it is
+ * what the task is about. This is the 09.08.2026 message ("...לוודא שאני
+ * מגיע בבוקר של יום חמישי..."), which bailed to the router and came back an
+ * hour wrong.
+ *
+ * It stays false when the day came from a weekday itself: two weekdays in one
+ * message really are two days, and nothing settles which one wins. The clock
+ * half of the guard is never relaxed — a stray period can still change an
+ * unsettled hour, and that is a different question from which day it is.
+ */
+function hasTimeResidue(title: string, dayPinned: boolean): boolean {
+  const t = title.replace(SUBJECT_DAY, ' ');
+  if (CLOCK_RESIDUE.test(t)) return true;
+  return !dayPinned && WEEKDAY_RESIDUE.test(t);
+}
 
 // ------------------------------------------------------- relative times
 
@@ -220,6 +269,131 @@ function parseRelative(t: string): { minutes: number; matched: string } | null {
   }
 
   return null;
+}
+
+/**
+ * A length introduced by ב rather than by עוד — "בחצי שעה", "ב-20 דקות",
+ * "בשעתיים". This is how a snooze gets phrased at least as often as with עוד,
+ * and it is the wording /help itself advertises.
+ *
+ * The number must come BEFORE the unit. That single rule is what keeps a clock
+ * reading out: "בשעה 10" puts the number after, so none of these match it, and
+ * there is deliberately no bare-unit form (a bare "בשעה" is one keystroke away
+ * from a time and worth nothing as a duration).
+ */
+const B_LEAD = String.raw`(?:^|\s)ב\s*-?\s*`;
+const B_FRACTION = new RegExp(B_LEAD + String.raw`(?<frac>חצי|רבע)\s+שעה` + END, 'i');
+const B_DUAL = new RegExp(B_LEAD + String.raw`(?<dual>שעתיים|יומיים|שבועיים)` + OPT_HALF + END, 'i');
+const B_COUNTED = new RegExp(B_LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` + OPT_HALF + END, 'i');
+
+/**
+ * Minutes in an explicit length the user actually stated, or null when they
+ * stated none.
+ *
+ * Exists for snooze. `applyIntent` falls back to 30 minutes when the router
+ * omits `snooze_minutes`, and voice.ts then reports that fallback as a number
+ * he chose — which is how "עוד שעה" came back as "הזזתי ב-30 דקות" in the
+ * 10.08.2026 transcript. The default is fine; announcing it as his words is
+ * not. Returning null rather than a guess is the point: it tells the caller
+ * "he named no length", which is a different fact from "he named 30 minutes".
+ */
+export function parseDuration(text: string): number | null {
+  const rel = parseRelative(text);
+  if (rel && rel.minutes > 0) return rel.minutes;
+
+  const frac = B_FRACTION.exec(text);
+  if (frac) return /חצי/.test(frac.groups!.frac) ? 30 : 15;
+
+  const dual = B_DUAL.exec(text);
+  if (dual) {
+    const unit = DUALS[dual.groups!.dual];
+    return unit * 2 + halfBonus(dual.groups!.half, unit);
+  }
+
+  const counted = B_COUNTED.exec(text);
+  if (counted) {
+    const n = toNumber(counted.groups!.n);
+    const unit = unitMinutes(counted.groups!.unit);
+    // Both halves have to be real. A word that is not a number ("בעבודה שעות")
+    // must fall through to null, not quietly become NaN minutes.
+    if (n !== null && unit > 0) return n * unit + halfBonus(counted.groups!.half, unit);
+  }
+
+  return null;
+}
+
+/**
+ * Every length-of-time phrase in `text`, with where it sits, so a caller can
+ * judge each one in context. Unlike parseDuration this takes no lead-in word:
+ * it is looking for quantities wherever they appear, because validate.ts has
+ * to police the ones the model wrote unprompted.
+ *
+ * `(?<![א-ת])` is what keeps a clock out: "בשעה 10" and "היום" both glue a
+ * Hebrew letter onto the front of the unit, and neither is a duration. A bare
+ * unit with nothing in front of it ("שעה וחצי") is one.
+ */
+/**
+ * The number words themselves, longest first so "עשרים" never loses to "עשר".
+ * Spelled out rather than approximated as `[א-ת]+`: a catch-all there lets any
+ * word in front of a unit swallow it, so "כבר שבוע" parses as <not-a-number>
+ * + "שבוע" and the phrase vanishes from the scan entirely instead of being
+ * read as one week.
+ */
+const NUMBER_WORD_ALT = [...Object.keys(HE_NUMBERS), ...Object.keys(EN_NUMBERS)]
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+const DURATION_SCAN = new RegExp(
+  String.raw`(?<![א-ת])(?:` +
+    String.raw`(?<dual>שעתיים|יומיים|שבועיים)(?:\s+ו(?<dualHalf>חצי|רבע))?` +
+    '|' +
+    String.raw`(?<frac>חצי|רבע)\s+(?<fracUnit>שעות|שעה|דקות|דקה|ימים|יום|שבוע)` +
+    '|' +
+    String.raw`(?<n>\d{1,4}|${NUMBER_WORD_ALT})\s+(?<unit>${UNIT})(?:\s+ו(?<nHalf>חצי|רבע))?` +
+    '|' +
+    String.raw`(?<bare>שעה|דקה|יום|שבוע)(?:\s+ו(?<bareHalf>חצי|רבע))?` +
+    ')',
+  'gi',
+);
+
+export interface DurationHit {
+  minutes: number;
+  /** Everything before the phrase, and everything after — the caller's context. */
+  before: string;
+  after: string;
+}
+
+export function scanDurations(text: string): DurationHit[] {
+  const hits: DurationHit[] = [];
+  // `.matchAll` rather than a shared `.exec` loop: DURATION_SCAN is /g, and a
+  // stale lastIndex carried between calls would silently skip phrases.
+  for (const m of text.matchAll(DURATION_SCAN)) {
+    const g = m.groups!;
+    let minutes: number | null = null;
+    if (g.dual) {
+      const unit = DUALS[g.dual];
+      minutes = unit * 2 + halfBonus(g.dualHalf, unit);
+    } else if (g.frac) {
+      const unit = unitMinutes(g.fracUnit);
+      minutes = /חצי/.test(g.frac) ? unit / 2 : unit / 4;
+    } else if (g.n) {
+      const n = toNumber(g.n);
+      const unit = unitMinutes(g.unit);
+      // A word that is not a number in front of a real unit ("הטלפון שעות")
+      // is not a quantity — it is a sentence that happens to contain one.
+      if (n !== null && unit > 0) minutes = n * unit + halfBonus(g.nHalf, unit);
+    } else if (g.bare) {
+      const unit = unitMinutes(g.bare);
+      minutes = unit + halfBonus(g.bareHalf, unit);
+    }
+    if (minutes === null || minutes <= 0) continue;
+    hits.push({
+      minutes,
+      before: text.slice(0, m.index),
+      after: text.slice(m.index + m[0].length),
+    });
+  }
+  return hits;
 }
 
 // ------------------------------------------------------- absolute times
@@ -395,7 +569,7 @@ function parseRecurring(t: string): Intent | null {
     consumed: string[],
   ): Intent | null => {
     const title = cleanTitle(t, consumed);
-    if (TIME_RESIDUE.test(title) || RECURRING.test(title)) return null;
+    if (hasTimeResidue(title, false) || RECURRING.test(title)) return null;
     return { ...intent, title: (title || UNTITLED_TITLE).slice(0, 120) } as Intent;
   };
 
@@ -487,8 +661,10 @@ function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
   const day = matchDay(t);
 
   const title = cleanTitle(t, [clock.matched, day?.matched ?? '']);
-  // Rule 2: an unconsumed time word means we understood only part of the phrase.
-  if (TIME_RESIDUE.test(title)) return null;
+  // Rule 2: an unconsumed time word means we understood only part of the phrase
+  // — unless an offset word already pinned the day, in which case a weekday
+  // left in the title is what the task is ABOUT. See hasTimeResidue.
+  if (hasTimeResidue(title, day?.offset != null)) return null;
 
   const at = resolve(clock, day, nowMs, tz);
   if (at === null) return null;
@@ -549,6 +725,49 @@ function resolve(
   return { ts, altHour };
 }
 
+/**
+ * The hour a period word implies, when nothing more precise was said.
+ *
+ * These are assumptions, and they are only ever acceptable because the one
+ * caller uses them to OFFER something behind a button. Nothing here may reach
+ * a path that writes a reminder without being tapped first.
+ */
+const PERIOD_HOUR: [RegExp, number][] = [
+  [/בוקר/, 9],
+  [/צהריי?ם/, 13],
+  [/אחה"צ|אחר\s+הצהריי?ם/, 16],
+  [/ערב/, 20],
+  [/לילה/, 21],
+];
+
+/**
+ * The appointment buried inside a task, as an instant — or null when the text
+ * does not name one clearly enough to offer.
+ *
+ * Unlike quickParse this deliberately has no ASKED gate: the input here is a
+ * reminder TITLE or a report of what happened, not a request. "לדבר על המוסך
+ * לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט" was closed on the Monday and
+ * nothing was ever created for the Thursday, which was the whole point of
+ * making the call.
+ *
+ * A day alone is not enough — "ביום חמישי" with no hour and no period would
+ * mean inventing a time out of nothing. A day plus either a clock or a period
+ * word is enough to put a specific offer on screen, which he can ignore.
+ */
+export function findFutureInstant(text: string, nowMs: number, tz: string): number | null {
+  const day = matchDay(text);
+  if (!day) return null;
+
+  const clock = matchClock(text);
+  if (clock) return resolve(clock, day, nowMs, tz)?.ts ?? null;
+
+  const period = PERIOD_HOUR.find(([re]) => re.test(text));
+  if (!period) return null;
+  return (
+    resolve({ hour: period[1], minute: 0, matched: '', settled: true }, day, nowMs, tz)?.ts ?? null
+  );
+}
+
 /** Returns a create_reminder Intent, or null to let the LLM router handle it. */
 export function quickParse(text: string, nowMs: number, tz: string): Intent | null {
   const t = text.trim();
@@ -569,7 +788,7 @@ export function quickParse(text: string, nowMs: number, tz: string): Intent | nu
   // reaches for, and well past where a typo stops being obvious.
   if (rel !== null && rel.minutes >= 1 && rel.minutes <= 60 * 24 * 60) {
     const title = cleanTitle(t, [rel.matched]);
-    if (TIME_RESIDUE.test(title)) return null;
+    if (hasTimeResidue(title, false)) return null;
     return {
       action: 'create_reminder',
       title: (title || UNTITLED_TITLE).slice(0, 120),

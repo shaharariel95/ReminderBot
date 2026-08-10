@@ -13,6 +13,7 @@ import { callbackUpdate, check, createRig, done, eq, section, withNow, type Rig 
 import type { Settings, Stats } from '../src/types';
 import * as db from '../src/db';
 import { applyIntent } from '../src/effects';
+import { handleSlash } from '../src/slash';
 import type { Context } from '../src/brain';
 
 const CHAT = '12345';
@@ -569,6 +570,124 @@ async function main() {
     rig.restore();
   }
 
+  section('THE OTHER INVARIANT — an inbound message is never met with silence');
+  {
+    // sendOutcome is carefully guarded; everything before it was not. On
+    // 10.08.2026 a photo captioned "הנה הנה נוסע עכשיו" got no reply at all,
+    // and the only paths that can do that are the ones OUTSIDE handleUpdate's
+    // try: buildContext, addMessage, recentMessages. A throw in any of them
+    // unwinds to `job.catch(console.error)` in fetch() and the turn ends —
+    // the user reported in and heard nothing back.
+    //
+    // Silence is the worst possible answer here. It is indistinguishable from
+    // the bot being down, and it lands precisely when he has done the thing
+    // and is waiting to be told it counted.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.dbFailOn = /INSERT INTO messages/; // the first write of the turn
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+
+    await runWebhook(rig, 'סיימתי');
+
+    check('he still hears something back',
+      rig.texts().length > 0, `sent nothing; methods: ${rig.methods().join(', ')}`);
+    check('and it does not pretend anything happened',
+      !/רשמתי|קבעתי|נסגר|סגרתי/.test(rig.texts().join('\n')), rig.texts().join('\n'));
+    rig.restore();
+  }
+  {
+    // Same guarantee on the photo path specifically — that is where it broke.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לעבור במשק 27', Date.now() - 3_600_000);
+    seedInstance(rig, remId, 'לעבור במשק 27', Date.now() - 3_600_000);
+    rig.dbFailOn = /INSERT INTO messages/;
+
+    await runUpdate(rig, photoUpdate('הנה הנה נוסע עכשיו'));
+
+    check('a photo that breaks the turn still gets an answer',
+      rig.texts().length > 0, `sent nothing; methods: ${rig.methods().join(', ')}`);
+    rig.restore();
+  }
+  {
+    // The guarantee must not become a second reply on the happy path.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו? מה קורה.');
+    await runWebhook(rig, 'מה קורה');
+    eq('a turn that works answers exactly once', rig.texts().length, 1);
+    rig.restore();
+  }
+
+  section('a discarded rewrite leaves evidence, not just a tally');
+  {
+    // /diag reported "תשובות שנפסלו היום: 3" on 10.08.2026 and that was the
+    // entire record: the reason lived for one line in a console.warn, and the
+    // discarded text was never written down anywhere. Three rewrites in one
+    // day is a rate worth fixing, and a bare count gives you nothing to fix.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('רשמתי לך, סגור.');
+    await runWebhook(rig, 'מה קורה');
+
+    const rows = await db.recentRejections(rig.env, CHAT, 5);
+    eq('the rejection was recorded', rows.length, 1);
+    check('with the reason the validator gave',
+      /רשמתי/.test(rows[0]?.reason ?? ''), JSON.stringify(rows[0]));
+    check('and the text that was thrown away, so it can be read back',
+      (rows[0]?.text ?? '').includes('רשמתי לך, סגור.'), JSON.stringify(rows[0]));
+    check('and what the turn was actually doing when it happened',
+      (rows[0]?.effects ?? '').includes('nothing'), JSON.stringify(rows[0]));
+
+    // The daily counter /diag already showed must keep working — this adds a
+    // record, it does not replace the tally.
+    eq('the daily counter still counts it', await db.usageToday(rig.env, '_rejections'), 1);
+    rig.restore();
+  }
+  {
+    // The point of storing them is reading them back, and /diag is where you
+    // look. A count you cannot act on is what we already had.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('קבעתי לך ל-23:47.');
+    await runWebhook(rig, 'מה קורה');
+
+    const diag = await handleSlash(rig.env, CHAT, '/diag');
+    check('/diag names the reason', /23:47|invented time/.test(diag ?? ''), diag ?? '');
+    rig.restore();
+  }
+  {
+    // A rewrite that passes must not leave a row. If every turn logged one,
+    // the table would say nothing at all.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו? מה קורה איתך.');
+    await runWebhook(rig, 'מה קורה');
+
+    eq('an accepted rewrite records nothing',
+      (await db.recentRejections(rig.env, CHAT, 5)).length, 0);
+    rig.restore();
+  }
+  {
+    // Unbounded, this table grows forever on the busiest possible day — the
+    // one where the model is misbehaving. Newest first, oldest dropped.
+    const rig = createRig();
+    seedSettings(rig);
+    for (let i = 0; i < db.REJECTION_KEEP + 5; i++) {
+      await db.recordRejection(rig.env, CHAT, `reason ${i}`, `text ${i}`, 'nothing');
+    }
+    const rows = await db.recentRejections(rig.env, CHAT, 500);
+    eq('the log is capped', rows.length, db.REJECTION_KEEP);
+    check('and it is the newest that survive',
+      rows[0].reason === `reason ${db.REJECTION_KEEP + 4}`, JSON.stringify(rows[0]));
+    rig.restore();
+  }
+
   // ------------------------------------------------------------------------
   section('a Telegram failure on one send must not abort the rest of the tick');
   {
@@ -713,6 +832,176 @@ async function main() {
 
     eq('a button tap does not read the profile',
       rig.sql.filter((s) => /FROM profile/.test(s)).length, 0);
+    rig.restore();
+  }
+
+  section('a task that was ARRANGING something offers the thing itself');
+  {
+    // The whole point of "לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי
+    // לטיפול וטסט" was the Thursday appointment. He closed it Monday morning
+    // and /list that evening had nothing for Thursday at all. The bot watched
+    // the entire arrangement happen and never noticed the appointment inside
+    // the sentence it had been holding for a day.
+    const MONDAY = wallToUtc(2026, 8, 10, 10, 26, TZ);
+    const rig = createRig();
+    seedSettings(rig);
+    const title = 'לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט';
+    const remId = seedReminder(rig, title, MONDAY - 3_600_000);
+    const instId = seedInstance(rig, remId, title, MONDAY - 3_600_000);
+
+    await withNow(MONDAY, async () => {
+      rig.routerQueue.push({ actions: [{ action: 'complete', target_id: instId }] });
+      // A speak-only failure, not geminiDown: the router still has to run for
+      // the completion to be routed at all. sendOutcome falls back to the
+      // baseline, so the assertions below read voice.ts's real wording.
+      rig.speakQueue.push(new Error('speak down'));
+      await runWebhook(rig, 'דברתי עם המוסך, הכל טוב');
+    });
+
+    const out = rig.texts().join('\n');
+    // Asserted on the resolved DATE, not on "חמישי": the title contains that
+    // word, so the obvious check passes whether or not anything noticed it.
+    // Only the offer can produce 13.08.2026.
+    check('it works out which Thursday and says so', out.includes('13.08.2026'), out);
+    check('and asks rather than announcing — nothing was written',
+      /\?/.test(out) && !/קבעתי/.test(out), out);
+    eq('no second reminder exists until he says yes', reminders(rig).length, 1);
+
+    // The offer is only worth anything if there is a way to take it.
+    const markup = JSON.stringify(rig.sent.map((s) => s.markup));
+    check('with a button carrying the follow-up', markup.includes('"f:'), markup);
+    rig.restore();
+  }
+  {
+    // Tapping it is what commits, and the row must land on the day the label
+    // promised — Thursday the 13th at 09:00, not "some time Thursday".
+    const MONDAY = wallToUtc(2026, 8, 10, 10, 26, TZ);
+    const rig = createRig();
+    seedSettings(rig);
+    const title = 'לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט';
+    const remId = seedReminder(rig, title, MONDAY - 3_600_000);
+    const instId = seedInstance(rig, remId, title, MONDAY - 3_600_000);
+
+    await withNow(MONDAY, async () => {
+      await runUpdate(rig, callbackUpdate(CHAT, `f:${instId}`));
+    });
+
+    const rows = rig.db.prepare('SELECT title, next_fire_at FROM reminders ORDER BY id').all() as any[];
+    eq('the follow-up now exists', rows.length, 2);
+    eq('on the Thursday the offer named',
+      rows[1].next_fire_at, wallToUtc(2026, 8, 13, 9, 0, TZ));
+    rig.restore();
+  }
+  {
+    // He already has something that morning. Offering it again is noise, and
+    // noise is how a good prompt gets muted.
+    const MONDAY = wallToUtc(2026, 8, 10, 10, 26, TZ);
+    const rig = createRig();
+    seedSettings(rig);
+    const title = 'לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט';
+    const remId = seedReminder(rig, title, MONDAY - 3_600_000);
+    const instId = seedInstance(rig, remId, title, MONDAY - 3_600_000);
+    seedReminder(rig, 'מוסך', wallToUtc(2026, 8, 13, 9, 30, TZ));
+
+    await withNow(MONDAY, async () => {
+      rig.routerQueue.push({ actions: [{ action: 'complete', target_id: instId }] });
+      rig.speakQueue.push(new Error('speak down'));
+      await runWebhook(rig, 'דברתי עם המוסך');
+    });
+
+    check('nothing is offered when that slot is already covered',
+      !rig.texts().join('\n').includes('לשים לך תזכורת גם'), rig.texts().join('\n'));
+    rig.restore();
+  }
+  {
+    // An ordinary task names no appointment, and must not sprout a question.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לרוץ', Date.now() - 3_600_000);
+    const instId = seedInstance(rig, remId, 'לרוץ', Date.now() - 3_600_000);
+    rig.routerQueue.push({ actions: [{ action: 'complete', target_id: instId }] });
+    rig.speakQueue.push(new Error('speak down'));
+    await runWebhook(rig, 'סיימתי');
+    eq('a plain completion is still just a completion',
+      rig.texts().join('\n').trim(), 'נסגר: "לרוץ". רצף 1.');
+    rig.restore();
+  }
+
+  section('a reminder note outlives the conversation that produced it');
+  {
+    // "מה איבדת שם?" → "בשר אחי". The next morning's brief managed to say
+    // "תביא את הבשר" only because that exchange was still in the recent-message
+    // window. Messages get pruned; the note is on the row, and this is the
+    // check that it actually reaches the prompt from there.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לעבור במשק 27', Date.now() + 3_600_000);
+    await db.annotateReminder(rig.env, remId, 'בשר');
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+
+    await runWebhook(rig, 'מה קורה');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('the note is in the system prompt, attached to its reminder',
+      /לעבור במשק 27[^\n]*בשר/.test(speakCall?.system ?? ''),
+      (speakCall?.system.split('\n').find((l) => l.includes('משק 27')) ?? 'no such line'));
+    rig.restore();
+  }
+  {
+    // A reminder with no note must not sprout an empty "הערה:" — an empty
+    // field in a prompt is an invitation to fill it in.
+    const rig = createRig();
+    seedSettings(rig);
+    seedReminder(rig, 'לעבור במשק 27', Date.now() + 3_600_000);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+    await runWebhook(rig, 'מה קורה');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('no empty note field when there is nothing to say',
+      !/הערה:\s*($|\n)/.test(speakCall?.system ?? ''), '');
+    rig.restore();
+  }
+
+  section('how long a task has been open is told to the model, not left to arithmetic');
+  {
+    // The other half of validate.ts's rule 4. On 10.08.2026 the bot announced
+    // "שעה וחצי אתה גורר את הטלפון למוסך" thirty minutes in — it was handed a
+    // start time ("עדיין פתוחה מ-09:00") and a wall clock and asked to
+    // subtract, and it got it wrong. The validator can now catch that, but a
+    // caught rewrite is a discarded rewrite: the fix is to stop making it
+    // guess. Nothing in the prompt stated the span until this line.
+    const rig = createRig();
+    seedSettings(rig);
+    const remId = seedReminder(rig, 'לדבר על המוסך', Date.now() - 90 * 60_000);
+    seedInstance(rig, remId, 'לדבר על המוסך', Date.now() - 90 * 60_000);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+
+    await runWebhook(rig, 'מה קורה');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    check('the true elapsed span is in the system prompt',
+      /90 דקות/.test(speakCall?.system ?? ''), speakCall?.system.slice(-400));
+    rig.restore();
+  }
+  {
+    // Nothing open means no span to state, and an empty heading in the prompt
+    // is an invitation to invent one.
+    const rig = createRig();
+    seedSettings(rig);
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('נו?');
+    await runWebhook(rig, 'מה קורה');
+
+    const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
+    // Matched on the heading, not on the words "כמה זמן" — persona.ts rule 4
+    // uses that phrase for something unrelated, and asserting on it would make
+    // this check pass or fail for reasons that have nothing to do with elapsed
+    // time.
+    check('no elapsed section at all when nothing is open',
+      speakCall?.system.includes('כבר פתוח') === false, speakCall?.system.slice(-300));
     rig.restore();
   }
 

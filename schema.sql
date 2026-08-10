@@ -6,6 +6,7 @@ DROP TABLE IF EXISTS messages;
 DROP TABLE IF EXISTS goals;
 DROP TABLE IF EXISTS settings;
 DROP TABLE IF EXISTS profile;
+DROP TABLE IF EXISTS rejections;
 
 CREATE TABLE reminders (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,3 +117,15 @@ CREATE TABLE usage (
   calls INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, model)
 );
+
+-- Every model rewrite the validator threw away — see migrations/006. The
+-- '_rejections' row in `usage` counts them; this is the one that says which.
+CREATE TABLE rejections (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT    NOT NULL,
+  at      INTEGER NOT NULL,
+  reason  TEXT    NOT NULL,
+  text    TEXT    NOT NULL,
+  effects TEXT    NOT NULL
+);
+CREATE INDEX idx_rejections_chat ON rejections(chat_id, id DESC);

@@ -78,6 +78,17 @@ function one(e: Effect, tz: string): string {
       return `נסגר: "${e.title}". רצף ${e.streak}.`;
     case 'instance_skipped':
       return `"${e.title}" ירדה להיום. בלי כישלון.`;
+    case 'followup_suggested':
+      // A question, not a confirmation. Nothing was written and the wording
+      // must not suggest otherwise.
+      return `רגע — "${e.title}" מדבר על ${when(e.at, tz)}. לשים לך תזכורת גם על זה?`;
+    case 'reminder_annotated':
+      return `רשמתי על "${e.title}": ${e.note}`;
+    case 'instance_started':
+      // No streak, no congratulation, no "נסגר". He has started, not finished,
+      // and the whole value of this state is that the bot still expects to
+      // hear how it went.
+      return `אוקיי, אתה עליה. לא מציק לך עד ${hhmm(e.until, tz)} — ואז תגיד לי מה קרה.`;
     case 'instance_snoozed':
       return `דחיתי את "${e.title}" ב-${e.minutes} דקות — ${hhmm(e.until, tz)}.`;
     case 'needs_task_choice':

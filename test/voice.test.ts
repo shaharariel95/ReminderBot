@@ -24,6 +24,9 @@ const samples: Effect[] = [
   { kind: 'instance_done', id: 9, title: 'לרוץ', streak: 4 },
   { kind: 'instance_skipped', id: 9, title: 'לרוץ' },
   { kind: 'instance_snoozed', id: 9, title: 'לרוץ', until: AT, minutes: 10 },
+  { kind: 'instance_started', id: 9, title: 'לרוץ', until: AT },
+  { kind: 'reminder_annotated', id: 1, title: 'לרוץ', note: 'נעליים חדשות' },
+  { kind: 'followup_suggested', instanceId: 9, title: 'לרוץ', at: AT },
   { kind: 'goal_created', id: 3, title: 'לפתוח תיק מסחר', why: null },
   { kind: 'goal_progress', id: 3, title: 'לפתוח תיק מסחר', note: 'מילאתי טפסים', previous: null },
   { kind: 'goal_closed', id: 3, title: 'לפתוח תיק מסחר', status: 'done' },
@@ -69,24 +72,38 @@ for (const e of samples) {
     text.trim().length > 0 && /[֐-׿]/.test(text));
 }
 
+/**
+ * Look a sample up by kind, never by position.
+ *
+ * These assertions used to index into `samples` directly, so adding one effect
+ * to the list silently renumbered every one of them — three checks below went
+ * red pointing at effects they were never written about. A kind is what each
+ * check actually means.
+ */
+function sample<K extends Effect['kind']>(kind: K): Extract<Effect, { kind: K }> {
+  const found = samples.find((s) => s.kind === kind);
+  if (!found) throw new Error(`no sample for kind "${kind}" — add one to samples`);
+  return found as Extract<Effect, { kind: K }>;
+}
+
 section('facts appear verbatim, never paraphrased');
 check('a created reminder states the exact clock time',
-  render(samples[0]).includes('07:05'));
+  render(sample('reminder_created')).includes('07:05'));
 check('a done report states the streak',
-  render(samples[5]).includes('4'));
+  render(sample('instance_done')).includes('4'));
 check('nothing-effects never claim a write', (() => {
   const claims = /רשמתי|קבעתי|שמתי|נקבע|נשמר/;
   return samples.filter((e) => e.kind === 'nothing').every((e) => !claims.test(render(e)));
 })());
 check('a mute states the exact hours, not some other field',
-  render(samples[12]).includes('ל-4 שעות'));
+  render(sample('muted')).includes('ל-4 שעות'));
 check('a snooze states the exact minutes, not the target clock time',
-  render(samples[7]).includes('ב-10 דקות'));
+  render(sample('instance_snoozed')).includes('ב-10 דקות'));
 check('intensity states the exact level',
-  render(samples[13]).includes('רמת עוקצנות 3'));
+  render(sample('intensity_set')).includes('רמת עוקצנות 3'));
 check('goal_closed renders "done" and "dropped" differently', (() => {
-  const doneText = render(samples[10]);
-  const droppedText = render({ ...samples[10], status: 'dropped' } as Effect);
+  const doneText = render(sample('goal_closed'));
+  const droppedText = render({ ...sample('goal_closed'), status: 'dropped' } as Effect);
   return doneText !== droppedText && doneText.includes('סגור') && droppedText.includes('הורדתי');
 })());
 check('reminder_duplicate names the existing reminder and its time',
@@ -302,11 +319,11 @@ check('the created reminder still states its own title and time, plus the existi
   return t.includes('לקחת בגד ים') && t.includes('לקחת בגד ים לחוף');
 })());
 check('without duplicateOf, nothing is said about a similar reminder',
-  !render(samples[0]).includes('גם יש לך') && samples[0].kind === 'reminder_created' && samples[0].duplicateOf === undefined);
+  !render(sample('reminder_created')).includes('גם יש לך') && sample('reminder_created').kind === 'reminder_created' && sample('reminder_created').duplicateOf === undefined);
 
 section('multiple effects join into one message');
 check('two creates produce both titles', (() => {
-  const t = renderBaseline([samples[0], { ...samples[0], title: 'לשתות' } as Effect], TZ);
+  const t = renderBaseline([sample('reminder_created'), { ...sample('reminder_created'), title: 'לשתות' } as Effect], TZ);
   return t.includes('לרוץ') && t.includes('לשתות');
 })());
 

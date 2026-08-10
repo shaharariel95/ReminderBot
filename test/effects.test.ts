@@ -74,6 +74,11 @@ function seedReminder(rig: Rig, title: string, fireAt: number, chatId = CHAT): n
   return Number(r.lastInsertRowid);
 }
 
+/** The note column specifically — rowById deliberately projects only three columns. */
+function notesOf(rig: Rig, id: number): string | null {
+  return (rig.db.prepare('SELECT notes FROM reminders WHERE id = ?').get(id) as any).notes;
+}
+
 function rowById(rig: Rig, id: number): { title: string; next_fire_at: number | null; status: string } {
   return rig.db
     .prepare('SELECT title, next_fire_at, status FROM reminders WHERE id = ?')
@@ -499,6 +504,187 @@ async function main() {
     const result = await applyIntent(rig.env, CHAT, ctx, { action: 'complete' }, 'סיימתי');
     eq('the genuinely-empty case keeps its existing message', result[0].kind, 'nothing');
     check('with the right reason', result[0].kind === 'nothing' && result[0].why === 'no_open_task');
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('snooze — a length he actually said beats the 30-minute default');
+  {
+    // From the 10.08.2026 transcript. He said "עוד שעה"; the router returned a
+    // snooze with no snooze_minutes; the 30-minute fallback filled in and
+    // voice.ts then reported it back to him as his own number ("הזזתי ב-30
+    // דקות"). The write was real, so validate.ts could never catch it — the
+    // lie is upstream of the model entirely.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedInstance(rig, 'לעבור במשק 27', Date.now() - 60_000);
+    const ctx = await ctxFor(rig);
+
+    const result = await applyIntent(
+      rig.env, CHAT, ctx,
+      { action: 'snooze' }, // no snooze_minutes — exactly what the router returned
+      'עוד שעה, אעבוד עד קצת יותר מאוחר היום',
+    );
+    eq('the effect is a snooze', result[0].kind, 'instance_snoozed');
+    check('it reports the hour he asked for, not the default',
+      result[0].kind === 'instance_snoozed' && result[0].minutes === 60,
+      `got: ${JSON.stringify(result[0])}`);
+
+    // The stated number and the row must agree. Reporting 60 while moving the
+    // row 30 would be the same class of bug wearing the opposite mask.
+    const inst = rig.db.prepare('SELECT next_nag_at, fired_at FROM instances WHERE id = ?').get(id) as any;
+    check('and the instance really moved by an hour',
+      Number(inst.next_nag_at) - Date.now() > 55 * 60_000,
+      `next_nag_at is ${Number(inst.next_nag_at) - Date.now()}ms out`);
+    rig.restore();
+  }
+
+  section('snooze — an explicit snooze_minutes from the router still wins');
+  {
+    // parseDuration is a fallback, not an override: when the router did the
+    // work, its answer is the one that stands even if the text also contains
+    // a parsable length.
+    const rig = createRig();
+    seedSettings(rig);
+    seedInstance(rig, 'לעבור במשק 27', Date.now() - 60_000);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'snooze', snooze_minutes: 15 },
+      'תדחה בחצי שעה',
+    );
+    check('the router\'s 15 minutes is used, not the text\'s 30',
+      result[0].kind === 'instance_snoozed' && result[0].minutes === 15,
+      `got: ${JSON.stringify(result[0])}`);
+    rig.restore();
+  }
+
+  section('snooze — with no length stated anywhere, the 30-minute default still applies');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    seedInstance(rig, 'לעבור במשק 27', Date.now() - 60_000);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'snooze' }, 'תדחה את זה',
+    );
+    check('the fallback is unchanged when he named no length',
+      result[0].kind === 'instance_snoozed' && result[0].minutes === 30,
+      `got: ${JSON.stringify(result[0])}`);
+    rig.restore();
+  }
+
+  section('snooze — a clock reading in the text is not mistaken for a length');
+  {
+    // "בשעה 10" is a time, not "10 hours". If parseDuration ever reads it as a
+    // duration, a snooze request lands 600 minutes away and the bot says so
+    // with total confidence.
+    const rig = createRig();
+    seedSettings(rig);
+    seedInstance(rig, 'לעבור במשק 27', Date.now() - 60_000);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'snooze' }, 'תדחה לשעה 10',
+    );
+    check('it falls back to the default rather than reading the clock as a length',
+      result[0].kind === 'instance_snoozed' && result[0].minutes === 30,
+      `got: ${JSON.stringify(result[0])}`);
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('annotate — the answer to "why?" is kept, not just laughed at');
+  {
+    // 09.08.2026 20:06. It asked "מה איבדת שם?", he said "בשר אחי", it made a
+    // joke and stored nothing. `reminders.notes` has existed the whole time
+    // and was only ever written as null. The next day's nag had to fall back
+    // on conversation history, which gets pruned — so the one detail that
+    // makes a nag land is also the first thing the bot forgets.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לעבור במשק 27', Date.now() + 3_600_000);
+
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig),
+      { action: 'annotate', target_id: id, note: 'בשר' }, 'בשר אחי',
+    );
+    eq('the effect reports the annotation', result[0].kind, 'reminder_annotated');
+    eq('the note is on the row, where it outlives the conversation',
+      notesOf(rig, id), 'בשר');
+    rig.restore();
+  }
+  {
+    // Annotating replaces rather than appends: the second answer to the same
+    // question is a correction, not an addition.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedReminder(rig, 'לעבור במשק 27', Date.now() + 3_600_000);
+    const ctx = await ctxFor(rig);
+    await applyIntent(rig.env, CHAT, ctx, { action: 'annotate', target_id: id, note: 'בשר' }, 'בשר');
+    await applyIntent(rig.env, CHAT, ctx, { action: 'annotate', target_id: id, note: 'בשר ויין' }, 'וגם יין');
+    eq('the latest answer wins', notesOf(rig, id), 'בשר ויין');
+    rig.restore();
+  }
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'annotate', note: 'בשר' }, 'בשר אחי',
+    );
+    eq('with no reminder to attach it to, it says so', result[0].kind, 'nothing');
+    check('rather than inventing one',
+      result[0].kind === 'nothing' && result[0].why === 'unknown_reminder');
+    rig.restore();
+  }
+
+  // =========================================================================
+  section('on_my_way — "I am doing it right now" is neither done nor postponed');
+  {
+    // 10.08.2026, 16:37: a photo captioned "הנה הנה נוסע עכשיו". He was on the
+    // road, reporting in. The bot had exactly two things it could do with that
+    // — close the task (a lie, he had not arrived) or nag him again (he was
+    // literally driving there) — because open/done/failed/skipped has no state
+    // for "in progress". So it is a write, and it must be reported as one.
+    const rig = createRig();
+    seedSettings(rig);
+    const id = seedInstance(rig, 'לעבור במשק 27', Date.now() - 3_600_000);
+    // Due for a nag any second now.
+    rig.db.prepare('UPDATE instances SET next_nag_at = ? WHERE id = ?').run(Date.now() - 1000, id);
+
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'on_my_way' }, 'הנה הנה נוסע עכשיו',
+    );
+    eq('the effect says he started, not that he finished', result[0].kind, 'instance_started');
+
+    const row = rig.db.prepare('SELECT status, next_nag_at, closed_at FROM instances WHERE id = ?')
+      .get(id) as any;
+    eq('the task stays open — he has not arrived yet', row.status, 'open');
+    eq('and is not closed', row.closed_at, null);
+    check('the next nag is pushed out past the grace window',
+      Number(row.next_nag_at) - Date.now() > 20 * 60_000,
+      `next_nag_at is ${Number(row.next_nag_at) - Date.now()}ms out`);
+    rig.restore();
+  }
+  {
+    // It must not resurrect something already finished, and with nothing open
+    // it has to say so rather than invent a task to be on the way to.
+    const rig = createRig();
+    seedSettings(rig);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'on_my_way' }, 'בדרך',
+    );
+    eq('nothing open means nothing to start', result[0].kind, 'nothing');
+    check('with the honest reason',
+      result[0].kind === 'nothing' && result[0].why === 'no_open_task');
+    rig.restore();
+  }
+  {
+    // Two open tasks and no target: ask, exactly as complete and snooze do.
+    const rig = createRig();
+    seedSettings(rig);
+    seedInstance(rig, 'לעבור במשק 27', Date.now() - 1000);
+    seedInstance(rig, 'לזרוק זבל', Date.now() - 2000);
+    const result = await applyIntent(
+      rig.env, CHAT, await ctxFor(rig), { action: 'on_my_way' }, 'בדרך',
+    );
+    eq('it asks which one', result[0].kind, 'needs_task_choice');
     rig.restore();
   }
 

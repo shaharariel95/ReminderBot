@@ -3,6 +3,14 @@ import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDayBounds, wallString } from './time';
+import { findFutureInstant, parseDuration } from './quickparse';
+
+/**
+ * How long the nag ladder holds off after he says he is on it. Long enough to
+ * get there and do the thing; short enough that "בדרך" cannot become a way of
+ * never being asked again.
+ */
+export const ON_MY_WAY_GRACE_MIN = 30;
 
 /** Reminders whose next_fire_at lands within this many ms count as "the same time". */
 const DUPLICATE_WINDOW_MS = 60_000;
@@ -100,6 +108,36 @@ async function resolveReminder(
   // "תעביר את זה ל-8" with exactly one reminder on file is unambiguous.
   return ctx.reminders.length === 1 ? ctx.reminders[0] : null;
 }
+
+/**
+ * A task he just closed was ARRANGING something — offer the thing itself.
+ *
+ * "לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט" was closed on
+ * Monday morning. The call was made, the appointment was confirmed, and
+ * nothing whatsoever existed for Thursday — the bot watched the entire
+ * arrangement happen and had no way to notice the appointment inside it.
+ *
+ * Never writes. The suggestion is a question with a button under it, so an
+ * assumed hour (see PERIOD_HOUR) costs a tap to accept and nothing to ignore.
+ * Anything already on the books near that time is left alone: offering a
+ * reminder he already has is noise, and noise is how a good prompt gets muted.
+ */
+async function suggestFollowup(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  instanceId: number,
+  title: string,
+): Promise<Effect[]> {
+  const at = findFutureInstant(title, Date.now(), ctx.settings.tz);
+  if (at === null || at <= Date.now()) return [];
+  const nearby = await db.findNearbyReminders(env, chatId, at, FOLLOWUP_QUIET_WINDOW_MS);
+  if (nearby.length) return [];
+  return [{ kind: 'followup_suggested', instanceId, title, at }];
+}
+
+/** Anything scheduled within this of the appointment counts as "already handled". */
+const FOLLOWUP_QUIET_WINDOW_MS = 4 * 3_600_000;
 
 export async function applyIntent(
   env: Env,
@@ -208,7 +246,53 @@ export async function applyIntent(
       }
       await db.closeInstance(env, inst.id, 'done', userText.slice(0, 500) || 'דיווח');
       const fresh = await db.stats(env, chatId);
-      return [{ kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak }];
+      return [
+        { kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak },
+        ...(await suggestFollowup(env, chatId, ctx, inst.id, inst.title)),
+      ];
+    }
+
+    case 'annotate': {
+      const rem = await resolveReminder(env, chatId, ctx, intent);
+      const note = (intent.note ?? intent.title ?? userText).trim();
+      if (!rem || !note) return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      if (!(await db.annotateReminder(env, rem.id, note))) {
+        return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+      return [
+        {
+          kind: 'reminder_annotated',
+          id: rem.id,
+          title: rem.title,
+          note: note.slice(0, db.REMINDER_NOTE_MAX),
+        },
+      ];
+    }
+
+    case 'on_my_way': {
+      const inst =
+        ctx.open.find((i) => i.id === intent.target_id) ??
+        (ctx.open.length === 1 ? ctx.open[0] : null);
+      if (!inst) {
+        if (ctx.open.length > 1) {
+          return [{ kind: 'needs_task_choice', action: 'on_my_way', open: ctx.open }];
+        }
+        return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
+      // Long enough to actually get there and do the thing, short enough that
+      // "בדרך" cannot quietly become a way of never being asked again.
+      const minutes = ON_MY_WAY_GRACE_MIN;
+      if (!(await db.startInstance(env, inst.id, minutes))) {
+        return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
+      return [
+        {
+          kind: 'instance_started',
+          id: inst.id,
+          title: inst.title,
+          until: Date.now() + minutes * 60_000,
+        },
+      ];
     }
 
     case 'snooze': {
@@ -219,7 +303,16 @@ export async function applyIntent(
         if (ctx.open.length > 1) return [{ kind: 'needs_task_choice', action: 'snooze', open: ctx.open }];
         return [{ kind: 'nothing', why: 'no_open_task', userText }];
       }
-      const minutes = Math.min(720, Math.max(5, intent.snooze_minutes ?? 30));
+      // The router is asked for `snooze_minutes` but routinely omits it, and
+      // the fallback below is then reported back to him as a number he chose
+      // — "עוד שעה" came out as "הזזתי ב-30 דקות" on 10.08.2026. The write is
+      // real either way, so validate.ts cannot see this: the lie is upstream
+      // of the model. parseDuration reads the length off his own words before
+      // the default gets to speak for him.
+      const minutes = Math.min(
+        720,
+        Math.max(5, intent.snooze_minutes ?? parseDuration(userText) ?? 30),
+      );
       await db.snoozeInstance(env, inst.id, minutes);
       return [
         {

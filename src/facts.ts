@@ -16,6 +16,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   const times = new Set<string>();
   const titles = new Set<string>();
   const quotable = new Set<string>();
+  const elapsed = new Set<number>();
 
   const addQuotable = (s: string | null | undefined) => {
     if (typeof s === 'string' && s.trim().length > 0) quotable.add(s.trim());
@@ -28,9 +29,24 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     }
   };
 
+  /**
+   * How long ago `ts` was, in whole minutes. Read from the clock at build
+   * time, exactly like the message it is about to license — which is what
+   * makes it comparable to anything the model says in the same breath.
+   */
+  const addElapsed = (ts: number | null | undefined) => {
+    if (typeof ts !== 'number') return;
+    const mins = Math.round((Date.now() - ts) / 60_000);
+    if (mins >= 0) elapsed.add(mins);
+  };
+
   // Everything already on file is fair game to talk about.
   for (const r of ctx.reminders) {
     titles.add(r.title);
+    // The note is shown to the model (see remindersSummary), so it must be
+    // quotable — otherwise rule 3 discards a rewrite for repeating something
+    // the prompt handed it.
+    addQuotable(r.notes);
     addTime(r.next_fire_at);
     try {
       const s = JSON.parse(r.schedule);
@@ -42,6 +58,9 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   for (const i of ctx.open) {
     titles.add(i.title);
     addTime(i.fired_at);
+    // An open instance is the commonest thing to be asked "how long has this
+    // been sitting there" about, and its fired_at is the only honest answer.
+    addElapsed(i.fired_at);
   }
   for (const g of ctx.goals) titles.add(g.title);
 
@@ -71,7 +90,12 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     }
     if ('at' in e) addTime(e.at);
     if ('until' in e) addTime(e.until);
-    if ('since' in e) addTime(e.since);
+    if ('since' in e) {
+      addTime(e.since);
+      // `nagged` carries the moment the thing became due, which is the exact
+      // span a nag is tempted to editorialise about.
+      addElapsed(e.since);
+    }
     if (e.kind === 'listed_reminders') {
       for (const r of e.rows) {
         titles.add(r.title);
@@ -97,7 +121,16 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       for (const i of [...e.missed, ...e.dropped]) titles.add(i.title);
     }
     if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
-    if (e.kind === 'checkin_goal') addQuotable(e.lastProgress);
+    if (e.kind === 'checkin_goal') {
+      addQuotable(e.lastProgress);
+      // "מאז יום שישי בבוקר שאמרת לה שהיא יפה לא שמענו ממך" (09.08.2026) — a
+      // check-in's whole rhetorical move is how long it has been, and until
+      // these two were swept the model had no fact to reach for and simply
+      // made the span up. Both matter: last progress is how long since he DID
+      // anything, last check-in is how long since the bot last asked.
+      addElapsed(e.lastProgressAt);
+      addElapsed(e.lastCheckinAt);
+    }
     if (e.kind === 'goal_progress') {
       addQuotable(e.note);
       addQuotable(e.previous);
@@ -122,6 +155,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     stats: ctx.stats,
     nowLabel: ctx.nowLabel,
     times: [...times],
+    elapsed: [...elapsed],
     titles: [...titles],
     quotable: [...quotable],
     // Filled in by sendOutcome, and only when the model is actually consulted.
