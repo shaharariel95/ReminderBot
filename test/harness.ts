@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { VERSION } from '../src/version';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -153,6 +154,11 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
   const sqlite = new DatabaseSync(':memory:');
   const schema = readFileSync(join(HERE, '..', 'schema.sql'), 'utf8');
   sqlite.exec(schema);
+  // A rig is a bot that is ALREADY running the current version. Without this
+  // the first cron of every unrelated test would announce a deploy, and every
+  // assertion that counts messages would be counting that too. A test about
+  // deploying deletes this row to say so out loud.
+  sqlite.prepare("INSERT INTO meta (key, value) VALUES ('version', ?)").run(VERSION);
   const dbState: { dbFailOn: RegExp | null } = { dbFailOn: null };
   const sqlLog: string[] = [];
 
@@ -330,4 +336,21 @@ export function callbackUpdate(chatId: string, data: string, fromId = chatId): u
       data,
     },
   };
+}
+
+/**
+ * Simulate a deploy: forget which version the database last saw, so the next
+ * cron tick finds new code running and announces it.
+ *
+ * createRig seeds the current version deliberately (see above) — a test that
+ * wants the announcement has to ask for it, rather than every test getting one
+ * by accident.
+ */
+export function deployed(rig: Rig, lastSeen?: string): void {
+  if (lastSeen === undefined) {
+    // Never seen a version at all — a first-ever deploy of this code.
+    rig.db.prepare("DELETE FROM meta WHERE key = 'version'").run();
+    return;
+  }
+  rig.db.prepare("UPDATE meta SET value = ? WHERE key = 'version'").run(lastSeen);
 }

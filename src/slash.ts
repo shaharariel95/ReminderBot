@@ -1,6 +1,7 @@
 import * as db from './db';
 import { describeSchedule, formatLocal, localDayBounds } from './time';
 import type { Env, Schedule } from './types';
+import { VERSION } from './version';
 
 /** Slash commands handled without burning an LLM call. */
 export async function handleSlash(
@@ -50,6 +51,9 @@ export async function handleSlash(
     case '/diag': {
       const model = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
       const lines = [
+        // First line, because "am I even running the code I think I am"
+        // precedes every other question this command answers.
+        `גרסה: ${VERSION}`,
         `model: ${model}`,
         `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} תווים)` : 'חסר!'}`,
         `OWNER_CHAT_ID: ${env.OWNER_CHAT_ID || 'חסר!'}`,

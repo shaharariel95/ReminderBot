@@ -7,6 +7,7 @@ DROP TABLE IF EXISTS goals;
 DROP TABLE IF EXISTS settings;
 DROP TABLE IF EXISTS profile;
 DROP TABLE IF EXISTS rejections;
+DROP TABLE IF EXISTS meta;
 
 CREATE TABLE reminders (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +117,14 @@ CREATE TABLE usage (
   model TEXT    NOT NULL,
   calls INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, model)
+);
+
+-- Deployment-level state, not user state — see migrations/007. Holds the last
+-- version the database saw, which is how a Worker with no start-up hook works
+-- out that it has just been deployed.
+CREATE TABLE meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 -- Every model rewrite the validator threw away — see migrations/006. The

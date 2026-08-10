@@ -30,6 +30,7 @@ import {
   wallToUtc,
 } from './time';
 import { renderBaseline } from './voice';
+import { VERSION } from './version';
 import type { Effect, Env, Facts, Intent, Schedule } from './types';
 
 export default {
@@ -622,10 +623,45 @@ async function modelAllowed(env: Env, priority: 'high' | 'low' | 'none'): Promis
  * There is deliberately no cron job per reminder — that pattern caps out fast
  * and makes snoozing impossible.
  */
+/**
+ * Tell him a deploy landed, once, the minute it lands.
+ *
+ * A Worker has no start-up hook — every invocation looks exactly like the last
+ * one, and nothing anywhere fires when new code goes live. So the tick works
+ * it out: db.claimVersion writes the compiled-in VERSION and reports whether
+ * that changed anything. It changed something exactly once per deploy, and
+ * that call is the one that gets to speak.
+ *
+ * Sent with a bare sendMessage on purpose. No model call, no validator, no
+ * quota, no persona — this is the bot reporting on itself rather than talking
+ * to him, and it is the one message that must still arrive on the deploy where
+ * everything else is broken.
+ *
+ * Quiet hours are deliberately not consulted. An unprompted 03:00 nag is rude;
+ * a 03:00 deploy confirmation is a reply to something he did thirty seconds
+ * ago.
+ *
+ * Wrapped whole: a bot that cannot announce its own deploy must still run
+ * every reminder in that tick.
+ */
+async function announceDeploy(env: Env, chatId: string): Promise<void> {
+  try {
+    if (!(await db.claimVersion(env, VERSION))) return;
+    console.log(`deployed version ${VERSION}`);
+    await sendMessage(env, chatId, `עליתי מחדש. גרסה ${VERSION}.`);
+  } catch (err) {
+    console.error('announceDeploy', err);
+  }
+}
+
 async function tick(env: Env): Promise<void> {
   const now = Date.now();
   const chatId = env.OWNER_CHAT_ID;
   if (!chatId || chatId === '0') return;
+
+  // Before the early bail below, because on a quiet minute — which is almost
+  // every minute — the tick returns long before it would get here otherwise.
+  await announceDeploy(env, chatId);
 
   // Three independent reads, and this runs 1,440 times a day whether or not
   // there is anything to do — the overwhelmingly common outcome is that all

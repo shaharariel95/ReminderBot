@@ -827,6 +827,30 @@ export const REJECTION_KEEP = 40;
  * `usage` counter is bumped first and separately — it is what /diag has always
  * shown, and it stays correct even if the detail row is the thing that fails.
  */
+/**
+ * Record that `version` is now the running one, and report whether that was
+ * NEWS — i.e. whether this call is the one that should announce the deploy.
+ *
+ * One statement, so two ticks racing cannot both claim the same deploy: the
+ * conditional `DO UPDATE ... WHERE` means only the call that actually changes
+ * the row gets a RETURNING row back, and every other call gets nothing.
+ *
+ * The caller must claim BEFORE it announces. A send that fails after a
+ * successful claim costs one missed message; a send that succeeded before the
+ * claim was written would re-announce the same deploy every minute until
+ * someone noticed.
+ */
+export async function claimVersion(env: Env, version: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `INSERT INTO meta (key, value) VALUES ('version', ?)
+       ON CONFLICT(key) DO UPDATE SET value = ? WHERE meta.value <> ?
+       RETURNING value`,
+  )
+    .bind(version, version, version)
+    .first<{ value: string }>();
+  return row !== null;
+}
+
 export async function recordRejection(
   env: Env,
   chatId: string,

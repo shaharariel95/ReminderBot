@@ -9,11 +9,12 @@ import worker from '../src/index';
 import { quickParse } from '../src/quickparse';
 import { buildSystemPrompt } from '../src/persona';
 import { wallToUtc } from '../src/time';
-import { callbackUpdate, check, createRig, done, eq, section, withNow, type Rig } from './harness';
+import { callbackUpdate, check, createRig, deployed, done, eq, section, withNow, type Rig } from './harness';
 import type { Settings, Stats } from '../src/types';
 import * as db from '../src/db';
 import { applyIntent } from '../src/effects';
 import { handleSlash } from '../src/slash';
+import { VERSION } from '../src/version';
 import type { Context } from '../src/brain';
 
 const CHAT = '12345';
@@ -567,6 +568,76 @@ async function main() {
     check('"רשמתי" never reaches the user when nothing was written',
       !out.includes('רשמתי'), `sent: ${out}`);
     eq('and nothing was written', reminders(rig).length, 0);
+    rig.restore();
+  }
+
+  section('a deploy announces itself, exactly once');
+  {
+    // "Did that actually ship?" is otherwise answered by poking the bot and
+    // guessing from its behaviour. The Worker cannot be told it was deployed,
+    // so it works it out: the version in the code is compared against the last
+    // one the database saw, and a difference means new code is running.
+    const rig = createRig();
+    seedSettings(rig);
+    deployed(rig);
+
+    await runCron(rig);
+    check('the first tick after a deploy says so, with the version',
+      rig.texts().some((t) => t.includes(VERSION)), rig.texts().join(' | '));
+    eq('and it costs no model call — this is plumbing, not personality',
+      rig.geminiCalls.length, 0);
+
+    rig.sent.length = 0;
+    await runCron(rig);
+    eq('every tick after that is silent', rig.texts().length, 0);
+    rig.restore();
+  }
+  {
+    // The version the database saw is older than the code: that is a deploy,
+    // and the point of the whole thing.
+    const rig = createRig();
+    seedSettings(rig);
+    deployed(rig, '0.4');
+
+    await runCron(rig);
+    check('an older stored version announces the new one',
+      rig.texts().some((t) => t.includes(VERSION)), rig.texts().join(' | '));
+    rig.restore();
+  }
+  {
+    // Claimed before sent, deliberately. A send that fails loses one
+    // announcement; a send that succeeds before the claim is written would
+    // announce the same deploy every minute forever.
+    const rig = createRig();
+    seedSettings(rig);
+    deployed(rig);
+    rig.telegramDown = true;
+    await runCron(rig);   // must not throw
+    rig.telegramDown = false;
+    rig.sent.length = 0;
+
+    await runCron(rig);
+    eq('a failed announcement is not retried into a loop', rig.texts().length, 0);
+    rig.restore();
+  }
+  {
+    // A deploy is his own doing, so it is not an unprompted message and quiet
+    // hours do not apply — he is awake, he just pushed.
+    const rig = createRig();
+    seedSettings(rig, { quiet_start_hour: 0, quiet_end_hour: 23 });
+    deployed(rig);
+    await runCron(rig);
+    check('quiet hours do not suppress it',
+      rig.texts().some((t) => t.includes(VERSION)), rig.texts().join(' | '));
+    rig.restore();
+  }
+
+  section('/diag reports the running version');
+  {
+    const rig = createRig();
+    seedSettings(rig);
+    const diag = await handleSlash(rig.env, CHAT, '/diag');
+    check('the version is in /diag', (diag ?? '').includes(VERSION), diag ?? '');
     rig.restore();
   }
 
