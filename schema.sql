@@ -118,11 +118,16 @@ CREATE TABLE rate_window (
 );
 
 -- One row per model per day. Small, and it lets /diag tell the truth about quota.
+-- Model calls, attributed — see migrations/012. Both numbers matter and they
+-- answer different questions: per chat is "what did I use" (and who to talk to
+-- when it climbs), the SUM is what protects the shared API key. Keyed on a
+-- LOCAL date, so "today" ends at his midnight and not at 03:00.
 CREATE TABLE usage (
-  day   TEXT    NOT NULL,                          -- "2026-08-04" UTC
-  model TEXT    NOT NULL,
-  calls INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, model)
+  day     TEXT    NOT NULL,                        -- "2026-08-04", local
+  model   TEXT    NOT NULL,
+  chat_id TEXT    NOT NULL DEFAULT '-',            -- '-' = predates migration 012
+  calls   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, model, chat_id)
 );
 
 -- People who have messaged but are not allowed yet — see migrations/008. The

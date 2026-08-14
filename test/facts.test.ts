@@ -12,6 +12,7 @@ const settings: Settings = {
   chat_id: '1', tz: TZ, intensity: 2, muted_until: null, off_limits: null,
   checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
   next_checkin_at: null,
+  awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
 };
 const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 3 };

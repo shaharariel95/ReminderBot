@@ -819,20 +819,58 @@ export async function scheduleInboxItem(
  */
 const localDay = (env: Env, ts: number) => localDateKey(ts, env.DEFAULT_TZ ?? 'Asia/Jerusalem');
 
-export async function recordUsage(env: Env, model: string): Promise<void> {
+/**
+ * The chat a call could not be attributed to.
+ *
+ * Only two things land here: rows written before migration 012, and the bot's
+ * own housekeeping. Deliberately a value no real chat_id can take, so
+ * "unattributed" is never confusable with somebody's actual usage.
+ */
+export const UNATTRIBUTED = '-';
+
+export async function recordUsage(
+  env: Env,
+  model: string,
+  chatId: string = UNATTRIBUTED,
+): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO usage (day, model, calls) VALUES (?, ?, 1)
-     ON CONFLICT(day, model) DO UPDATE SET calls = calls + 1`,
+    `INSERT INTO usage (day, model, chat_id, calls) VALUES (?, ?, ?, 1)
+     ON CONFLICT(day, model, chat_id) DO UPDATE SET calls = calls + 1`,
   )
-    .bind(localDay(env, Date.now()), model)
+    .bind(localDay(env, Date.now()), model, chatId)
     .run();
 }
 
+/**
+ * Every call against `model` today, whoever made it.
+ *
+ * Still a total, even though the table is now per-chat: there is one API key
+ * and one shared quota, and this is the number that protects it.
+ */
 export async function usageToday(env: Env, model: string): Promise<number> {
-  const row = await env.DB.prepare('SELECT calls FROM usage WHERE day = ? AND model = ?')
+  const row = await env.DB.prepare(
+    'SELECT SUM(calls) AS calls FROM usage WHERE day = ? AND model = ?',
+  )
     .bind(localDay(env, Date.now()), model)
+    .first<{ calls: number | null }>();
+  return Number(row?.calls ?? 0);
+}
+
+/**
+ * One chat's share of today.
+ *
+ * This is the number /diag should show him, because it is the only one that
+ * reconciles with the per-chat rejection list printed underneath it — and it
+ * is what his check-in budget is measured against, so a guest burning the
+ * day's calls cannot silently switch off the owner's.
+ */
+export async function usageTodayFor(env: Env, model: string, chatId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    'SELECT calls FROM usage WHERE day = ? AND model = ? AND chat_id = ?',
+  )
+    .bind(localDay(env, Date.now()), model, chatId)
     .first<{ calls: number }>();
-  return row?.calls ?? 0;
+  return Number(row?.calls ?? 0);
 }
 
 /** Counts validator rejections so /diag can report how often the model lies. */
@@ -1058,7 +1096,11 @@ export async function recordRejection(
   text: string,
   effects: string,
 ): Promise<void> {
-  await recordUsage(env, '_rejections');
+  // Attributed to the chat whose rewrite was discarded. Before migration 012
+  // this was a global counter sitting directly above a per-chat listing, so
+  // /diag once showed the owner "1" with nothing underneath it — the rejection
+  // was a guest's, and there was no way for him to work that out.
+  await recordUsage(env, '_rejections', chatId);
   await env.DB.prepare(
     'INSERT INTO rejections (chat_id, at, reason, text, effects) VALUES (?, ?, ?, ?, ?)',
   )

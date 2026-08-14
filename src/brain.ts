@@ -254,6 +254,7 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
     contents: [{ role: 'user', parts }],
     jsonSchema: ROUTER_SCHEMA as unknown as Record<string, unknown>,
     maxOutputTokens: 2000,
+    chatId: ctx.settings.chat_id,
   });
 
   // Models drop the wrapper occasionally. A bare action object is still a valid
@@ -284,6 +285,8 @@ export async function judgePhoto(
   title: string,
   image: { data: string; mimeType: string },
   caption: string,
+  /** Whose photo this is, so the call lands on their side of the usage table. */
+  chatId?: string,
 ): Promise<{ verdict: 'accepted' | 'rejected'; reason: string }> {
   const schema = {
     type: 'OBJECT',
@@ -310,6 +313,7 @@ reason: משפט אחד קצר בעברית שמתאר מה רואים בתמו�
       ],
       jsonSchema: schema as unknown as Record<string, unknown>,
       maxOutputTokens: 1500,
+      chatId,
     });
   } catch (err) {
     console.error('judgePhoto', err);
@@ -374,5 +378,6 @@ export async function speak(
   // should go, leaving room for the routing that decides what actually happens.
   return generate(env, {
     system, contents, temperature: 1.05, maxOutputTokens: 2000, decorative: true,
+    chatId: facts.settings.chat_id,
   });
 }

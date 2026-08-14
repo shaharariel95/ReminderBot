@@ -214,10 +214,17 @@ export async function handleSlash(
       ];
       const primary = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
       const fallback = env.GEMINI_MODEL_FALLBACK ?? 'gemini-3.5-flash-lite';
+      // Two numbers, because they answer two questions. His own is the one
+      // that reconciles with the rejection list printed below and the one his
+      // check-in budget is measured against; the total is what protects the
+      // shared API key. Showing only the total is what put "נפסלו היום: 1"
+      // above an empty list on 11.08.2026 — the rejection was a guest's.
       lines.push(
-        `שימוש היום — ${primary}: ${await db.usageToday(env, primary)}, ` +
-          `${fallback}: ${await db.usageToday(env, fallback)}`,
-        `תשובות שנפסלו היום: ${await db.usageToday(env, '_rejections')}`,
+        `שימוש היום — ${primary}: שלך ${await db.usageTodayFor(env, primary, chatId)} · ` +
+          `בסך הכל ${await db.usageToday(env, primary)}`,
+        `${fallback}: שלך ${await db.usageTodayFor(env, fallback, chatId)} · ` +
+          `בסך הכל ${await db.usageToday(env, fallback)}`,
+        `תשובות שנפסלו היום: ${await db.usageTodayFor(env, '_rejections', chatId)}`,
         // The daily counters above are the axis that never binds. This is the
         // one that does, and seeing it live is the whole reason /diag exists.
         `תקרת דקה: ${env.GEMINI_RPM ?? 18} לכל מודל · בדקה הזאת: ${await db

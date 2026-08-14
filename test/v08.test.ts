@@ -900,4 +900,81 @@ section('a mutation says which row it touched');
   check('a nag stays clean', !nag.includes('#'), `got: ${nag}`);
 }
 
+// ---------------------------------------------------------------------------
+
+section('usage is counted per chat, not just in total');
+{
+  // 11.08 12:35 /diag said "תשובות שנפסלו היום: 1" with nothing listed
+  // underneath. The counter was global — keyed (day, model) with no chat — and
+  // the listing beneath it was per-chat, so the rejection belonged to נתנאל and
+  // the owner had a number he could not reconcile with anything.
+  const rig = createRig();
+  const GUEST = '999';
+  await withNow(wallToUtc(2026, 8, 13, 12, 0, TZ), async () => {
+    await db.recordUsage(rig.env, 'test-model', CHAT);
+    await db.recordUsage(rig.env, 'test-model', CHAT);
+    await db.recordUsage(rig.env, 'test-model', GUEST);
+
+    eq('his own calls are his own', await db.usageTodayFor(rig.env, 'test-model', CHAT), 2);
+    eq("the guest's are separate", await db.usageTodayFor(rig.env, 'test-model', GUEST), 1);
+    // The API key is shared, so the total still has to be available — it is
+    // what protects the key, and it is a different question from "who used it".
+    eq('and the total is still the total', await db.usageToday(rig.env, 'test-model'), 3);
+  });
+  rig.restore();
+}
+
+section('/diag separates his usage from everyone else\'s');
+{
+  const rig = createRig();
+  const at = wallToUtc(2026, 8, 13, 12, 0, TZ);
+  await withNow(at, async () => {
+    await db.recordUsage(rig.env, 'gemini-3.5-flash-lite', CHAT);
+    await db.recordUsage(rig.env, 'gemini-3.5-flash-lite', '999');
+    await db.recordRejection(rig.env, '999', 'invented time', 'שטויות', 'nothing');
+  });
+
+  const out = (await withNow(at, () => handleSlash(rig.env, CHAT, '/diag'))) ?? '';
+  check('his own count is shown', /שלך/.test(out), `got: ${out}`);
+  check('and so is the shared total', /בסך הכל/.test(out), `got: ${out}`);
+  // The number and the list under it must now agree: the guest's rejection is
+  // not his, and /diag must not show him a 1 he cannot explain.
+  check(
+    'a rejection that was not his is not counted as his',
+    /נפסלו היום: 0/.test(out),
+    `got: ${out}`,
+  );
+  rig.restore();
+}
+
+section('a guest cannot spend the owner\'s check-in budget');
+{
+  // GEMINI_SOFT_LIMIT gated unprompted check-ins on the GLOBAL counter, so a
+  // second person burning the day's calls silently switched off the owner's.
+  const rig = createRig();
+  rig.env.GEMINI_SOFT_LIMIT = '3';
+  const at = wallToUtc(2026, 8, 13, 12, 0, TZ);
+  await withNow(at, async () => {
+    for (let i = 0; i < 5; i++) await db.recordUsage(rig.env, 'gemini-3.5-flash-lite', '999');
+    eq('the guest is over budget', await db.usageTodayFor(rig.env, 'gemini-3.5-flash-lite', '999'), 5);
+    eq('the owner has spent nothing', await db.usageTodayFor(rig.env, 'gemini-3.5-flash-lite', CHAT), 0);
+  });
+
+  // The owner's check-in still gets the model. getSettings first: the row is
+  // created on read, and an UPDATE before it exists silently changes nothing.
+  await db.getSettings(rig.env, CHAT);
+  await db.addGoal(rig.env, CHAT, 'לפתוח תיק מסחר', null);
+  await db.setCheckins(rig.env, CHAT, true, 2);
+  rig.db.prepare('UPDATE settings SET next_checkin_at = ? WHERE chat_id = ?').run(at - 1000, CHAT);
+  rig.speakQueue.push('נו, מה עם תיק המסחר?');
+  await withNow(at, () => runCron(rig));
+
+  check(
+    'so his check-in still gets the model',
+    rig.geminiCalls.some((c) => c.kind === 'speak'),
+    'the guest starved the owner out of his own budget',
+  );
+  rig.restore();
+}
+
 done();

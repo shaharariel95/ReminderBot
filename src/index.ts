@@ -738,7 +738,7 @@ async function applyPhoto(
     ctx.open.find((i) => i.id === intent.target_id) ?? (ctx.open.length ? ctx.open[0] : null);
   if (!inst) return { effects: [{ kind: 'nothing', why: 'no_open_task', userText: caption }] };
 
-  const verdict = await judgePhoto(env, inst.title, image, caption);
+  const verdict = await judgePhoto(env, inst.title, image, caption, chatId);
   if (verdict.verdict !== 'accepted') {
     return {
       effects: [
@@ -826,7 +826,7 @@ async function sendOutcome(
   }
 
   let text = baseline;
-  if (facts && (await modelAllowed(env, priority))) {
+  if (facts && (await modelAllowed(env, priority, chatId))) {
     try {
       const [recent, notes] = await Promise.all([
         history ? Promise.resolve(history.slice(-8)) : db.recentMessages(env, chatId, 8),
@@ -889,18 +889,28 @@ async function sendOutcome(
  * fully known, so there is nothing for a rewrite to add — only latency and
  * quota to spend.
  */
-async function modelAllowed(env: Env, priority: 'high' | 'low' | 'none'): Promise<boolean> {
+async function modelAllowed(
+  env: Env,
+  priority: 'high' | 'low' | 'none',
+  chatId: string,
+): Promise<boolean> {
   if (priority === 'none') return false;
   if (priority === 'high') return true;
   const limit = Number(env.GEMINI_SOFT_LIMIT ?? '200');
   if (!Number.isFinite(limit) || limit <= 0) return true;
+  // Measured against HIS OWN usage, not the shared total. The total was what
+  // this compared before, which meant a guest burning the day's calls silently
+  // switched off the owner's check-ins — with nothing anywhere to say why they
+  // had stopped. The shared API key is still protected, by the per-minute rate
+  // window in gemini.ts, which is the axis that actually binds.
+  //
   // Fail open: if the usage query throws, a check-in still gets the model
   // rather than being silently suppressed forever by a broken read.
   try {
-    const used = await db.usageToday(env, env.GEMINI_MODEL ?? 'gemini-3.5-flash');
+    const used = await db.usageTodayFor(env, env.GEMINI_MODEL ?? 'gemini-3.5-flash', chatId);
     return used < limit;
   } catch (err) {
-    console.error('modelAllowed: usageToday failed, allowing', err);
+    console.error('modelAllowed: usage read failed, allowing', err);
     return true;
   }
 }

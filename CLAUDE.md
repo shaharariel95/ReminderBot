@@ -134,6 +134,14 @@ both queries carry `LIMIT 25`, and a revoked chat's stale rows would otherwise
 fill the page forever and starve everyone else. Each chat ticks inside its own
 `.catch` — one user's failure must not swallow another's reminders.
 
+Model calls are attributed per chat (`usage`, keyed day+model+chat_id since
+migration 012). Two numbers, two questions: `usageTodayFor` is what /diag shows
+him and what his check-in budget is measured against; `usageToday` is the SUM,
+and it is what protects the shared API key. Getting this wrong is not
+theoretical — /diag once reported a rejection the owner could not explain
+because it was a guest's, and a guest burning the day's calls silently switched
+off the owner's check-ins.
+
 If you add a query that returns rows across users, ask what happens when a
 second person exists. That exact question was worth asking: `dueReminders` and
 `dueNags` read the whole table and everything was sent to `OWNER_CHAT_ID`.
@@ -171,6 +179,7 @@ a deploy; a fresh rig is a bot that is already running the current version.
 npx wrangler d1 execute nu-bot --remote --file=./migrations/009_events_and_errors.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/010_awaiting.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/011_reminder_items.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/012_usage_by_chat.sql
 npm run deploy
 ```
 

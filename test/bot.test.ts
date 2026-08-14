@@ -268,6 +268,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
@@ -483,7 +484,12 @@ async function main() {
       'INSERT INTO goals (chat_id, title, status, checkin_count, created_at) VALUES (?, ?, ?, 0, ?)',
     ).run(CHAT, 'לפתוח תיק מסחר', 'active', Date.now());
     rig.env.GEMINI_SOFT_LIMIT = '2';
-    for (let i = 0; i < 3; i++) await db.recordUsage(rig.env, rig.env.GEMINI_MODEL);
+    // Attributed to CHAT. Since migration 012 the soft limit is measured
+    // against his OWN usage rather than the shared total — a guest burning the
+    // day's calls used to switch off the owner's check-ins silently. Recording
+    // these unattributed would now leave his budget untouched and the check-in
+    // would (correctly) go out, so the seeding has to name him.
+    for (let i = 0; i < 3; i++) await db.recordUsage(rig.env, rig.env.GEMINI_MODEL, CHAT);
 
     const before = rig.geminiCalls.length;
     await runCron(rig);
@@ -2144,6 +2150,7 @@ async function main() {
       chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
       checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
       next_checkin_at: null,
+  awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };

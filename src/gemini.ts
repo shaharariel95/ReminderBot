@@ -28,6 +28,13 @@ interface GenerateOpts {
    * the reminder.
    */
   decorative?: boolean;
+  /**
+   * Who this call is for. Threaded all the way down from the turn rather than
+   * inferred here, because attribution is the whole point: a shared counter
+   * showed the owner a rejection that was a guest's and let a guest spend his
+   * check-in budget. Omitted only by callers that genuinely have no chat.
+   */
+  chatId?: string;
 }
 
 /** "2026-08-07T14:32" — the window a call is counted against. */
@@ -254,7 +261,7 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         .trim();
       if (text) {
         // Best-effort: a usage-tracking failure must never break a working reply.
-        await db.recordUsage(env, model).catch(() => {});
+        await db.recordUsage(env, model, opts.chatId).catch(() => {});
         return text;
       }
 
