@@ -25,7 +25,7 @@ export interface Verdict {
  * check whether that rule's examples still cover it.
  */
 export const CLAIM =
-  /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
+  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
 
 /**
  * The same verbs, grouped by WHICH write they assert — and which effects can
@@ -46,7 +46,7 @@ export const CLAIM =
 const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['kind']> }[] = [
   {
     name: 'create',
-    verbs: /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי/,
+    verbs: /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי/,
     kinds: new Set<Effect['kind']>([
       'reminder_created', 'reminder_captured', 'reminder_scheduled',
       'reminder_annotated', 'goal_created', 'profile_noted',

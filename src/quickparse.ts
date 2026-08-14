@@ -898,3 +898,36 @@ export function parseAnswerTime(text: string, nowMs: number, tz: string): number
 
   return resolve(clock, day, nowMs, tz)?.ts ?? null;
 }
+
+/**
+ * The hour he named, anywhere in a sentence that is doing something else.
+ *
+ * Unlike quickParse this decides nothing about WHAT he wants — the router has
+ * already settled that, and already resolved which reminder. The only question
+ * left is "did he say a time", and it exists because he usually did: "בוא נזיז
+ * את התזכורת של הבשר ל15:00" cost two exchanges on 14.08.2026, the bot asking
+ * for an hour that was sitting in the same sentence.
+ *
+ * This is the same move `parseDuration` already makes for snooze — read the
+ * number off his own words rather than letting an empty router field speak for
+ * him. Three refusals, all of them about not guessing:
+ *
+ *   - a repeat rule ("כל יום ב-8") is not an instant, and writing one would END
+ *     the recurrence, which is far worse than asking
+ *   - two times in one sentence, because nothing here can say which he meant
+ *   - a time already behind us, which is never what a move is for
+ */
+export function findNamedTime(text: string, nowMs: number, tz: string): number | null {
+  const t = text.trim();
+  if (!t || RECURRING.test(t) || countTimeAnchors(t) > 1) return null;
+
+  const rel = parseRelative(t);
+  if (rel && rel.minutes >= 1 && rel.minutes <= 60 * 24 * 60) {
+    return nowMs + rel.minutes * 60_000;
+  }
+
+  const clock = matchClock(t);
+  if (!clock) return null;
+  const at = resolve(clock, matchDay(t), nowMs, tz)?.ts ?? null;
+  return at !== null && at > nowMs ? at : null;
+}

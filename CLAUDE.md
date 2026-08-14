@@ -91,6 +91,18 @@ It expires (`AWAITING_TTL_MS`) **and** is cleared by any turn that does not
 re-ask. Both matter: a slot left open means a bare "15:00" typed later, about
 something else, silently retimes whatever was last asked about.
 
+It is the SECOND line of defence, not the first. A reschedule tries
+`findNamedTime` on his own sentence before it asks anything — the router
+routinely returns a reschedule with the time field empty even when he said the
+hour in the same breath, and "בוא נזיז את התזכורת של הבשר ל15:00" was answered
+with "מתי?" on 14.08.2026. Same move `parseDuration` already makes for snooze.
+
+`findNamedTime` refuses rather than guesses in three cases, and the middle one
+is the one to keep: a repeat rule ("כל יום ב-8") must never be flattened into a
+single fire, because that ENDS the recurrence — the same trap the retime button
+was fixed for. Two times in one sentence and an hour already past are the other
+two. Every refusal falls through to the question, which is what the slot is for.
+
 ## Items
 
 A reminder can hold several errands (`reminder_items`, migrations/011). Items

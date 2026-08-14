@@ -3,7 +3,7 @@ import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDayBounds, wallString } from './time';
-import { findFutureInstant, parseDuration } from './quickparse';
+import { findFutureInstant, findNamedTime, parseDuration } from './quickparse';
 
 /**
  * How long the nag ladder holds off after he says he is on it. Long enough to
@@ -506,7 +506,20 @@ export async function applyIntent(
         return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
       }
 
-      const schedule = scheduleFromIntent(intent, tz);
+      // The router routinely returns a reschedule with the time field empty,
+      // even when he said the hour out loud in the same breath. Reading it off
+      // his own words is the same move parseDuration already makes for snooze,
+      // and it is the difference between one exchange and two: on 14.08.2026
+      // "בוא נזיז את התזכורת של הבשר ל15:00" was answered with "מתי?".
+      //
+      // findNamedTime refuses anything it cannot be sure of — a repeat rule, a
+      // second time in the sentence, an hour already gone — so the question
+      // below is still asked whenever asking is the honest answer.
+      const named = findNamedTime(userText, Date.now(), tz);
+      const schedule =
+        scheduleFromIntent(intent, tz) ??
+        (named === null ? null : ({ type: 'once', at: wallString(named, tz) } as Schedule));
+
       // Carries the reminder, unlike the `nothing: 'no_time'` this replaced.
       // The bot is about to ask "מתי?" and it has to still know what it asked
       // about when the answer arrives — see db.setAwaiting.

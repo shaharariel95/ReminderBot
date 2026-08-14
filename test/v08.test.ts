@@ -280,6 +280,94 @@ section('the 14.08 production turn, end to end');
   rig.restore();
 }
 
+section('a move that names its hour lands in one turn');
+{
+  // 14.08 23:42 took two exchanges: the router returned a reschedule with no
+  // time, the bot asked "מתי לשים את...", and the awaiting slot caught the
+  // "15:00" that followed. Correct, but a round trip he should not have to
+  // spend — he had already said the hour, in the same sentence.
+  //
+  // Exactly the move parseDuration already makes for snooze: read the number
+  // off his own words when the router leaves the field empty.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 14, 23, 42, TZ);
+  const id = await db.addReminder(rig.env, {
+    chat_id: CHAT, title: 'ללכת לקנות בשר', notes: null,
+    schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
+    tz: TZ, requires_proof: 0, proof_type: 'any',
+    nag_interval_min: 20, max_nags: 3,
+    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+  });
+
+  rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
+  rig.speakQueue.push('הזזתי את "ללכת לקנות בשר" ל-15:00.');
+  await withNow(now, () => runWebhook(rig, 'בוא נזיז את התזכורת של הבשר ל15:00'));
+
+  const rem = await db.getReminder(rig.env, id);
+  eq('it moved on the first ask', rem?.next_fire_at, wallToUtc(2026, 8, 15, 15, 0, TZ));
+  check(
+    'and he was not asked for an hour he had already given',
+    !rig.texts().some((t) => t.includes('מתי')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  rig.restore();
+}
+
+section('...but it still asks when the hour is genuinely missing');
+{
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 14, 23, 42, TZ);
+  const seed = () =>
+    db.addReminder(rig.env, {
+      chat_id: CHAT, title: 'ללכת לקנות בשר', notes: null,
+      schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
+      tz: TZ, requires_proof: 0, proof_type: 'any',
+      nag_interval_min: 20, max_nags: 3,
+      next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+    });
+  const id = await seed();
+
+  rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
+  rig.speakQueue.push('מתי לשים את זה?');
+  await withNow(now, () => runWebhook(rig, 'בוא נזיז את התזכורת של הבשר'));
+  check(
+    'no hour in the sentence means it asks',
+    rig.texts().some((t) => t.includes('מתי')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  const untouched = await db.getReminder(rig.env, id);
+  eq('and moves nothing', untouched?.next_fire_at, wallToUtc(2026, 8, 15, 10, 0, TZ));
+  rig.restore();
+}
+
+section('a recurrence is never silently flattened into one fire');
+{
+  // "תעביר את זה לכל יום ב-8" is a repeat rule. If the router did not express
+  // it as one, reading "8" off the sentence and writing a single 08:00 fire
+  // would END the recurrence — the same trap the retime button was fixed for.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 14, 23, 42, TZ);
+  const id = await db.addReminder(rig.env, {
+    chat_id: CHAT, title: 'לרוץ', notes: null,
+    schedule: JSON.stringify({ type: 'daily', time: '07:00' }),
+    tz: TZ, requires_proof: 0, proof_type: 'any',
+    nag_interval_min: 20, max_nags: 3,
+    next_fire_at: wallToUtc(2026, 8, 15, 7, 0, TZ),
+  });
+  rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
+  rig.speakQueue.push('מתי?');
+  await withNow(now, () => runWebhook(rig, 'תעביר את הריצה לכל יום ב8'));
+
+  const rem = await db.getReminder(rig.env, id);
+  eq('the daily rule is intact', JSON.parse(rem?.schedule ?? '{}').type, 'daily');
+  check(
+    'and it asked rather than guessing',
+    rig.texts().some((t) => t.includes('מתי')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  rig.restore();
+}
+
 section('claiming a MOVE when it created something is still a lie');
 {
   // The second half of what he saw on 14.08: the bot said
