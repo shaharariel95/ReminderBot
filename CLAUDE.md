@@ -92,21 +92,22 @@ something else, silently retimes whatever was last asked about.
 
 ## Items
 
-A reminder can hold several errands (, migrations/011). Items
-hang off the REMINDER, and  clears the ticks each time it fires
+A reminder can hold several errands (`reminder_items`, migrations/011). Items
+hang off the REMINDER, and `db.resetItems` clears the ticks each time it fires
 — that line is what makes a daily three-errand reminder work on day two.
 
-Splitting is deliberately narrow (): commas, plus at
+Splitting is deliberately narrow (`effects.splitIntoItems`): commas, plus at
 least two parts starting with an infinitive ל. Over-splitting is the worse
 error — a checklist he did not ask for turns one task into three ticks he has
 to clear, whereas a title with commas in it is just what he typed.
 
- NEVER falls back to closing the whole task, and returns null on a tie. Marking the wrong errand is a claim that he did
+`complete_item` NEVER falls back to closing the whole task, and `matchItem`
+returns null on a tie. Marking the wrong errand is a claim that he did
 something he did not, so asking is the only honest move.
 
 Items are shown to the router only under OPEN instances, which is also the
-scope  matches against. Keep those two together or the model
-will name an item the code then refuses.
+scope `effects.openItemsFor` matches against. Keep those two together, or the
+model will name an item the code then refuses.
 
 ## Things that look like bugs and are not
 
