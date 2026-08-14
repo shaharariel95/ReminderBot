@@ -127,7 +127,7 @@ const PLACE_REMINDER = /(?:^|\s)(?:תשים|שים|תקבע|קבע|תוסיף|ה
  *  matches "התזכורת" and then trips the letter boundary. */
 const ABOUT_EXISTING = /ה(?:תזכורות|תזכורת)(?![א-ת])/;
 
-function asksForNewReminder(t: string): boolean {
+export function asksForNewReminder(t: string): boolean {
   if (ABOUT_EXISTING.test(t)) return false;
   return REQUEST_VERB.test(t) || PLACE_REMINDER.test(t);
 }

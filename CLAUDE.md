@@ -64,6 +64,14 @@ and the whole ladder carries a budget (`gemini.ts`), because an unbounded
 `fetch` that overruns the Worker's wall clock kills `ctx.waitUntil` **without
 throwing** — no catch runs, nothing ships, and the user gets nothing at all.
 
+A timeout then has to DEGRADE like everything else. 429/503/404 drop a tier,
+RECITATION and MAX_TOKENS retry; when the timeout was first added it threw, and
+one slow request ended the turn with the faster fallback model sitting unasked.
+`/errors` is what surfaced that — five straight aborts against `route/apply`.
+The budget must stay wide enough for the primary to burn its whole per-call
+allowance AND the fallback to answer afterwards, or the second tier inherits a
+scrap of time and is not worth calling.
+
 ## Observability
 
 Three separate readers, on purpose:
@@ -127,6 +135,11 @@ model will name an item the code then refuses.
 - **`quickparse.ts` bails a lot on purpose.** A partial parse is a confident
   wrong answer; falling through to the router costs one LLM call. Rule 2 at the
   top of that file is the whole design.
+- **There is ONE gate, `asksForNewReminder`, and two callers.** quickparse
+  uses it, and so does the router-failure capture in `respondToOwner`. They
+  had separate bare-noun regexes and both had to be fixed for the same bug:
+  after the first fix, a router timeout on "בוא נזיז את התזכורת..." still
+  answered "תפסתי #30" and filed his MOVE request as a new inbox item.
 - **The gate is grammar, not a verb list.** `asksForNewReminder` admits a
   request ("תזכיר לי", "שים לי תזכורת") and refuses a DEFINITE reference
   ("התזכורת" — *the* reminder, so it already exists). There was briefly a

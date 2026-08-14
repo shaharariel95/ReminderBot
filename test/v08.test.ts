@@ -368,6 +368,108 @@ section('a recurrence is never silently flattened into one fire');
   rig.restore();
 }
 
+section('a slow model drops a tier instead of killing the turn');
+{
+  // /errors on 15.08 00:00 showed five straight "The operation was aborted due
+  // to timeout" against route/apply, going back two hours. The timeout added in
+  // 0.8 bounded the call correctly and then threw — and nothing caught it, so
+  // one slow request ended the whole turn.
+  //
+  // Every OTHER transient condition already degrades: 429, 503 and 404 drop a
+  // tier, RECITATION and MAX_TOKENS retry. A timeout is the same kind of
+  // problem and was the only one treated as fatal. The fallback model — which
+  // is faster, and is there for exactly this — was never even asked.
+  const rig = createRig();
+  rig.env.GEMINI_MODEL = 'gemini-3.5-flash';
+  rig.env.GEMINI_MODEL_FALLBACK = 'gemini-3.5-flash-lite';
+  rig.env.GEMINI_TIMEOUT_MS = '150';
+  rig.env.GEMINI_BUDGET_MS = '2000';
+  rig.hangModels.add('gemini-3.5-flash');
+
+  rig.routerQueue.push({
+    actions: [{ action: 'create_reminder', title: 'לקנות בשר', schedule_type: 'once', once_at: '2026-08-15T10:00' }],
+  });
+  rig.speakQueue.push('קבעתי לך.');
+
+  const marker = Symbol('hung');
+  const outcome = await Promise.race([
+    withNow(wallToUtc(2026, 8, 14, 23, 59, TZ), () => runWebhook(rig, 'תזכיר לי לקנות בשר מחר ב10')).then(() => 'done'),
+    new Promise((r) => setTimeout(() => r(marker), 6000)),
+  ]);
+  eq('the turn finished', outcome, 'done');
+
+  check('the slow model was tried', rig.modelsCalled.includes('gemini-3.5-flash'));
+  check(
+    'and the fallback picked it up',
+    rig.modelsCalled.includes('gemini-3.5-flash-lite'),
+    `models called: ${rig.modelsCalled.join(', ')}`,
+  );
+  check(
+    'so he got his reminder, not an apology',
+    !rig.texts().some((t) => t.includes('נפל לי משהו')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  eq(
+    'and it was actually written',
+    Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n),
+    1,
+  );
+  rig.restore();
+}
+
+section('a failed turn does not capture a message about an existing reminder');
+{
+  // 14.08 23:59: the router timed out on "בוא נזיז את התזכורת של הבשר ל15:00"
+  // and the catch-block fallback answered "תפסתי #30." — capturing his MOVE
+  // request as a brand-new inbox item.
+  //
+  // Same defect as the one just fixed in quickparse, in its twin: the fallback
+  // decided "this looks like a reminder request" with a bare-noun regex, and
+  // "התזכורת" satisfied it. Two gates asking the same question had to be
+  // fixed twice; now they share one answer.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 14, 23, 59, TZ);
+  await db.addReminder(rig.env, {
+    chat_id: CHAT, title: 'ללכת לקנות בשר', notes: null,
+    schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
+    tz: TZ, requires_proof: 0, proof_type: 'any',
+    nag_interval_min: 20, max_nags: 3,
+    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+  });
+  const before = Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n);
+
+  // Queues empty: the router throws, exactly as a timeout does.
+  await withNow(now, () => runWebhook(rig, 'בוא נזיז את התזכורת של הבשר ל15:00'));
+
+  eq(
+    'nothing new was captured',
+    Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n),
+    before,
+  );
+  check(
+    'and it did not claim to have caught anything',
+    !rig.texts().some((t) => t.includes('תפסתי')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  check(
+    'it owned the failure instead',
+    rig.texts().some((t) => t.includes('נפל לי משהו')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+
+  // ...but a genuine request still survives a broken router. That fallback
+  // exists so a capture is never lost to an outage, and it must keep working.
+  rig.restore();
+  const rig2 = createRig();
+  await withNow(now, () => runWebhook(rig2, 'תזכיר לי לקנות פחמים'));
+  check(
+    'a real request is still caught when the router is down',
+    rig2.texts().some((t) => t.includes('תפסתי')),
+    `got: ${JSON.stringify(rig2.texts())}`,
+  );
+  rig2.restore();
+}
+
 section('claiming a MOVE when it created something is still a lie');
 {
   // The second half of what he saw on 14.08: the bot said

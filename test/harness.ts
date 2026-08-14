@@ -137,6 +137,12 @@ export interface Rig {
    * failing it.
    */
   geminiHang: boolean;
+  /**
+   * Models that hang rather than answer, by exact id. The per-model form of
+   * `geminiHang`: lets a test make the PRIMARY time out while the fallback
+   * still works, which is the shape a real slow minute takes.
+   */
+  hangModels: Set<string>;
   /** Models that should return 429, by exact id. */
   downModels: Set<string>;
   /** Every model id that was called, in order. */
@@ -203,6 +209,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     speakQueue: [],
     geminiDown: false,
     geminiHang: false,
+    hangModels: new Set<string>(),
     downModels: new Set<string>(),
     modelsCalled: [],
     get dbFailOn() {
@@ -258,7 +265,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       // Never settles on its own. Real `fetch` rejects with an AbortError when
       // the signal fires; a caller that passes no signal waits forever, which
       // is the bug this simulates.
-      if (rig.geminiHang) {
+      if (rig.geminiHang || rig.hangModels.has(model)) {
         return new Promise((_resolve, reject) => {
           const signal: AbortSignal | undefined = init?.signal;
           if (!signal) return; // no timeout wired up: hang, exactly like production did

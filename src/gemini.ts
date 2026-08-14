@@ -120,8 +120,27 @@ function buildBody(
  * timeout bounds one request; the budget bounds the retry ladder, which is the
  * half that actually ran away.
  */
-const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_BUDGET_MS = 22_000;
+const DEFAULT_TIMEOUT_MS = 12_000;
+/**
+ * Room for the primary to burn its whole per-call budget AND the fallback to
+ * answer properly afterwards. At 22s the second tier inherited whatever was
+ * left of a ten-second overrun, which was not enough to be worth calling.
+ */
+const DEFAULT_BUDGET_MS = 30_000;
+
+/**
+ * An abort, however the runtime chose to describe it.
+ *
+ * `AbortSignal.timeout` rejects with a DOMException named "TimeoutError" in
+ * Workers, and the test rig raises a plain Error — matching on the name alone
+ * would pass in production and quietly fail every test, which is the worst of
+ * both. The message check is the belt.
+ */
+function isTimeout(err: unknown): boolean {
+  const name = (err as { name?: string })?.name ?? '';
+  const message = (err as { message?: string })?.message ?? '';
+  return /Timeout|Abort/i.test(name) || /abort|timed? ?out/i.test(message);
+}
 
 function budgets(env: Env): { perCall: number; total: number } {
   const read = (v: string | undefined, fallback: number) => {
@@ -242,7 +261,27 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         break; // same handling as a 429, minus the wasted round trip
       }
 
-      const res = await callOnce(env, model, tuned, Math.min(perCall, left));
+      let res: Response;
+      try {
+        res = await callOnce(env, model, tuned, Math.min(perCall, left));
+      } catch (err) {
+        // A timeout is a transient condition, not a fatal one, and it was the
+        // only one treated as fatal. 429/503/404 drop a tier, RECITATION and
+        // MAX_TOKENS retry — a slow model got to end the whole turn instead.
+        // /errors showed five straight "aborted due to timeout" against
+        // route/apply on 14.08.2026, each one a message that simply failed,
+        // with the faster fallback model sitting right there unasked.
+        //
+        // Dropping a tier rather than retrying the same model: whatever just
+        // took the full per-call budget is not the one to ask again, and the
+        // fallback exists precisely for the minute the primary is struggling.
+        if (isTimeout(err)) {
+          lastDetail = `${model} timed out after ${Math.min(perCall, left)}ms`;
+          console.warn(`gemini: ${lastDetail}, dropping a tier`);
+          break;
+        }
+        throw err;
+      }
 
       if (TIER_DOWN.has(res.status)) {
         lastDetail = `${model} returned ${res.status}`;

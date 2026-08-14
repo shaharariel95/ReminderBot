@@ -5,7 +5,7 @@ import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
 import { validate } from './validate';
 import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER, nagDelayMinutes } from './persona';
-import { findFutureInstant, parseAnswerTime, quickParse } from './quickparse';
+import { asksForNewReminder, findFutureInstant, parseAnswerTime, quickParse } from './quickparse';
 import {
   answerCallback,
   getPhotoBase64,
@@ -330,7 +330,13 @@ async function respondToOwner(
     // never overwritten — losing a real write here would be the exact "the
     // bot claims something it didn't do" bug this whole pipeline exists to
     // prevent.
-    if (/תזכיר|תזכורת|תנדנד|remind/i.test(text)) {
+    // The SAME question quickparse asks, and for the same reason. This used
+    // to be its own bare-noun regex, so when the router timed out on "בוא נזיז
+    // את התזכורת של הבשר ל15:00" (14.08.2026) the fallback answered "תפסתי
+    // #30." — capturing a request to MOVE something as a brand-new inbox item.
+    // Two gates asking the same question had to be fixed twice; now there is
+    // one answer and one place to change it.
+    if (asksForNewReminder(text)) {
       const id = await db.addInboxItem(env, chatId, text.slice(0, 200), ctx.settings.tz);
       effects.push({ kind: 'reminder_captured', id, title: text.slice(0, 200) });
     }
