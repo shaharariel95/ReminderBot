@@ -65,6 +65,7 @@ ${INTENSITY[settings.intensity] ?? INTENSITY[2]}
 - בלי קללות, אלא אם הוא קילל קודם.
 - אל תסביר את הבדיחה ואל תתנצל על העוקץ.
 - שאלה אחת בהודעה, לא שלוש.
+- **אתה לא יודע למה הוא לא ענה, אז אל תנחש למה.** שתיקה זה לא נתון. הוא אולי נוהג, בפגישה, או כבר עומד בתור אצל הקצב. "המשימה עדיין פתוחה" זה נכון; "הימנעות קלאסית" זה ניחוש עליו. מותר לך לעקוץ את המשימה. אסור לך לאבחן אותו.
 
 ## התפקיד שלך בהודעה הזאת
 המערכת כבר ביצעה את הפעולה וכבר כתבה לך מה קרה, ב"מה שקרה עכשיו".
@@ -133,10 +134,34 @@ ${profileNotes.map((n) => `- ${n}`).join('\n')}
  * progressively smaller and more specific. Rising volume is what makes these
  * bots get muted; a shrinking ask is what makes them work.
  */
+/**
+ * Minutes to wait before the NEXT nag, indexed by how many have already gone.
+ *
+ * 13.08.2026 went 10:01, 10:22, 10:42, 11:04 — four interruptions inside one
+ * hour, all about one kilo of meat, every gap the same twenty minutes. A flat
+ * interval means the fourth ping arrives with exactly the force of the first
+ * and no more information, and a bot that pings four times an hour is one that
+ * gets muted, which costs every future reminder too.
+ *
+ * The ladder widens instead: half an hour, two hours, six hours, done. It is
+ * paired with NAG_LADDER below — each step gets both more time AND a smaller
+ * ask, so the escalation is in patience rather than in volume.
+ */
+export const NAG_BACKOFF_MIN = [30, 120, 360];
+
+/** How long to wait before nag number `sent + 1`. */
+export function nagDelayMinutes(sent: number): number {
+  return NAG_BACKOFF_MIN[sent] ?? NAG_BACKOFF_MIN[NAG_BACKOFF_MIN.length - 1];
+}
+
 export const NAG_LADDER: Record<number, string> = {
   0: 'תזכורת ראשונה. קליל. תזכיר לו מה הוא אמר שיעשה, עוקץ קטן, וסיים בפעולה קונקרטית.',
   1: 'הוא לא ענה. אל תעלה טון — תקטין את המשימה. תציע חצי ממנה, או את החלק הראשון בלבד. תן לו לראות שזה קטן ממה שהוא חושב.',
-  2: 'הוא מתעלם פעם שנייה. עכשיו תקטין את זה למשהו קטן בצורה כמעט מעליבה — חמש דקות, פריט אחד, שורה אחת. תגיד את זה בשתי הודעות קצרות, ותנקוב בשם דפוס ההימנעות שלו.',
+  // "ותנקוב בשם דפוס ההימנעות שלו" used to live at the end of this line, and
+  // on 13.08.2026 it produced "הימנעות קלאסית דרך שתיקה." after ninety minutes
+  // of silence. He might have been driving. The bot does not know why he went
+  // quiet and must not pretend to — see the writing rule above.
+  2: 'הוא מתעלם פעם שנייה. עכשיו תקטין את זה למשהו קטן בצורה כמעט מעליבה — חמש דקות, פריט אחד, שורה אחת. תגיד את זה בשתי הודעות קצרות, ותציין כמה זמן זה כבר פתוח — עובדה, לא פרשנות.',
   3: 'תזכורת אחרונה. תן לו מוצא מכובד: או שהוא עושה עכשיו את הדבר הזעיר, או שהוא אומר לך בפירוש שזה לא קורה היום. בלי דרמה, בלי הטפה. אתה רק רוצה תשובה.',
 };
 

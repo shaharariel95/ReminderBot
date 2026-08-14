@@ -4,8 +4,8 @@ import { handleSlash } from './slash';
 import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
 import { validate } from './validate';
-import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER } from './persona';
-import { findFutureInstant, quickParse } from './quickparse';
+import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER, nagDelayMinutes } from './persona';
+import { findFutureInstant, parseAnswerTime, quickParse } from './quickparse';
 import {
   answerCallback,
   getPhotoBase64,
@@ -29,7 +29,7 @@ import {
   wallString,
   wallToUtc,
 } from './time';
-import { renderBaseline } from './voice';
+import { TURN_FAILED, renderBaseline } from './voice';
 import { VERSION } from './version';
 import type { Effect, Env, Facts, Intent, Schedule } from './types';
 
@@ -103,12 +103,16 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     return;
   }
 
-  if (text.startsWith('/')) {
-    const reply = await handleSlash(env, chatId, text);
-    if (reply) {
-      await sendMessage(env, chatId, reply);
-      return;
-    }
+  // Called for EVERY message, not just ones starting with "/". Bare Hebrew
+  // words are commands too ("רשימה", "עזרה") — see slash.ALIASES — and the
+  // whole point of them is that they cost no model call, which only holds if
+  // they are answered before the router is reached. handleSlash returns null
+  // for anything it does not recognise, so ordinary messages fall through
+  // exactly as before.
+  const reply = await handleSlash(env, chatId, text);
+  if (reply) {
+    await sendMessage(env, chatId, reply);
+    return;
   }
 
   // Everything past here touches D1, Telegram and the model, and until this
@@ -126,6 +130,9 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
     await respondToOwner(env, chatId, msg, text, hasPhoto);
   } catch (err) {
     console.error('handleUpdate', err);
+    await db.recordError(env, chatId, 'handleUpdate', err, text).catch((e) =>
+      console.error('recordError', e),
+    );
     // Says only what is certainly true. Something may well have been written
     // before the throw, so this must neither confirm nor deny the work —
     // claiming either would be the exact failure the rest of the pipeline
@@ -198,9 +205,6 @@ async function greetStranger(env: Env, chatId: string, text: string): Promise<vo
 export const STRANGER_ASK = 'אני לא מכיר אותך. תכתוב לי שם ואעביר לאישור.';
 const STRANGER_WAIT = 'רשמתי. אם יאשרו אותך — תשמע ממני. עד אז אני שותק.';
 
-/** The last thing he hears when a turn falls over. Honest, and claims nothing. */
-const TURN_FAILED = 'נפל לי משהו באמצע ולא סיימתי את זה. תגיד שוב — ואם זה חוזר, /diag.';
-
 /**
  * One inbound message from the owner, from acknowledgment to reply.
  *
@@ -238,19 +242,51 @@ async function respondToOwner(
   let effects: Effect[] = [];
   let toneNote: string | undefined;
 
+  // The question the bot itself asked last turn, if it is still fresh. Read
+  // off the settings row that buildContext already loaded, so an outstanding
+  // question costs no extra query.
+  const awaiting = image ? null : db.readAwaiting(ctx.settings.awaiting);
+
   try {
+    // An answer to that question, applied WITHOUT a model call.
+    //
+    // On 13.08.2026 the bot asked "מתי לשים לך את זה?", he replied "15:00",
+    // and the router — which sees six turns of flat prose and has a rule about
+    // bare yes-words but none about bare times — classified it as chat. He got
+    // "נו?" and the reminder never moved. A bare hour carries no clue about
+    // what it answers; the only thing that knows is the bot that asked.
+    const answeredAt =
+      awaiting?.k === 'time' ? parseAnswerTime(text, Date.now(), ctx.settings.tz) : null;
+
     // Common reminder phrasings never touch the router — see quickparse.ts.
     const fast = image ? null : quickParse(text, Date.now(), ctx.settings.tz);
-    const intents = fast
-      ? [fast]
-      : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
+    const intents: Intent[] =
+      awaiting?.k === 'time' && answeredAt !== null
+        ? [
+            {
+              action: 'reschedule',
+              target_id: awaiting.r,
+              schedule_type: 'once',
+              once_at: wallString(answeredAt, ctx.settings.tz),
+            },
+          ]
+        : fast
+          ? [fast]
+          : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
     // Visible in `wrangler tail`. When the bot claims it did something it
     // didn't, this line is what tells you whether the router or the persona lied.
     console.log(`intent${fast ? ' (quickparse)' : ''}`, JSON.stringify(intents));
 
     const photoComplete = image ? intents.find((i) => i.action === 'complete') : undefined;
 
-    if (intents.some((i) => i.distress)) {
+    if (!intents.length) {
+      // route() hands back an empty list when the model's reply could not be
+      // parsed into anything. It used to synthesise `chat` here, which meant a
+      // broken router and a chatty message produced the identical "נו?" — and
+      // the one case where the bot genuinely has no idea what he wants is
+      // exactly the case where saying so is most useful.
+      effects = [{ kind: 'nothing', why: 'not_understood', userText: text }];
+    } else if (intents.some((i) => i.distress)) {
       effects = [{ kind: 'distress', text }];
       toneNote =
         'עקיפת מצוקה. תוריד את הדמות לגמרי. בלי עוקצנות, בלי משימות. תהיה בנאדם.';
@@ -270,6 +306,12 @@ async function respondToOwner(
     }
   } catch (err) {
     console.error('route/apply', err);
+    // Written down, not just logged. console.error survives only as long as a
+    // `wrangler tail` someone happened to be running, and Workers Logs is off —
+    // which is why two missing reminders in August 2026 are still unexplained.
+    await db.recordError(env, chatId, 'route/apply', err, text).catch((e) =>
+      console.error('recordError', e),
+    );
     // A capture must survive a broken router. Anything that looks like a
     // reminder request lands in the inbox rather than being lost to an error.
     // Effects already committed earlier in this turn (e.g. the first half of
@@ -280,9 +322,58 @@ async function respondToOwner(
     if (/תזכיר|תזכורת|תנדנד|remind/i.test(text)) {
       const id = await db.addInboxItem(env, chatId, text.slice(0, 200), ctx.settings.tz);
       effects.push({ kind: 'reminder_captured', id, title: text.slice(0, 200) });
-    } else if (effects.length === 0) {
-      effects = [{ kind: 'nothing', why: 'chat', userText: text }];
     }
+    // Appended unconditionally, including on top of effects that DID commit.
+    // This used to be an `else if` that only spoke when the turn produced
+    // nothing at all, so a turn where the first intent was written and the
+    // second one threw read exactly like a turn where everything worked. And
+    // when it did speak it said `why: 'chat'` — a bare "נו?", indistinguishable
+    // from being nagged. A failure the user cannot see is a failure he debugs
+    // by re-sending, which is how a half-applied turn becomes a duplicate.
+    effects.push({ kind: 'nothing', why: 'failed', userText: text });
+  }
+
+  // He MENTIONED something with a time in it. Offer a reminder for it.
+  //
+  // Only on a turn that produced nothing else — `chat` and nothing more. If the
+  // router found any real intent, or anything threw, this stays out of the way.
+  // Nothing is written either: it is a question with one tap on it, because
+  // rule 1 in quickparse.ts was learned by turning "אני הולך עוד 20 דקות" into
+  // a reminder titled "אני הולך", and a wrong guess must cost an ignorable
+  // question rather than a row he never asked for.
+  if (effects.length === 1 && effects[0].kind === 'nothing' && effects[0].why === 'chat') {
+    const offer = await offerAppointment(env, chatId, ctx, text).catch((e) => {
+      console.error('offerAppointment', e);
+      return null;
+    });
+    if (offer) effects = [offer];
+  }
+
+  // Remember the question this turn is about to ask — or forget the one it
+  // just answered. Written only when it actually changes, so an ordinary
+  // message costs no write at all.
+  //
+  // Clearing on ANY other turn matters as much as setting: the TTL is a
+  // backstop, not the rule. If he asked something new in between, the old
+  // "מתי?" is no longer what a bare hour would be answering.
+  const asking = effects.find(
+    (e): e is Extract<Effect, { kind: 'needs_time' }> => e.kind === 'needs_time',
+  );
+  const offered = effects.find(
+    (e): e is Extract<Effect, { kind: 'appointment_offer' }> => e.kind === 'appointment_offer',
+  );
+  if (asking) {
+    await db
+      .setAwaiting(env, chatId, { k: 'time', r: asking.id, at: Date.now() })
+      .catch((e) => console.error('setAwaiting', e));
+  } else if (offered) {
+    // The title and instant ride here rather than in callback_data, which has
+    // 64 bytes and no room for a title. The button just says yes.
+    await db
+      .setAwaiting(env, chatId, { k: 'offer', t: offered.title, w: offered.at, at: Date.now() })
+      .catch((e) => console.error('setAwaiting', e));
+  } else if (awaiting) {
+    await db.setAwaiting(env, chatId, null).catch((e) => console.error('setAwaiting', e));
   }
 
   await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history);
@@ -461,6 +552,47 @@ async function handleCallback(update: any, env: Env): Promise<void> {
         }
         break;
       }
+      // The two taps that can end a check-in loop. Both go through
+      // setGoalStatus, which is chat-scoped, so a guessed goal id cannot reach
+      // another chat's row.
+      // "כן" to a reminder offered for something he only mentioned. The title
+      // and instant come from the awaiting slot rather than from the payload —
+      // callback_data has 64 bytes and a Hebrew title does not fit.
+      case 'offer': {
+        const settings = await db.getSettings(env, chatId);
+        const pending = db.readAwaiting(settings.awaiting);
+        if (pending?.k === 'offer' && pending.w > Date.now()) {
+          const schedule: Schedule = { type: 'once', at: wallString(pending.w, settings.tz) };
+          const id = await db.addReminder(env, {
+            chat_id: chatId,
+            title: pending.t,
+            notes: null,
+            schedule: JSON.stringify(schedule),
+            tz: settings.tz,
+            requires_proof: 0,
+            proof_type: 'any',
+            nag_interval_min: 20,
+            max_nags: 3,
+            next_fire_at: pending.w,
+          });
+          // Consumed, so a second tap on the same message cannot write it twice.
+          await db.setAwaiting(env, chatId, null).catch(() => {});
+          effects.push({
+            kind: 'reminder_created', id, title: pending.t, at: pending.w,
+            schedule, requiresProof: false,
+          });
+        }
+        break;
+      }
+      case 'gdone':
+      case 'gdrop': {
+        const status = cb.t === 'gdone' ? 'done' : 'dropped';
+        const goal = (await db.listGoals(env, chatId)).find((g) => g.id === cb.goal);
+        if (goal && (await db.setGoalStatus(env, chatId, goal.id, status))) {
+          effects.push({ kind: 'goal_closed', id: goal.id, title: goal.title, status });
+        }
+        break;
+      }
       case 'plan': {
         const rem = await db.getReminder(env, cb.reminder);
         if (rem && rem.status === 'inbox') {
@@ -501,6 +633,60 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   }
 }
 
+
+/**
+ * Did he just mention something that wants a reminder?
+ *
+ * `findFutureInstant` already reads an instant out of arbitrary prose — it was
+ * written for the follow-up offer after a task that was ARRANGING something
+ * gets closed, and the job here is identical: he said a time out loud, and the
+ * bot noticed. "יש לי מחר ב-9 בבוקר אימון" resolves today with no new parsing.
+ *
+ * Three guards, all of them about not being annoying:
+ *  - the instant must be in the future (a past one is a story, not a plan)
+ *  - nothing already scheduled near it, or this offers him what he has
+ *  - a title must survive cleanTitle, or the offer says nothing useful
+ */
+async function offerAppointment(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  text: string,
+): Promise<Effect | null> {
+  const at = findFutureInstant(text, Date.now(), ctx.settings.tz);
+  if (at === null || at <= Date.now()) return null;
+
+  const nearby = await db.findNearbyReminders(env, chatId, at, FOLLOWUP_QUIET_WINDOW_MS);
+  if (nearby.length) return null;
+
+  const title = titleFromMention(text);
+  if (!title) return null;
+  return { kind: 'appointment_offer', title, at };
+}
+
+/** Anything within this of the mentioned time counts as "already handled". */
+const FOLLOWUP_QUIET_WINDOW_MS = 4 * 3_600_000;
+
+/**
+ * His own words, minus the time phrase and the sentence frame around it.
+ *
+ * Kept crude on purpose. The offer quotes this back with a button under it, so
+ * a clumsy title costs him one glance and a tap; the alternative — asking the
+ * model to extract a subject — costs a round trip on a message that produced
+ * nothing else, which is exactly the message least worth spending quota on.
+ */
+function titleFromMention(text: string): string | null {
+  const t = text
+    .replace(/(?:^|\s)(?:יש לי|יש לנו|קבעתי|קבענו|אני צריך|אני חייב|צריך)(?=\s)/g, ' ')
+    .replace(/(?:^|\s)ו?ב?(?:מחרתיים|מחר|היום|בבוקר|בערב|בצהריים|בלילה)(?=$|[\s.,!?])/g, ' ')
+    .replace(/(?:^|\s)ו?ב\s*-?\s*\d{1,2}(?::\d{2})?(?=$|[\s.,!?])/g, ' ')
+    .replace(/(?:^|\s)ו?ב?יום\s+(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // One word is usually the whole point ("אימון"); nothing left means the
+  // message was pure scheduling noise and there is nothing to offer about.
+  return t.length >= 2 ? t.slice(0, 120) : null;
+}
 
 /** Judge a submitted photo against the open instance it is meant to prove. */
 async function applyPhoto(
@@ -575,6 +761,12 @@ async function sendOutcome(
    */
   history?: { role: 'user' | 'bot'; text: string }[],
 ): Promise<boolean> {
+  // The reminder's own history, written here because this is the single point
+  // every path converges on — webhook, button tap and cron alike — and it runs
+  // after the writes have committed. Best-effort: a history row that fails must
+  // never cost him the message it was describing.
+  await db.recordEvents(env, chatId, effects).catch((e) => console.error('recordEvents', e));
+
   let facts: Facts | null = null;
   let baseline: string;
   try {
@@ -636,6 +828,7 @@ async function sendOutcome(
       }
     } catch (err) {
       console.error('speak', err);
+      await db.recordError(env, chatId, 'speak', err).catch(() => {});
     }
   }
 
@@ -646,6 +839,7 @@ async function sendOutcome(
     return sent.length > 0;
   } catch (err) {
     console.error('send', err);
+    await db.recordError(env, chatId, 'send', err).catch(() => {});
     return false;
   }
 }
@@ -737,6 +931,12 @@ async function announceDeploy(env: Env, chatId: string): Promise<void> {
 async function tick(env: Env): Promise<void> {
   const now = Date.now();
 
+  // Stamped before any work, so /diag can distinguish "the scheduler is dead"
+  // from "the scheduler ran and something inside it threw". Those look
+  // identical from the user's side — no message arrives either way — and they
+  // are completely different bugs.
+  await db.markTick(env, now).catch((e) => console.error('markTick', e));
+
   // The deploy ping is the owner's, not every user's — it is the bot
   // reporting on itself. Before the per-chat work, so a tick with nothing
   // else to do still delivers it.
@@ -755,7 +955,10 @@ async function tick(env: Env): Promise<void> {
       env, chatId, now,
       due.filter((r) => r.chat_id === chatId),
       nags.filter((i) => i.chat_id === chatId),
-    ).catch((err) => console.error(`tick ${chatId}`, err));
+    ).catch(async (err) => {
+      console.error(`tick ${chatId}`, err);
+      await db.recordError(env, chatId, 'tick', err).catch(() => {});
+    });
   }
 }
 
@@ -828,7 +1031,7 @@ async function tickChat(
   // own effect (and therefore its own row, its own instance and its own
   // buttons), because grouping is a presentation decision and must not blur
   // which task he actually closed.
-  const fired: Effect[] = [];
+  const fired: Extract<Effect, { kind: 'reminder_fired' }>[] = [];
   for (const r of due) {
     // Reschedule first: if the send throws, we still don't fire twice.
     let next: number | null = null;
@@ -842,7 +1045,13 @@ async function tickChat(
     // Read the run of past misses BEFORE opening this one, so the instance
     // being created now cannot count itself.
     const misses = await db.missStreak(env, r.id).catch(() => 0);
-    const instanceId = await db.createInstance(env, r, now);
+    // The first nag is a persona decision (see NAG_BACKOFF_MIN), not the
+    // reminder's stored interval — which was 20 minutes on every row ever
+    // created and produced four pings in one hour on 13.08.2026.
+    const instanceId = await db.createInstance(
+      env, r, now,
+      now + nagDelayMinutes(0) * 60_000,
+    );
     console.log(`fired reminder ${r.id} → instance ${instanceId}${misses ? ` (${misses} missed)` : ''}`);
     if (muted) continue;
     fired.push({
@@ -857,7 +1066,15 @@ async function tickChat(
   if (fired.length) {
     ctx = await buildContext(env, chatId);
     const delivered = await sendOutcome(env, chatId, ctx, fired, NAG_LADDER[0]);
-    if (!delivered) console.log(`DELIVERY FAILED for ${fired.length} fired reminder(s)`);
+    if (!delivered) {
+      console.log(`DELIVERY FAILED for ${fired.length} fired reminder(s)`);
+      // "Marked delivered, never received" is the bug this project was started
+      // for, and this was the only line that ever noticed it happening — into a
+      // log that is not enabled. Now it survives to /diag and /why.
+      await db
+        .recordDeliveryFailure(env, chatId, fired.map((f) => f.id), now)
+        .catch((e) => console.error('recordDeliveryFailure', e));
+    }
   }
 
   if (muted) return;
@@ -889,7 +1106,9 @@ async function tickChat(
     }
 
     const level = Math.min(3, inst.nag_count + 1);
-    await db.bumpNag(env, inst.id, now + interval * 60_000);
+    // Widening, not fixed. Each round buys more time AND asks for less (see
+    // NAG_LADDER), so the escalation lands as patience rather than as volume.
+    await db.bumpNag(env, inst.id, now + nagDelayMinutes(inst.nag_count + 1) * 60_000);
     ctx = await buildContext(env, chatId);
     await sendOutcome(env, chatId, ctx,
       [{ kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at, round: level }],
@@ -997,9 +1216,17 @@ async function maybeCheckIn(
     return;
   }
 
+  // The progress note is dropped once a run of check-ins has gone unanswered.
+  // "בפעם שעברה שלחת בלי הכנה והיא שמחה ממש" was replayed on the 11th, twice
+  // on the 12th, the 13th and the 14th — a memory repeated that far past its
+  // moment stops reading as "I remember you" and starts reading as a stuck
+  // tape. Passing null here also keeps it out of `facts.quotable`, so the model
+  // cannot reach for it either.
+  const stale = goal.checkin_count >= db.STALE_PROGRESS_AFTER;
   await sendOutcome(env, chatId, ctx,
     [{ kind: 'checkin_goal', id: goal.id, title: goal.title, why: goal.why,
-       lastProgress: goal.last_progress, lastProgressAt: goal.last_progress_at,
+       lastProgress: stale ? null : goal.last_progress,
+       lastProgressAt: stale ? null : goal.last_progress_at,
        lastCheckinAt: goal.last_checkin_at }],
     CHECKIN_GOAL, 'low');
 

@@ -794,8 +794,15 @@ async function main() {
         { action: 'reschedule', target_id: id },
         'תעביר את זה',
       );
-      eq('it asks for a time', result[0].kind, 'nothing');
-      check('with the no_time reason', result[0].kind === 'nothing' && result[0].why === 'no_time');
+      // `needs_time`, not `nothing: 'no_time'`. The distinction is the whole
+      // fix for 13.08.2026: this effect carries the reminder it is asking
+      // about, so the bare "15:00" that arrives a second later has something
+      // to attach itself to. `nothing` carried no id and the answer was lost.
+      eq('it asks for a time', result[0].kind, 'needs_time');
+      check(
+        'and names which reminder it is asking about',
+        result[0].kind === 'needs_time' && result[0].id === id,
+      );
     });
     eq('the reminder is untouched', rowById(rig, id).next_fire_at, base);
     rig.restore();

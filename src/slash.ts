@@ -4,8 +4,61 @@ import type { Env, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
 
+/**
+ * The same commands, in the language the bot actually speaks.
+ *
+ * Two forms on purpose, and the second is the one that matters:
+ *
+ * "/רשימה" works when typed but will never appear in Telegram's `/` menu —
+ * BotFather only accepts command names matching [a-z0-9_], so there is no way
+ * to register it for autocomplete. It is supported because people type it, not
+ * because it is discoverable.
+ *
+ * The bare word is the real fix. The friction was never the slash; it is
+ * switching keyboard layout to type "list" in the middle of a Hebrew
+ * conversation. "רשימה" on its own line costs no layout switch, no slash, and
+ * — because handleSlash runs before the router — no Gemini call. Until now a
+ * bare "רשימה" was routed by the model, which is a round trip and a quota unit
+ * to answer a question the database already knows.
+ *
+ * Kept to unambiguous single words. Anything that could plausibly begin a real
+ * sentence stays out: this map wins over the router, so a false positive here
+ * silently swallows a real request.
+ */
+const ALIASES: Record<string, string> = {
+  רשימה: '/list',
+  תזכורות: '/list',
+  היום: '/today',
+  מטרות: '/goals',
+  עזרה: '/help',
+  סטטיסטיקה: '/stats',
+  נתונים: '/stats',
+  אינבוקס: '/inbox',
+  פרופיל: '/profile',
+  בדיקה: '/diag',
+  תקלות: '/errors',
+  שגיאות: '/errors',
+  מחכים: '/pending',
+  שקט: '/chill',
+};
+
+/**
+ * The command a message is asking for, in canonical `/english` form.
+ *
+ * Note `.toLowerCase()` is a no-op on Hebrew, so the alias lookup is
+ * case-insensitive for free on the English side and unaffected on the Hebrew.
+ */
+function normalizeCommand(text: string): string {
+  const first = text.trim().split(/\s+/)[0].toLowerCase().split('@')[0];
+  if (first.startsWith('/')) return ALIASES[first.slice(1)] ?? first;
+  // A bare word is only a command when it is the WHOLE message. "רשימה" is a
+  // command; "רשימה של דברים לקנות" is a reminder he is asking for, and
+  // stealing it from the router would lose it entirely.
+  return text.trim().includes(' ') ? first : ALIASES[first] ?? first;
+}
+
 /** Commands only the owner may run. See the gate in handleSlash for why. */
-const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending']);
+const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending', '/errors']);
 
 /** Slash commands handled without burning an LLM call. */
 export async function handleSlash(
@@ -13,7 +66,7 @@ export async function handleSlash(
   chatId: string,
   text: string,
 ): Promise<string | null> {
-  const cmd = text.trim().split(/\s+/)[0].toLowerCase().split('@')[0];
+  const cmd = normalizeCommand(text);
 
   // Owner-only commands. Returning null (rather than a refusal) makes them
   // indistinguishable from commands that do not exist — a guest learns
@@ -128,8 +181,13 @@ export async function handleSlash(
         '/intensity 1|2|3 — כמה עוקצני אני',
         '/quiet [התחלה] [סוף] — שעות שקט, למשל /quiet 23 8',
         '/offlimits [טקסט] — נושאים שאסור לי לגעת בהם. בלי טקסט = מציג. "clear" = מנקה.',
-        '/diag — בדיקת תקינות (מודל, מפתח, חיבורים)',
+        '/diag — בדיקת תקינות (מודל, מפתח, חיבורים, קרון)',
+        '/errors — חמש התקלות האחרונות',
+        '/why [מספר] — כל מה שקרה לתזכורת אחת',
         '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
+        '',
+        'הכל עובד גם בעברית, עם או בלי לוכסן:',
+        'רשימה · היום · מטרות · עזרה · אינבוקס · תקלות',
         '',
         'כל השאר בשפה חופשית:',
         '"תזכיר לי כל יום ב-7 לרוץ" · "אני רוצה לפתוח תיק מסחר"',
@@ -159,18 +217,37 @@ export async function handleSlash(
           .rateWindowNow(env, primary)
           .catch(() => '?')}`,
       );
+      // One settings read for everything below, not one per block: /diag is
+      // the command you run when something is already wrong, and it should not
+      // be the command that costs the most queries.
+      const tz = await db
+        .getSettings(env, chatId)
+        .then((s) => s.tz)
+        .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
+
+      // The cron. This is the subsystem that actually failed in August 2026 —
+      // a reminder on the 13th and another on the 14th simply never fired —
+      // and it was the one thing /diag could say nothing whatsoever about. The
+      // last tick separates "the scheduler is dead" from "the scheduler ran
+      // and something inside it threw"; the two counts separate "it never came
+      // due" from "it came due and never reached him", which are the only two
+      // shapes a missing reminder can have.
+      const tick = await db.lastTick(env).catch(() => null);
+      const { from, to } = localDayBounds(Date.now(), tz);
+      const counts: Record<string, number> = await db
+        .eventCounts(env, chatId, from, to)
+        .catch(() => ({}));
+      lines.push(
+        `טיק אחרון: ${tick === null ? 'מעולם לא רץ!' : formatLocal(tick, tz)}`,
+        `צלצלו היום: ${counts['צלצלה'] ?? 0} · לא נמסרו: ${counts['לא נמסרה'] ?? 0} · ` +
+          `נדנודים: ${counts['נדנוד'] ?? 0} · נסגרו: ${counts['נסגרה'] ?? 0}`,
+      );
+
       // The count above says how often the model lied; these say what it said.
       // Without them the number is something to worry about rather than
       // something to fix — which is exactly what "3" meant on 10.08.2026.
       const rejected = await db.recentRejections(env, chatId, 3).catch(() => []);
       if (rejected.length) {
-        // One settings read for the whole block, not one per row: /diag is the
-        // command you run when something is already wrong, and it should not
-        // be the command that costs the most queries.
-        const tz = await db
-          .getSettings(env, chatId)
-          .then((s) => s.tz)
-          .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
         lines.push('', 'אחרונות שנפסלו:');
         for (const r of rejected) {
           lines.push(
@@ -203,6 +280,85 @@ export async function handleSlash(
         lines.push(`d1: ${String(err).slice(0, 300)}`);
       }
       return lines.join('\n');
+    }
+
+    /**
+     * The last few things that blew up.
+     *
+     * Owner-only, alongside /diag: it prints internals and other people's
+     * message text is never in it, but the stage tags and error strings are
+     * the bot's own guts.
+     *
+     * This exists because "something went wrong" was, until now, the entire
+     * available information. Every catch site wrote to console.error and
+     * nowhere else, Workers Logs is off, and so the honest answer to "why
+     * didn't my reminder arrive" was that nobody could know. It is also where
+     * the `נפל לי משהו באמצע` message points him.
+     */
+    case '/errors': {
+      const rows = await db.recentErrors(env, chatId, 5).catch(() => []);
+      if (!rows.length) return 'אין תקלות רשומות. זה או טוב או חדש.';
+      const tz = await db
+        .getSettings(env, chatId)
+        .then((s) => s.tz)
+        .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
+      return [
+        'תקלות אחרונות:',
+        ...rows.flatMap((r) => {
+          const line = `· ${formatLocal(r.at, tz)} — ${r.stage}`;
+          const detail = `  ${r.message.replace(/\s+/g, ' ').slice(0, 160)}`;
+          // What he had sent when it broke. A report that reads "what he
+          // asked" then "what failed" is diagnosable; a bare message is not.
+          return r.user_text ? [line, `  ← "${r.user_text.replace(/\s+/g, ' ').slice(0, 80)}"`, detail] : [line, detail];
+        }),
+      ].join('\n');
+    }
+
+    /**
+     * Everything that ever happened to one reminder.
+     *
+     * NOT owner-only: it answers a question about his own row, and the chat
+     * check below is what makes that safe — db.getReminder looks up by primary
+     * key alone, so without it a guessed id would read another chat's history.
+     *
+     * This is the command that would have settled "why did #18 never fire" in
+     * ten seconds instead of by re-reading a chat export and inferring.
+     */
+    case '/why': {
+      const arg = text.trim().split(/\s+/)[1] ?? '';
+      const id = Number(arg.replace(/^#/, ''));
+      if (!Number.isInteger(id) || id <= 0) return 'איזו תזכורת? /why [מספר] — המספרים ב-/list.';
+
+      const rem = await db.getReminder(env, id);
+      if (!rem || rem.chat_id !== chatId) return `אין לי תזכורת #${id}.`;
+
+      const tz = rem.tz || env.DEFAULT_TZ || 'Asia/Jerusalem';
+      let sched = rem.schedule;
+      try {
+        sched = describeSchedule(JSON.parse(rem.schedule) as Schedule);
+      } catch {
+        /* raw */
+      }
+
+      const events = await db.eventsFor(env, id).catch(() => []);
+      const head = [
+        `#${rem.id} ${rem.title}`,
+        `${sched} · ${rem.status}${
+          rem.next_fire_at ? ` · הבא: ${formatLocal(rem.next_fire_at, tz)}` : ' · לא מתוזמן'
+        }`,
+      ];
+      if (!events.length) {
+        // Distinguished from "no such reminder" on purpose. An empty history
+        // on a row that exists is itself the finding — it means nothing ever
+        // happened to it, which is exactly what a reminder that never fired
+        // looks like.
+        return [...head, '', 'אין היסטוריה. כלומר: מעולם לא קרה לזה כלום.'].join('\n');
+      }
+      return [
+        ...head,
+        '',
+        ...events.map((e) => `· ${formatLocal(e.at, tz)} — ${e.kind}`),
+      ].join('\n');
     }
 
     case '/list': {
@@ -386,6 +542,17 @@ export async function handleSlash(
       return n === 3 ? 'קיבלתי. אל תתלונן אחר כך.' : 'קיבלתי.';
     }
     default:
+      // A slash the bot does not know used to fall straight through to the
+      // router as ordinary chat: one Gemini call, one quota unit, and almost
+      // certainly "נו?" back — which is how a typo'd command became
+      // indistinguishable from being nagged.
+      //
+      // Only for the owner. A guest still gets null, because the OWNER_ONLY
+      // gate above returns null too, and a reply here would turn "does this
+      // command exist" into a question anyone could ask by trying it.
+      if (cmd.startsWith('/') && chatId === env.OWNER_CHAT_ID) {
+        return `אין פקודה כזאת. /help לרשימה.`;
+      }
       return null;
   }
 }

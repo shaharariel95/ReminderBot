@@ -1,4 +1,5 @@
 import type { Env, Goal, Instance, Reminder, Settings, Stats } from './types';
+import { localDateKey } from './time';
 
 const DAY = 86_400_000;
 
@@ -15,6 +16,7 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
       checkin_per_day: row.checkin_per_day ?? 2,
       quiet_start_hour: row.quiet_start_hour ?? 23,
       quiet_end_hour: row.quiet_end_hour ?? 8,
+      awaiting: row.awaiting ?? null,
       next_checkin_at: row.next_checkin_at ?? null,
       // A database that hasn't run migrations/003 reads these as undefined.
       // `?? null` means "switched off" there, which is the safe degradation:
@@ -36,6 +38,7 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
     quiet_start_hour: 23,
     quiet_end_hour: 8,
     next_checkin_at: null,
+    awaiting: null,
     brief_hour: 8,
     closeout_hour: 21,
     last_brief_on: null,
@@ -121,15 +124,48 @@ export async function listGoals(env: Env, chatId: string): Promise<Goal[]> {
 }
 
 /** The active goal he has heard about least recently — the check-in candidate. */
-export async function stalestGoal(env: Env, chatId: string): Promise<Goal | null> {
+/**
+ * The goal most worth raising unprompted — or null when the honest answer is
+ * "leave him alone about it".
+ *
+ * `checkin_count` is a run of UNANSWERED check-ins (recordGoalProgress resets
+ * it), and the CASE below turns that run into patience. Without it, a chat with
+ * exactly one active goal gets that goal returned on every single check-in
+ * forever: "להגיד לאישתי משהו יפה" was raised five times across four days in
+ * August 2026, each time quoting the same stale progress note, and nothing
+ * anywhere noticed that nobody had ever replied.
+ *
+ * Done in SQL rather than filtered afterwards for the same reason the due
+ * queries are: a goal in cooldown must not occupy the one row this returns.
+ */
+export async function stalestGoal(
+  env: Env,
+  chatId: string,
+  now: number = Date.now(),
+): Promise<Goal | null> {
   return env.DB.prepare(
     `SELECT * FROM goals WHERE chat_id = ? AND status = 'active'
+       AND (last_checkin_at IS NULL OR ? - last_checkin_at >= CASE
+              WHEN checkin_count <= 0 THEN 0
+              WHEN checkin_count = 1 THEN 43200000
+              WHEN checkin_count = 2 THEN 86400000
+              WHEN checkin_count = 3 THEN 172800000
+              ELSE 345600000 END)
       ORDER BY COALESCE(last_checkin_at, 0), COALESCE(last_progress_at, 0), id
       LIMIT 1`,
   )
-    .bind(chatId)
+    .bind(chatId, now)
     .first<Goal>();
 }
+
+/**
+ * After this many unanswered check-ins, stop quoting the last progress note.
+ *
+ * "בפעם שעברה שלחת בלי הכנה והיא שמחה ממש" was replayed verbatim on the 11th,
+ * the 12th, twice, the 13th and the 14th. Repeating a memory that far past its
+ * moment stops reading as "I remember you" and starts reading as a stuck tape.
+ */
+export const STALE_PROGRESS_AFTER = 3;
 
 export async function markGoalCheckin(env: Env, id: number): Promise<void> {
   await env.DB.prepare(
@@ -140,7 +176,13 @@ export async function markGoalCheckin(env: Env, id: number): Promise<void> {
 }
 
 export async function recordGoalProgress(env: Env, id: number, note: string): Promise<void> {
-  await env.DB.prepare('UPDATE goals SET last_progress = ?, last_progress_at = ? WHERE id = ?')
+  // checkin_count is reset here, and that reset is what makes it mean "how many
+  // times running have I asked without getting an answer" rather than "how many
+  // times have I ever asked". stalestGoal's cooldown is built on that reading:
+  // the moment he engages, the bot's patience is restored in full.
+  await env.DB.prepare(
+    'UPDATE goals SET last_progress = ?, last_progress_at = ?, checkin_count = 0 WHERE id = ?',
+  )
     .bind(note.slice(0, 500), Date.now(), id)
     .run();
 }
@@ -420,12 +462,19 @@ export async function createInstance(
   env: Env,
   r: Reminder,
   firedAt: number,
+  /**
+   * When the first nag is due. Passed in rather than derived from
+   * `r.nag_interval_min` because how hard to push is a persona decision, not a
+   * storage one — see persona.nagDelayMinutes. The column stays as the
+   * per-reminder override for anyone who sets it deliberately.
+   */
+  nextNagAt: number = firedAt + r.nag_interval_min * 60_000,
 ): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO instances (reminder_id, chat_id, title, fired_at, next_nag_at, nag_count, status)
      VALUES (?, ?, ?, ?, ?, 0, 'open')`,
   )
-    .bind(r.id, r.chat_id, r.title, firedAt, firedAt + r.nag_interval_min * 60_000)
+    .bind(r.id, r.chat_id, r.title, firedAt, nextNagAt)
     .run();
   return Number(res.meta.last_row_id);
 }
@@ -758,20 +807,30 @@ export async function scheduleInboxItem(
 
 // -------------------------------------------------------------------- usage
 
-const utcDay = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+/**
+ * The day a call is counted against, in HIS calendar.
+ *
+ * This was `toISOString().slice(0, 10)` — a UTC date — while every other date
+ * in the bot is Asia/Jerusalem. "שימוש היום" in /diag therefore rolled over at
+ * 03:00 local, so the numbers he read at midnight were for a day that had
+ * already ended and the daily soft limit guarded the wrong window.
+ *
+ * Rows written under the old key simply age out; nothing needs migrating.
+ */
+const localDay = (env: Env, ts: number) => localDateKey(ts, env.DEFAULT_TZ ?? 'Asia/Jerusalem');
 
 export async function recordUsage(env: Env, model: string): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO usage (day, model, calls) VALUES (?, ?, 1)
      ON CONFLICT(day, model) DO UPDATE SET calls = calls + 1`,
   )
-    .bind(utcDay(Date.now()), model)
+    .bind(localDay(env, Date.now()), model)
     .run();
 }
 
 export async function usageToday(env: Env, model: string): Promise<number> {
   const row = await env.DB.prepare('SELECT calls FROM usage WHERE day = ? AND model = ?')
-    .bind(utcDay(Date.now()), model)
+    .bind(localDay(env, Date.now()), model)
     .first<{ calls: number }>();
   return row?.calls ?? 0;
 }
@@ -1029,4 +1088,328 @@ export async function recentRejections(
     .bind(chatId, limit)
     .all<Rejection>();
   return res.results ?? [];
+}
+
+// ------------------------------------------------------- events and errors
+
+/**
+ * How many rows each of the two logs keeps, per chat.
+ *
+ * Pruned on write for the reason migration 006 gives about `rejections`: the
+ * day a log fills fastest is the day the bot is already misbehaving, and that
+ * is the worst possible moment for a cron job to be the only thing standing
+ * between a table and unbounded growth.
+ */
+export const EVENT_KEEP = 400;
+export const ERROR_KEEP = 30;
+
+export interface Event {
+  at: number;
+  kind: string;
+  detail: string | null;
+  reminder_id: number | null;
+  instance_id: number | null;
+}
+
+export interface BotError {
+  at: number;
+  stage: string;
+  message: string;
+  user_text: string | null;
+}
+
+/**
+ * Which effects earn a row in a reminder's history, and what to call it there.
+ *
+ * Deliberately NOT every effect kind. `listed_reminders` is the bot answering a
+ * question, not something that happened to a reminder, and a history padded
+ * with reads is a history nobody scrolls. The test for inclusion is whether the
+ * line would help answer "why did this not fire" three days later.
+ */
+const EVENT_OF: Record<string, string> = {
+  reminder_created: 'נקבעה',
+  reminder_captured: 'נתפסה בלי שעה',
+  reminder_scheduled: 'קיבלה שעה',
+  reminder_retimed: 'הוזזה',
+  reminder_renamed: 'שונה השם',
+  reminder_deleted: 'בוטלה',
+  reminder_annotated: 'נוספה הערה',
+  // 'came due', not 'was sent'. A fired reminder whose send then failed must
+  // not leave a row claiming it reached him — that is the project's whole rule,
+  // and the delivery failure is recorded separately right beside it.
+  reminder_fired: 'צלצלה',
+  nagged: 'נדנוד',
+  instance_done: 'נסגרה',
+  instance_skipped: 'דילג',
+  instance_snoozed: 'נדחתה',
+  instance_started: 'בדרך',
+  gave_up: 'ויתרתי',
+  photo_accepted: 'תמונה התקבלה',
+};
+
+/**
+ * Effects whose `id` is an INSTANCE id, not a reminder id.
+ *
+ * This distinction is the whole correctness of /why. `reminder_fired` carries
+ * the reminder in `id` and the instance in `instanceId`; `instance_done`
+ * carries the instance in `id` and no reminder at all. Storing one as the other
+ * makes /why silently empty, which is the one failure a debugging command must
+ * not have — it would look exactly like "nothing ever happened to this".
+ */
+const ID_IS_INSTANCE = new Set([
+  'instance_done', 'instance_skipped', 'instance_snoozed', 'instance_started',
+]);
+/** Effects that name only an instance, via `instanceId`. */
+const INSTANCE_ONLY = new Set(['nagged', 'gave_up', 'photo_accepted']);
+
+function numOrNull(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Write the history rows for one turn's effects.
+ *
+ * Called from sendOutcome, the single point EVERY path converges on — webhook,
+ * button tap and cron alike — and which runs after the writes have committed.
+ * Recording at each write site instead would be five call sites that can drift,
+ * and would still miss the button path entirely.
+ *
+ * Best-effort by contract: the caller must never let a logging failure become a
+ * failure to answer him. A history with a hole in it is a bad afternoon; a
+ * reminder that did not send because its history row failed is the exact bug
+ * this project exists to prevent.
+ */
+export async function recordEvents(
+  env: Env,
+  chatId: string,
+  effects: { kind: string; [k: string]: unknown }[],
+  at: number = Date.now(),
+): Promise<void> {
+  const rows = effects.filter((e) => EVENT_OF[e.kind]);
+  if (!rows.length) return;
+
+  for (const e of rows) {
+    let reminderId: number | null = null;
+    let instanceId: number | null = null;
+    if (ID_IS_INSTANCE.has(e.kind)) {
+      instanceId = numOrNull(e.id);
+    } else if (INSTANCE_ONLY.has(e.kind)) {
+      instanceId = numOrNull(e.instanceId);
+    } else {
+      reminderId = numOrNull(e.id);
+      instanceId = numOrNull(e.instanceId);
+    }
+    // An instance-only event still belongs to a reminder's story, and /why
+    // reads by reminder. One extra read here is what keeps "נסגרה" from
+    // vanishing out of the history of the very reminder it closed.
+    if (reminderId === null && instanceId !== null) {
+      reminderId = (await getInstance(env, instanceId))?.reminder_id ?? null;
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO events (chat_id, reminder_id, instance_id, at, kind, detail)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        chatId,
+        reminderId,
+        instanceId,
+        at,
+        EVENT_OF[e.kind],
+        typeof e.title === 'string' ? e.title.slice(0, 120) : null,
+      )
+      .run();
+  }
+
+  await env.DB.prepare(
+    `DELETE FROM events WHERE chat_id = ? AND id NOT IN (
+       SELECT id FROM events WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+     )`,
+  )
+    .bind(chatId, chatId, EVENT_KEEP)
+    .run();
+}
+
+/**
+ * A fired reminder that never reached him.
+ *
+ * No effect produces this — it is the absence of a successful send — so it is
+ * recorded by hand. It is also the original bug of this whole project ("marked
+ * delivered, never received"), and until now the only trace it left anywhere
+ * was a console.log into a log that is not enabled.
+ */
+export async function recordDeliveryFailure(
+  env: Env,
+  chatId: string,
+  reminderIds: (number | null | undefined)[],
+  at: number = Date.now(),
+): Promise<void> {
+  for (const id of reminderIds) {
+    await env.DB.prepare(
+      `INSERT INTO events (chat_id, reminder_id, instance_id, at, kind, detail)
+       VALUES (?, ?, NULL, ?, 'לא נמסרה', NULL)`,
+    )
+      .bind(chatId, numOrNull(id), at)
+      .run();
+  }
+}
+
+/** Everything that ever happened to one reminder, oldest first — /why reads this. */
+export async function eventsFor(env: Env, reminderId: number): Promise<Event[]> {
+  const res = await env.DB.prepare(
+    `SELECT at, kind, detail, reminder_id, instance_id FROM events
+      WHERE reminder_id = ? ORDER BY id LIMIT 40`,
+  )
+    .bind(reminderId)
+    .all<Event>();
+  return res.results ?? [];
+}
+
+/** How many of each kind happened in a window — /diag's cron block reads this. */
+export async function eventCounts(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<Record<string, number>> {
+  const res = await env.DB.prepare(
+    'SELECT kind, COUNT(*) AS n FROM events WHERE chat_id = ? AND at >= ? AND at < ? GROUP BY kind',
+  )
+    .bind(chatId, from, to)
+    .all<{ kind: string; n: number }>();
+  const out: Record<string, number> = {};
+  for (const r of res.results ?? []) out[r.kind] = r.n;
+  return out;
+}
+
+/**
+ * Record that a throw happened, and where.
+ *
+ * `stage` is the catch site as a short tag. Which stage failed is the first
+ * question asked of any failure, and before this table nothing could answer it:
+ * the only record was a console.error into a log nobody was tailing, so by the
+ * time anyone looked the answer was gone.
+ */
+export async function recordError(
+  env: Env,
+  chatId: string,
+  stage: string,
+  err: unknown,
+  userText?: string,
+): Promise<void> {
+  await env.DB.prepare(
+    'INSERT INTO errors (chat_id, at, stage, message, user_text) VALUES (?, ?, ?, ?, ?)',
+  )
+    .bind(
+      chatId,
+      Date.now(),
+      stage.slice(0, 40),
+      String(err instanceof Error ? err.message : err).slice(0, 500),
+      userText ? userText.slice(0, 200) : null,
+    )
+    .run();
+  await env.DB.prepare(
+    `DELETE FROM errors WHERE chat_id = ? AND id NOT IN (
+       SELECT id FROM errors WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+     )`,
+  )
+    .bind(chatId, chatId, ERROR_KEEP)
+    .run();
+}
+
+/** The most recent failures, newest first. */
+export async function recentErrors(env: Env, chatId: string, limit = 5): Promise<BotError[]> {
+  const res = await env.DB.prepare(
+    'SELECT at, stage, message, user_text FROM errors WHERE chat_id = ? ORDER BY id DESC LIMIT ?',
+  )
+    .bind(chatId, limit)
+    .all<BotError>();
+  return res.results ?? [];
+}
+
+/** When the cron last ran, as epoch ms, or null if it never has. */
+export async function lastTick(env: Env): Promise<number | null> {
+  const row = await env.DB.prepare("SELECT value FROM meta WHERE key = 'last_tick'").first<{
+    value: string;
+  }>();
+  const n = Number(row?.value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Stamp that the cron ran.
+ *
+ * Written at the START of a tick, not the end. The question /diag has to answer
+ * is "is the scheduler alive at all", and a tick that began and then died is a
+ * completely different diagnosis from one that never began — recording only
+ * ticks that finished would report both as the same silence.
+ */
+export async function markTick(env: Env, at: number = Date.now()): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO meta (key, value) VALUES ('last_tick', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  )
+    .bind(String(at))
+    .run();
+}
+
+// ------------------------------------------------------- the open question
+
+/**
+ * How long a question the bot asked stays answerable.
+ *
+ * Long enough to walk away from the phone and come back; short enough that a
+ * bare "15:00" typed hours later, about something else entirely, is not
+ * silently applied to whatever was last asked about. That second failure is
+ * worse than the first: an unanswered question costs one more exchange, a
+ * mis-applied answer moves a reminder he never touched.
+ */
+export const AWAITING_TTL_MS = 30 * 60_000;
+
+/**
+ * The one question outstanding for a chat, if it is still fresh.
+ *
+ * Keys are one letter because this is JSON in a column read on every message.
+ *   time  — "מתי?" was asked about reminder `r`.
+ *   offer — "לשים לך תזכורת?" was asked about a thing he MENTIONED: title `t`
+ *           at instant `w`. Nothing is written until he taps, which is the
+ *           whole point — see the appointment_offer effect.
+ */
+export type Awaiting =
+  | { k: 'time'; r: number; at: number }
+  | { k: 'offer'; t: string; w: number; at: number };
+
+export async function setAwaiting(
+  env: Env,
+  chatId: string,
+  awaiting: Awaiting | null,
+): Promise<void> {
+  await env.DB.prepare('UPDATE settings SET awaiting = ? WHERE chat_id = ?')
+    .bind(awaiting ? JSON.stringify(awaiting) : null, chatId)
+    .run();
+}
+
+/**
+ * The outstanding question, or null.
+ *
+ * Expiry is enforced on READ rather than by a sweep, so a slot that goes stale
+ * while nothing is happening simply stops existing — there is no window in
+ * which a cron job has not got round to clearing it yet.
+ */
+export function readAwaiting(raw: string | null, now: number = Date.now()): Awaiting | null {
+  if (!raw) return null;
+  try {
+    const a = JSON.parse(raw) as Awaiting;
+    if (!a || !Number.isFinite(a.at) || now - a.at > AWAITING_TTL_MS) return null;
+    if (a.k === 'time') return Number.isInteger(a.r) ? a : null;
+    if (a.k === 'offer') {
+      return typeof a.t === 'string' && a.t.length > 0 && Number.isFinite(a.w) ? a : null;
+    }
+    return null;
+  } catch {
+    // A row written by a future version, or corrupted. Forgetting it is always
+    // safe; acting on half of it is not.
+    return null;
+  }
 }

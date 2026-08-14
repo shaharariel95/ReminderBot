@@ -22,7 +22,17 @@ export type Callback =
    *  something got closed. Carries only the instance: the appointment is
    *  re-derived from the same title by the same function that offered it, so
    *  the label and the write cannot disagree. */
-  | { t: 'followup'; instance: number };
+  | { t: 'followup'; instance: number }
+  /** From an unprompted goal check-in: close it, or stop being asked at all.
+   *  It had no buttons, so the only way to end the loop was to keep ignoring
+   *  it — which is exactly what produced five identical messages in four days. */
+  | { t: 'gdone'; goal: number }
+  | { t: 'gdrop'; goal: number }
+  /** Accept the reminder offered for something he only MENTIONED. Carries no
+   *  payload at all: callback_data has 64 bytes and a title does not fit, so
+   *  the title and instant live in the chat's `awaiting` slot and the tap just
+   *  says yes. One outstanding offer per chat, which is all there can be. */
+  | { t: 'offer' };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
@@ -44,6 +54,12 @@ export function encode(c: Callback): string {
       return `m:${c.instance}`;
     case 'followup':
       return `f:${c.instance}`;
+    case 'gdone':
+      return `gd:${c.goal}`;
+    case 'gdrop':
+      return `gx:${c.goal}`;
+    case 'offer':
+      return 'o';
   }
 }
 
@@ -73,6 +89,8 @@ export function decode(s: string): Callback | null {
       return parts.length === 3 && isNat(parts[1]) && SLOTS.includes(parts[2] as PlanSlot)
         ? { t: 'plan', reminder: +parts[1], slot: parts[2] as PlanSlot }
         : null;
+    case 'o':
+      return parts.length === 1 ? { t: 'offer' } : null;
     default:
       return null;
   }
@@ -169,6 +187,15 @@ export function buttonsFor(
     return [[{ text: `כן, ${hhmm(at, tz)}`, data: { t: 'followup', instance } }]];
   }
 
+  // Same shape as followup_suggested above, and for the same reason: an offer
+  // with no way to accept it is just the bot talking to itself.
+  const offer = effects.find((e) => e.kind === 'appointment_offer');
+  if (offer) {
+    const at = Number(offer.at);
+    if (!Number.isFinite(at)) return undefined;
+    return [[{ text: `כן, ${hhmm(at, tz)}`, data: { t: 'offer' } }]];
+  }
+
   const created = effects.find((e) => e.kind === 'reminder_created' && e.altHour !== undefined);
   if (created) {
     const reminder = positiveId(created.id);
@@ -201,6 +228,56 @@ export function buttonsFor(
       return [[{ text: `מחר · ${shortLabel(m?.title)}`, data: { t: 'tomorrow', instance } }] as Button[]];
     });
     return rows.length ? rows : undefined;
+  }
+
+  // "איזו מהן? #22 "…" · #24 "…"" — a question that asked him to type an
+  // instance id back. Every question this bot asks except reminder_captured
+  // was a dead end like this one, which is how "15:00" ended up answered with
+  // "נו?" on 13.08.2026: there was no affordance, so the answer had to survive
+  // a round trip through the router, and it did not.
+  //
+  // Only the actions a single tap can actually FINISH are given buttons.
+  // on_my_way has no callback of its own, and needs_reminder_choice needs a
+  // time or a title after the choice — those are answered by the awaiting slot
+  // (see db.setAwaiting) rather than by a button that would settle nothing.
+  // An unprompted check-in about a goal, with a way to end it.
+  //
+  // This had no keyboard at all, and the consequence is the loudest thing in
+  // the 0.7 transcript: "להגיד לאישתי משהו יפה" was raised five times across
+  // four days, and the only way to stop it was to keep not answering — which
+  // is precisely the input that made it keep asking.
+  const checkin = effects.find((e) => e.kind === 'checkin_goal');
+  if (checkin) {
+    const goal = positiveId(checkin.id);
+    if (goal !== null) {
+      return [
+        [
+          { text: 'עשיתי', data: { t: 'gdone', goal } },
+          { text: 'תוריד את זה', data: { t: 'gdrop', goal } },
+        ],
+      ];
+    }
+  }
+
+  const choice = effects.find((e) => e.kind === 'needs_task_choice');
+  if (choice) {
+    const open = Array.isArray(choice.open) ? choice.open : [];
+    const rows = open.flatMap((i: { id?: unknown; title?: unknown }) => {
+      const instance = positiveId(i?.id);
+      if (instance === null) return [];
+      if (choice.action === 'complete') {
+        return [[{ text: `✓ ${shortLabel(i?.title)}`, data: { t: 'done', instance } }] as Button[]];
+      }
+      if (choice.action === 'snooze') {
+        return [
+          [
+            { text: `${shortLabel(i?.title)} · 10 דק׳`, data: { t: 'snooze', instance, minutes: 10 } },
+          ] as Button[],
+        ];
+      }
+      return [];
+    });
+    if (rows.length) return rows;
   }
 
   const captured = effects.find((e) => e.kind === 'reminder_captured');

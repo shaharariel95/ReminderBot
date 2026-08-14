@@ -101,7 +101,12 @@ CREATE TABLE settings (
   brief_hour       INTEGER DEFAULT 8,
   closeout_hour    INTEGER DEFAULT 21,
   last_brief_on    TEXT,
-  last_closeout_on TEXT
+  last_closeout_on TEXT,
+  -- The question the bot is waiting on an answer to — see migrations/010.
+  -- JSON, and it carries its own timestamp because the slot must expire: a
+  -- question left open forever means a bare "15:00" typed two hours later,
+  -- about something else, silently retimes whatever was last asked about.
+  awaiting         TEXT
 );
 
 -- One row per minute per model. The free tier limits requests per MINUTE, not
@@ -151,3 +156,33 @@ CREATE TABLE rejections (
   effects TEXT    NOT NULL
 );
 CREATE INDEX idx_rejections_chat ON rejections(chat_id, id DESC);
+
+-- The life story of a reminder — see migrations/009. Answers "what happened to
+-- #18" (/why) and, counted over a day, "did the cron run, and did anything
+-- fail to reach him" (/diag). Two reminders went missing in August 2026 and
+-- nothing anywhere had recorded enough to say why.
+CREATE TABLE events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id     TEXT    NOT NULL,
+  reminder_id INTEGER,
+  instance_id INTEGER,
+  at          INTEGER NOT NULL,
+  kind        TEXT    NOT NULL,
+  detail      TEXT
+);
+CREATE INDEX idx_events_reminder ON events(reminder_id, id DESC);
+CREATE INDEX idx_events_chat ON events(chat_id, id DESC);
+
+-- Where a throw went — see migrations/009. Deliberately separate from
+-- `events`: those are things the bot meant to do, these are things that
+-- happened to it, and the day errors arrive fastest must not be the day the
+-- reminder history gets pushed out of the window.
+CREATE TABLE errors (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id   TEXT    NOT NULL,
+  at        INTEGER NOT NULL,
+  stage     TEXT    NOT NULL,
+  message   TEXT    NOT NULL,
+  user_text TEXT
+);
+CREATE INDEX idx_errors_chat ON errors(chat_id, id DESC);

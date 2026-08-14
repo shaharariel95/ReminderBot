@@ -125,6 +125,18 @@ export interface Rig {
   speakQueue: (string | Error)[];
   /** Set true to make every Gemini call fail, simulating a rate limit. */
   geminiDown: boolean;
+  /**
+   * Set true to make every Gemini call HANG rather than fail.
+   *
+   * The stub then settles only when the caller's own `AbortSignal` fires, which
+   * is the point: a bot with no timeout produces a promise that never settles,
+   * the Worker's wall clock kills `ctx.waitUntil`, and the user gets silence
+   * with no throw anywhere to catch. `geminiDown` cannot reproduce that — it
+   * rejects immediately, which is the easy case. A test using this must race
+   * against a fallback timer, or a regression here hangs the suite instead of
+   * failing it.
+   */
+  geminiHang: boolean;
   /** Models that should return 429, by exact id. */
   downModels: Set<string>;
   /** Every model id that was called, in order. */
@@ -190,6 +202,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     routerQueue: [],
     speakQueue: [],
     geminiDown: false,
+    geminiHang: false,
     downModels: new Set<string>(),
     modelsCalled: [],
     get dbFailOn() {
@@ -241,6 +254,17 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       rig.modelsCalled.push(model);
       if (rig.geminiDown || rig.downModels.has(model)) {
         return new Response('{"error":{"code":429,"message":"rate limit"}}', { status: 429 });
+      }
+      // Never settles on its own. Real `fetch` rejects with an AbortError when
+      // the signal fires; a caller that passes no signal waits forever, which
+      // is the bug this simulates.
+      if (rig.geminiHang) {
+        return new Promise((_resolve, reject) => {
+          const signal: AbortSignal | undefined = init?.signal;
+          if (!signal) return; // no timeout wired up: hang, exactly like production did
+          if (signal.aborted) return reject(new Error('AbortError: test rig'));
+          signal.addEventListener('abort', () => reject(new Error('AbortError: test rig')));
+        });
       }
       // The router is the call that pins a responseSchema; everything else is speak().
       const isRouter = !!body?.generationConfig?.responseSchema;

@@ -93,6 +93,15 @@ function one(e: Effect, tz: string): string {
       return `דחיתי את "${e.title}" ב-${e.minutes} דקות — ${hhmm(e.until, tz)}.`;
     case 'needs_task_choice':
       return `איזו מהן? ${e.open.map((i) => `#${i.id} "${i.title}"`).join(' · ')}`;
+    case 'appointment_offer':
+      // A question, not a confirmation. Nothing was written and the wording
+      // must not suggest otherwise — same rule as followup_suggested above.
+      return `רגע — ${when(e.at, tz)}: "${e.title}". לשים לך תזכורת?`;
+    case 'needs_time':
+      // Names the reminder rather than asking a bare "מתי?". He may be doing
+      // three things at once, and an unattributed question is one he has to
+      // guess the subject of.
+      return untitled(e.title) ? 'מתי?' : `מתי לשים את "${e.title}"?`;
     case 'needs_reminder_choice':
       return `איזו תזכורת? ${e.rows.map((r) => `#${r.id} "${r.title}"`).join(' · ')}`;
     case 'goal_created':
@@ -173,14 +182,18 @@ function one(e: Effect, tz: string): string {
     case 'morning_brief': {
       if (!e.rows.length) {
         return e.openCount
-          ? `בוקר. אין כלום מתוזמן להיום, אבל ${e.openCount} עדיין פתוחות מאתמול.`
+          // Not "מאתמול". `openCount` is everything still open, and on a
+          // morning where something fired at 08:00 and the brief goes out at
+          // 08:02 that word is simply false — a claim about WHEN, which is the
+          // same class of invention as a claim about what was written.
+          ? `בוקר. אין כלום מתוזמן להיום, אבל ${e.openCount} עדיין פתוחות.`
           : 'בוקר. היום ריק. אם יש משהו, תגיד עכשיו.';
       }
       const lines = e.rows.map((r) => {
         const name = untitled(r.title) ? 'משהו שלא אמרת מה זה' : r.title;
         return `· ${r.next_fire_at ? `${hhmm(r.next_fire_at, tz)} ` : ''}${name}`;
       });
-      const tail = e.openCount ? `\nועוד ${e.openCount} פתוחות מאתמול.` : '';
+      const tail = e.openCount ? `\nועוד ${e.openCount} עדיין פתוחות.` : '';
       return `בוקר. היום יש לך ${e.rows.length}:\n${lines.join('\n')}${tail}`;
     }
     case 'evening_closeout': {
@@ -215,9 +228,34 @@ function one(e: Effect, tz: string): string {
           return 'אין לי כזה דבר רשום עליך.';
         case 'chat':
           return 'נו?';
+        // The two below must NEVER be worded as a bare "נו?". That string is
+        // the bot's name, the opener of every fired reminder, and the opener
+        // of every nag — on 13.08.2026 he answered a question the bot had just
+        // asked him and got "נו?" back, which told him nothing about whether
+        // he had been misunderstood, crashed on, or simply nagged again.
+        case 'failed':
+          return TURN_FAILED;
+        case 'not_understood':
+          return 'לא הבנתי מה לעשות עם זה. תנסח אחרת, או /help לרשימת הפקודות.';
       }
   }
 }
+
+/**
+ * What he hears when a turn falls over.
+ *
+ * Deliberately neither confirms nor denies the write. Something may well have
+ * committed before the throw — applyIntent can close an instance and then fail
+ * reading the streak — so "לא קרה כלום" would be exactly the false claim this
+ * whole pipeline exists to prevent, and "נשמר" would be the other one. It says
+ * what is certainly true, and then points at the two commands that can settle
+ * it.
+ *
+ * Lives here rather than in index.ts so the last-resort send and the `failed`
+ * effect cannot drift into two different apologies for the same event.
+ */
+export const TURN_FAILED =
+  'נפל לי משהו באמצע ולא סיימתי את זה. תבדוק ב-/list שהכל כמו שצריך, ואם זה חוזר: /errors.';
 
 /**
  * Several reminders coming due together, as one moment rather than a burst of

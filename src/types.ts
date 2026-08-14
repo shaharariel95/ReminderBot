@@ -16,6 +16,10 @@ export interface Env {
    * degrades to the deterministic baseline instead of to a 429.
    */
   GEMINI_RPM?: string;
+  /** Milliseconds one Gemini request may take. See gemini.ts. */
+  GEMINI_TIMEOUT_MS?: string;
+  /** Milliseconds a whole generate() may take, across every retry and tier. */
+  GEMINI_BUDGET_MS?: string;
   DEFAULT_TZ?: string;
   /**
    * Test-only override for sendBurst's inter-chunk sleep (see telegram.ts).
@@ -91,6 +95,8 @@ export interface Settings {
   quiet_start_hour: number;
   quiet_end_hour: number;
   next_checkin_at: number | null;
+  /** JSON for the one question the bot is waiting on — see db.readAwaiting. */
+  awaiting: string | null;
   /** Local hour for the once-a-day messages; null switches one off. */
   brief_hour: number | null;
   closeout_hour: number | null;
@@ -234,6 +240,28 @@ export type Effect =
    * not to which reminder, and there was more than one candidate.
    */
   | { kind: 'needs_reminder_choice'; action: 'reschedule' | 'rename'; rows: Reminder[] }
+  /**
+   * "מתי?" — WHICH reminder is known, the hour is not.
+   *
+   * Distinct from `nothing: 'no_time'`, which this replaced, and the
+   * difference is the whole point: `nothing` carried no id, so the answer he
+   * typed a second later had nothing to attach itself to. On 13.08.2026 the
+   * bot asked for an hour, he gave one, and it was applied to nothing at all.
+   * Carrying the id is what lets db.setAwaiting remember the question.
+   */
+  | { kind: 'needs_time'; id: number; title: string }
+  /**
+   * He MENTIONED something with a time in it — "יש לי מחר ב-9 אימון" — and was
+   * offered a reminder for it. Nothing is written.
+   *
+   * The bot only ever reacted to "תזכיר לי X בשעה Y", which is not how anyone
+   * actually says it. The fix is deliberately an offer rather than a capture:
+   * rule 1 in quickparse.ts exists because "אני הולך עוד 20 דקות" once became a
+   * reminder titled "אני הולך", and a wrong guess here must cost one ignorable
+   * question, never a row he did not ask for. Sits outside WROTE for the same
+   * reason `followup_suggested` does.
+   */
+  | { kind: 'appointment_offer'; title: string; at: number }
   | { kind: 'goal_created'; id: number; title: string; why: string | null }
   | { kind: 'goal_progress'; id: number; title: string; note: string; previous: string | null }
   | { kind: 'goal_closed'; id: number; title: string; status: 'done' | 'dropped' }
@@ -275,7 +303,30 @@ export type Effect =
   | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
-  | { kind: 'nothing'; why: 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder' | 'unknown_goal' | 'unknown_note' | 'chat'; userText: string };
+  /**
+   * Nothing was written, and here is why.
+   *
+   * `chat` used to carry two unrelated meanings: "he was making conversation"
+   * AND "the router or applyIntent threw". Both rendered as a bare "נו?" —
+   * which is also the bot's name, also the opener of every fired reminder, and
+   * also the opener of every nag. On 13.08.2026 he answered a question the bot
+   * had just asked and got "נו?" back, with no way to tell whether he had been
+   * misunderstood, crashed on, or simply nagged again.
+   *
+   * `failed` and `not_understood` are therefore separate, and neither may ever
+   * word itself as a bare "נו?". See voice.ts.
+   */
+  | {
+      kind: 'nothing';
+      why:
+        | 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder'
+        | 'unknown_goal' | 'unknown_note' | 'chat'
+        /** Something threw mid-turn. Must neither confirm nor deny the write. */
+        | 'failed'
+        /** The router came back with nothing usable — not the same as small talk. */
+        | 'not_understood';
+      userText: string;
+    };
 
 /**
  * The title a reminder gets when he asked to be reminded but never said of

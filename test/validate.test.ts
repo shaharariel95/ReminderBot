@@ -186,6 +186,9 @@ section(
     { kind: 'nothing', why: 'unknown_reminder', userText: 'תבטל' },
     { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
     { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
+    { kind: 'needs_time', id: 1, title: 'לרוץ' },
+    { kind: 'nothing', why: 'failed', userText: 'סיימתי הכל' },
+    { kind: 'nothing', why: 'not_understood', userText: 'תעשה משהו' },
     { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
     {
       kind: 'needs_task_choice', action: 'complete',

@@ -24,7 +24,8 @@ export interface Verdict {
  * not to attempt a rewrite this lexicon will discard. If this regex changes,
  * check whether that rule's examples still cover it.
  */
-export const CLAIM = /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה/;
+export const CLAIM =
+  /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי/;
 
 const CLOCK = /\b\d{1,2}:\d{2}\b/g;
 const QUOTED = /"([^"\n]{2,80})"/g;

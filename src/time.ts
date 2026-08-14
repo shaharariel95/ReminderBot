@@ -233,8 +233,14 @@ export function localDayBounds(ts: number, tz: string): { from: number; to: numb
 export function describeSchedule(schedule: Schedule): string {
   const names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   switch (schedule.type) {
-    case 'once':
-      return `פעם אחת ב-${schedule.at}`;
+    case 'once': {
+      // `at` is a local wall string ("2026-08-14T10:00"), so it can be made
+      // readable without knowing the timezone. It used to be printed raw,
+      // which put "פעם אחת ב-2026-08-14T10:00" in /list directly above a
+      // perfectly formatted "הבא: יום ו׳, 14.08.2026, 10:00".
+      const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})/.exec(schedule.at.trim());
+      return m ? `פעם אחת ב-${m[3]}.${m[2]} בשעה ${m[4]}:${m[5]}` : `פעם אחת ב-${schedule.at}`;
+    }
     case 'daily':
       return `כל יום ב-${schedule.time}`;
     case 'weekly':

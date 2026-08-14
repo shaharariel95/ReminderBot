@@ -44,6 +44,52 @@ validator will discard truthful rewrites for repeating what the prompt handed
 them. That failure mode is silent: it shows up as a rising rejection count in
 `/diag`, not as an error.
 
+## Saying nothing, and saying "נו?"
+
+`נו?` is the bot's name, the opener of every fired reminder, and the opener of
+every nag. It is therefore **not available as a fallback**. `nothing: 'chat'`
+is small talk and only small talk; a turn that threw says so (`why: 'failed'`,
+worded by `voice.TURN_FAILED`), and a router that came back unparseable says
+that instead (`why: 'not_understood'`). `route()` returns an EMPTY list rather
+than synthesising `chat`, which is what keeps those two apart.
+
+The failure wording must never confirm or deny the write. `applyIntent` can
+close an instance and then throw before producing an effect, so "לא קרה כלום"
+would be as false as "נשמר". It says what is certain and points at `/list` and
+`/errors`.
+
+Silence is worse than either. Every Gemini call carries `AbortSignal.timeout`
+and the whole ladder carries a budget (`gemini.ts`), because an unbounded
+`fetch` that overruns the Worker's wall clock kills `ctx.waitUntil` **without
+throwing** — no catch runs, nothing ships, and the user gets nothing at all.
+
+## Observability
+
+Three separate readers, on purpose:
+
+- `events` — the life story of a reminder. Written from `sendOutcome`, the one
+  point every path converges on. Read by `/why [id]` and, counted over a day,
+  by `/diag`'s cron block.
+- `errors` — where a throw went, tagged by stage. Read by `/errors`.
+- `meta.last_tick` — stamped at the START of a tick, so "the scheduler is dead"
+  and "the scheduler ran and something inside it threw" are distinguishable.
+
+Keep them separate. They have different writers, readers and retention, and the
+day errors arrive fastest must not be the day reminder history is pushed out of
+the window. The event for a fired reminder is `צלצלה` (came due), never
+`נשלחה` — a send that then failed must not leave a row claiming it arrived.
+
+## The awaiting slot
+
+One nullable JSON column on `settings`, holding the single question the bot is
+waiting on: `{k:'time'}` after it asked "מתי?", `{k:'offer'}` after it offered a
+reminder for something he only mentioned. Consumed before the router runs, so
+an answer costs no model call.
+
+It expires (`AWAITING_TTL_MS`) **and** is cleared by any turn that does not
+re-ask. Both matter: a slot left open means a bare "15:00" typed later, about
+something else, silently retimes whatever was last asked about.
+
 ## Things that look like bugs and are not
 
 - **`quickparse.ts` bails a lot on purpose.** A partial parse is a confident
@@ -75,7 +121,7 @@ second person exists. That exact question was worth asking: `dueReminders` and
 
 ## Testing
 
-`npm test` runs eight files with a real in-memory SQLite behind a D1-shaped
+`npm test` runs nine files with a real in-memory SQLite behind a D1-shaped
 facade (`test/harness.ts`). The webhook and cron paths run end to end, so
 "the reminder never arrived" is reproducible rather than arguable.
 
@@ -95,13 +141,16 @@ proves nothing. Remove both.
 
 Useful rig facts: `rig.speakQueue.push(new Error(...))` fails only the
 persona call (`geminiDown` kills the router too, which usually is not what you
-want); `rig.dbFailOn` traps one write by SQL pattern; `deployed(rig)` simulates
+want); `rig.dbFailOn` traps one write by SQL pattern; `rig.geminiHang` makes the model
+never answer unless the caller aborts it (race it against a timer, or a
+regression hangs the suite instead of failing it); `deployed(rig)` simulates
 a deploy; a fresh rig is a bot that is already running the current version.
 
 ## Deploying
 
 ```bash
-npx wrangler d1 execute nu-bot --remote --file=./migrations/00N_x.sql   # if any
+npx wrangler d1 execute nu-bot --remote --file=./migrations/009_events_and_errors.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/010_awaiting.sql
 npm run deploy
 ```
 

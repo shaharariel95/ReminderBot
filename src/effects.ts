@@ -351,7 +351,10 @@ export async function applyIntent(
       }
 
       const schedule = scheduleFromIntent(intent, tz);
-      if (!schedule) return [{ kind: 'nothing', why: 'no_time', userText }];
+      // Carries the reminder, unlike the `nothing: 'no_time'` this replaced.
+      // The bot is about to ask "מתי?" and it has to still know what it asked
+      // about when the answer arrives — see db.setAwaiting.
+      if (!schedule) return [{ kind: 'needs_time', id: rem.id, title: rem.title }];
 
       let next: number | null;
       try {

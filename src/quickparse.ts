@@ -98,6 +98,21 @@ const RECURRING =
 const ASKED = /תזכיר|תזכורת|תנדנד|תעיר\s+לי|remind|ping/i;
 
 /**
+ * He is operating on a reminder that already exists, not asking for a new one.
+ *
+ * ASKED matches the bare word "תזכורת" ANYWHERE, and this file only ever
+ * returns `create_reminder` — so "תזיז את התזכורת של הבשר ב-15:00" satisfied
+ * rule 1 by accident and would have fast-pathed into a second, duplicate
+ * reminder titled "תזיז את התזכורת של הבשר". On 13.08.2026 he wrote "ל15:00"
+ * instead of "ב15:00" and only the unrecognised ל stood between him and that.
+ *
+ * Over-matching here is free: the message goes to the router, which knows the
+ * difference between reschedule, delete and create. Under-matching writes a
+ * row he never asked for, which is rule 1's whole subject.
+ */
+const MOVE = /תזיז|הזז|תעביר|תדחה|תמחק|תבטל|תשנה|תסמן|תחליף/;
+
+/**
  * Time phrases in the message, however they are worded. Two or more means he
  * asked for two different things at two different times, which this file has no
  * way to express — one Intent carries one schedule. Hand it to the router.
@@ -110,9 +125,13 @@ const ASKED = /תזכיר|תזכורת|תנדנד|תעיר\s+לי|remind|ping/i;
 const TIME_ANCHOR = new RegExp(
   [
     String.raw`(?:^|\s)(?:[ובלמ]?(?:עוד|בעוד|תוך)|in)\s`,
-    String.raw`(?:^|\s)ו?בשעה\s+(?:\d{1,2}(?::\d{2})?|${HOUR_NAME_ALT})`,
+    String.raw`(?:^|\s)ו?[בל]שעה\s+(?:\d{1,2}(?::\d{2})?|${HOUR_NAME_ALT})`,
     String.raw`(?:^|\s)ו?ב(?:${HOUR_NAME_ALT})(?![א-ת])`,
     String.raw`(?:^|\s)ו?ב\s*-?\s*\d{1,2}(?::\d{2})?`,
+    // Must come before the bare-colon alternative below, or that one matches
+    // the digits alone and the ל is left behind as residue — which reads as an
+    // incomplete parse and bails a message this file understands perfectly.
+    String.raw`(?:^|\s)ל\s*-?\s*\d{1,2}:\d{2}`,
     String.raw`(?:^|\s)(?:and\s+)?(?:at\s+)?\d{1,2}:\d{2}`,
     String.raw`(?:^|\s)at\s+\d{1,2}`,
     String.raw`(?:^|\s)\d{1,2}\s*(?:am|pm)`,
@@ -135,7 +154,7 @@ function countTimeAnchors(t: string): number {
  */
 const CLOCK_RESIDUE = new RegExp(
   [
-    String.raw`(?:^|\s)ו?(?:וחצי|ורבע|בשעה|מחרתיים|מחר|היום|${PERIOD}|tomorrow|today|am|pm)(?:$|[\s.,!?])`,
+    String.raw`(?:^|\s)ו?(?:וחצי|ורבע|[בל]שעה|מחרתיים|מחר|היום|${PERIOD}|tomorrow|today|am|pm)(?:$|[\s.,!?])`,
     String.raw`(?:^|\s)ו?ב\s*-?\s*\d{1,2}(?::\d{2})?(?:$|[\s.,!?])`,
     String.raw`(?:^|\s)ו?ב(?:${HOUR_NAME_ALT})(?![א-ת])`,
     String.raw`\d{1,2}:\d{2}`,
@@ -409,8 +428,26 @@ interface Clock {
 /** "ב-8" · "בשעה 20:30" · "בשמונה וחצי" · "at 8pm" · "14:30". */
 function matchClock(t: string): Clock | null {
   // Hebrew, digits: "ב-8", "ב8:30", "בשעה 20:30", "ב-8 וחצי", "ב-11 בלילה".
+  // "ל-15:00" — how Hebrew names the new time when moving something, and the
+  // form that made "בוא הזיז את התזכורת של הבשר ל15:00" (13.08.2026) parse as
+  // no time at all.
+  //
+  // The colon is REQUIRED, and that is the whole guard: a bare "ל-4" is far
+  // more often a quantity than a clock ("לקנות 3 ל-4 אנשים"), and there is no
+  // way to tell from the digits. A colon cannot be a quantity. The bare form
+  // is left to the router, which has an explicit "תעביר את זה ל-8" example.
+  const lamed = /(?:^|\s)ל\s*-?\s*(?<h>\d{1,2}):(?<m>\d{2})/.exec(t);
+  if (lamed) {
+    const hour = Number(lamed.groups!.h);
+    const minute = Number(lamed.groups!.m);
+    if (hour > 23 || minute > 59) return null;
+    // Written with minutes, so the 12-hour reading is settled — "ל-15:00"
+    // cannot mean 03:00 and must not offer it as a correction.
+    return { hour, minute, matched: lamed[0], settled: true };
+  }
+
   const num = new RegExp(
-    String.raw`(?:^|\s)(?:בשעה\s+|ב\s*-?\s*)(?<h>\d{1,2})(?::(?<m>\d{2}))?` +
+    String.raw`(?:^|\s)(?:[בל]שעה\s+|ב\s*-?\s*)(?<h>\d{1,2})(?::(?<m>\d{2}))?` +
       String.raw`(?:\s+ו(?<half>חצי|רבע))?\s*(?<period>${PERIOD})?`,
   ).exec(t);
   if (num) {
@@ -671,7 +708,7 @@ function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
 
   return {
     action: 'create_reminder',
-    title: (title || 'תזכורת').slice(0, 120),
+    title: (title || UNTITLED_TITLE).slice(0, 120),
     schedule_type: 'once',
     once_at: wallString(at.ts, tz),
     ...(at.altHour === undefined ? {} : { ambiguous_hour: at.altHour }),
@@ -774,6 +811,8 @@ export function quickParse(text: string, nowMs: number, tz: string): Intent | nu
   if (!t) return null;
   // Rule 1: this path only ever answers an explicit request.
   if (!ASKED.test(t)) return null;
+  // ...and a request to MOVE one is not a request to make one. See MOVE.
+  if (MOVE.test(t)) return null;
   // Two times in one message means two reminders. One Intent cannot hold both,
   // and guessing which one he meant is how a reminder goes missing.
   if (countTimeAnchors(t) > 1) return null;
@@ -798,4 +837,40 @@ export function quickParse(text: string, nowMs: number, tz: string): Intent | nu
   }
 
   return parseClockTime(t, nowMs, tz);
+}
+
+/**
+ * A message that is NOTHING BUT a time — the answer to a question the bot just
+ * asked.
+ *
+ * Deliberately stricter than quickParse: there is no ASKED gate here (he is
+ * answering, not requesting), so the entire message must be consumed by the
+ * time phrase. "15:00" qualifies; "15:00 אבל אולי מחר" does not, because the
+ * leftover words mean he said something this function cannot represent, and
+ * rule 2 at the top of this file applies with more force here than anywhere —
+ * a wrong answer to "מתי?" retimes a real reminder.
+ *
+ * Returns an instant, never an Intent: the caller already knows WHICH reminder
+ * it asked about, and re-deriving that from the text is exactly the guessing
+ * this exists to remove.
+ */
+export function parseAnswerTime(text: string, nowMs: number, tz: string): number | null {
+  const t = text.trim();
+  // A long message is not an answer to "מתי?", whatever else it contains.
+  if (!t || t.length > 40) return null;
+
+  // "עוד שעה", "בעוד 20 דקות" — a length, not a clock.
+  const rel = parseRelative(t);
+  if (rel && rel.minutes >= 1 && cleanTitle(t, [rel.matched]) === '') {
+    return nowMs + rel.minutes * 60_000;
+  }
+
+  const clock = matchClock(t);
+  if (!clock) return null;
+  const day = matchDay(t);
+  // Anything left over means he said more than a time, and this function has
+  // no way to express the rest.
+  if (cleanTitle(t, [clock.matched, day?.matched ?? '']) !== '') return null;
+
+  return resolve(clock, day, nowMs, tz)?.ts ?? null;
 }

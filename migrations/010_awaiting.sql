@@ -1,0 +1,19 @@
+-- The question the bot is waiting on an answer to.
+--
+-- Run once: npx wrangler d1 execute nu-bot --remote --file=./migrations/010_awaiting.sql
+--
+-- On 13.08.2026 the bot asked "מתי לשים לך את זה?", he answered "15:00", and
+-- it replied "נו?". The hour was never applied and the reminder never moved.
+-- Nothing anywhere remembered that a question had been asked, so the answer
+-- had to survive a round trip through the router as a standalone message —
+-- and a bare "15:00" carries no clue about what it is an answer TO.
+--
+-- Deliberately one nullable column on `settings` rather than a table: there is
+-- at most ONE outstanding question per chat by construction (asking a second
+-- while the first is open would be the bot talking over itself), and a table
+-- would invite exactly that.
+--
+-- The stored value is JSON and carries its own timestamp, because the slot has
+-- to expire. A question left open forever means "15:00" typed two hours later
+-- about something else silently retimes whatever the bot last asked about.
+ALTER TABLE settings ADD COLUMN awaiting TEXT;

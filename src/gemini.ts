@@ -98,7 +98,41 @@ function buildBody(
   };
 }
 
-async function post(env: Env, model: string, body: unknown): Promise<Response> {
+/**
+ * Every request carries a deadline, and the whole call carries a bigger one.
+ *
+ * These used to be bare `fetch`es with no signal at all, and the arithmetic of
+ * that is worse than it looks: two tiers times three attempts, each of which
+ * can fire a second request via the 400-retry below, is up to TWELVE unbounded
+ * sequential round trips. When that overran the Worker's wall clock,
+ * `ctx.waitUntil` was killed WITHOUT throwing — so no catch anywhere ran, no
+ * fallback shipped, and the user got silence. On 13.08.2026 his longest
+ * message of the week was answered with nothing at all.
+ *
+ * A slow model must cost the personality, never the reply. The per-call
+ * timeout bounds one request; the budget bounds the retry ladder, which is the
+ * half that actually ran away.
+ */
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_BUDGET_MS = 22_000;
+
+function budgets(env: Env): { perCall: number; total: number } {
+  const read = (v: string | undefined, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  return {
+    perCall: read(env.GEMINI_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    total: read(env.GEMINI_BUDGET_MS, DEFAULT_BUDGET_MS),
+  };
+}
+
+async function post(
+  env: Env,
+  model: string,
+  body: unknown,
+  signal: AbortSignal,
+): Promise<Response> {
   return fetch(`${BASE}/${model}:generateContent`, {
     method: 'POST',
     headers: {
@@ -106,19 +140,29 @@ async function post(env: Env, model: string, body: unknown): Promise<Response> {
       'x-goog-api-key': env.GEMINI_API_KEY,
     },
     body: JSON.stringify(body),
+    signal,
   });
 }
 
 /** One round trip, including the thinking-parameter fallback. */
-async function callOnce(env: Env, model: string, opts: GenerateOpts): Promise<Response> {
-  let res = await post(env, model, buildBody(opts, thinkingConfig(model, opts)));
+async function callOnce(
+  env: Env,
+  model: string,
+  opts: GenerateOpts,
+  /** What is left of this generate()'s whole budget, not just this request's. */
+  timeoutMs: number,
+): Promise<Response> {
+  // Both requests below share one deadline on purpose: the retry is part of
+  // this attempt, not a fresh grant of time.
+  const signal = AbortSignal.timeout(Math.max(1, timeoutMs));
+  let res = await post(env, model, buildBody(opts, thinkingConfig(model, opts)), signal);
 
   // A 400 here is nearly always the thinking parameter, but the error body
   // doesn't say so. Retry once with no thinking config at all — that shape is
   // valid on every model, so the bot keeps working through future renames.
   if (res.status === 400) {
     const first = await res.text();
-    const retry = await post(env, model, buildBody(opts, null));
+    const retry = await post(env, model, buildBody(opts, null), signal);
     if (retry.ok) {
       console.warn(`gemini: ${model} rejected thinkingConfig, continuing without it`);
       return retry;
@@ -159,9 +203,22 @@ function tiers(env: Env): string[] {
 
 export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
   let lastDetail = '';
+  const { perCall, total } = budgets(env);
+  // One deadline for the whole ladder. Checked before each attempt rather than
+  // relied on to fire mid-request, so an exhausted budget costs no round trip
+  // at all — and so the error names the budget instead of surfacing as an
+  // opaque AbortError from somewhere inside the retry loop.
+  const deadline = Date.now() + total;
 
   for (const model of tiers(env)) {
+    if (Date.now() >= deadline) break;
     for (let attempt = 0; attempt < 3; attempt++) {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        lastDetail = `budget of ${total}ms exhausted on ${model}`;
+        console.warn(`gemini: ${lastDetail}`);
+        break;
+      }
       const tuned: GenerateOpts = { ...opts };
       if (attempt > 0) {
         // Nudge off the deterministic path, and widen the ceiling.
@@ -178,7 +235,7 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         break; // same handling as a 429, minus the wasted round trip
       }
 
-      const res = await callOnce(env, model, tuned);
+      const res = await callOnce(env, model, tuned, Math.min(perCall, left));
 
       if (TIER_DOWN.has(res.status)) {
         lastDetail = `${model} returned ${res.status}`;

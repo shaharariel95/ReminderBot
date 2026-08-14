@@ -191,9 +191,9 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
   זה לא complete — הוא לא סיים, והוא עוד יצטרך לדווח. זה גם לא snooze — snooze זה "לא עכשיו", וזה בדיוק ההפך.
 - "reschedule" — הזזה של תזכורת קיימת שעוד לא צלצלה, לזמן אחר ("תעביר את זה ל-8", "תדחה את הריצה למחר בבוקר", "בעצם ב-21:00"). target_id = reminder id מהרשימה למעלה, ואת הזמן החדש באותם שדות של create_reminder (in_minutes / once_at / time+days).
   זה לא create_reminder — אל תיצור תזכורת חדשה כשהוא רק מזיז אחת קיימת, אחרת יהיו לו שתיים.
-  זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לת- "annotate" — פרט שמסביר תזכורת קיימת: בשביל מה היא, מה להביא, את מי לשאול. בדרך כלל זו התשובה שלו לשאלה ששאלת ("מה איבדת שם?" → "בשר אחי"). target_id = reminder id + note = הפרט, קצר, במילים שלו.
+  זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לתזכורת שעדיין מחכה.
+- "annotate" — פרט שמסביר תזכורת קיימת: בשביל מה היא, מה להביא, את מי לשאול. בדרך כלל זו התשובה שלו לשאלה ששאלת ("מה איבדת שם?" → "בשר אחי"). target_id = reminder id + note = הפרט, קצר, במילים שלו.
   זה לא rename — הכותרת נשארת. זה לא remember — remember זה עובדה קבועה עליו, וזה פרט על משימה אחת.
-זכורת שעדיין מחכה.
 - "rename" — שינוי הניסוח של תזכורת קיימת בלי לגעת בשעה ("תשנה את זה ל'לקחת את הכלב'", "זה לא חלב זה לחם", וגם תשובה לשאלה שלך "על מה התזכורת?"). target_id = reminder id + title = הנוסח החדש.
 - "delete" — ביטול תזכורת. target_id = reminder id.
 - "list" — הוא שואל מה יש לו (תזכורות).
@@ -244,8 +244,13 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
         ? [raw as Intent]
         : [];
 
-  const actions = list.filter((a) => a && typeof a.action === 'string').slice(0, MAX_ACTIONS);
-  return actions.length ? actions : [{ action: 'chat' }];
+  // Returns EMPTY when the model gave back nothing usable, rather than
+  // synthesising `chat`. Those are different facts: "he was making
+  // conversation" is an answer, "I could not parse the router's reply" is a
+  // failure, and collapsing them meant the second one reached the user as a
+  // bare "נו?" and reached the logs as nothing at all. The caller decides what
+  // to say about an empty list — see respondToOwner.
+  return list.filter((a) => a && typeof a.action === 'string').slice(0, MAX_ACTIONS);
 }
 
 /**
