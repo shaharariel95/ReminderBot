@@ -35,7 +35,8 @@ hand and will not tell you it is missing.
 `validate.ts` has four rules, each with an allow-list built by `facts.ts`:
 
 1. clock times — only times the turn actually knows
-2. write-claim verbs — only when something was written (`facts.wrote`)
+2. write-claim verbs — only when a write of THAT KIND happened (CLAIM_GROUPS).
+   "a write happened" is not enough: it once let a create be reported as a move
 3. quoted titles and prose — only real ones
 4. elapsed-time claims — only spans the turn can back up
 
@@ -114,6 +115,14 @@ model will name an item the code then refuses.
 - **`quickparse.ts` bails a lot on purpose.** A partial parse is a confident
   wrong answer; falling through to the router costs one LLM call. Rule 2 at the
   top of that file is the whole design.
+- **The gate is grammar, not a verb list.** `asksForNewReminder` admits a
+  request ("תזכיר לי", "שים לי תזכורת") and refuses a DEFINITE reference
+  ("התזכורת" — *the* reminder, so it already exists). There was briefly a
+  blocklist of move verbs instead, and it was wrong twice: it could never be
+  complete, and "הזיז" is a substring of "להזיז", so adding the form he
+  actually typed would have refused "תזכיר לי להזיז את הארון" — a real
+  reminder whose SUBJECT is moving something. What he wants reminding OF is
+  none of that file's business. Do not reintroduce a verb list.
 - **Buttons never call the model.** The effect and its Hebrew are already
   known, so a tap costs no latency and no quota.
 - **The deploy ping claims the version BEFORE sending.** A failed send loses

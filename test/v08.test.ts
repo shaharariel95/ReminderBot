@@ -9,7 +9,10 @@
  */
 import worker from '../src/index';
 import { quickParse } from '../src/quickparse';
-import { CLAIM } from '../src/validate';
+import { CLAIM, validate } from '../src/validate';
+import { buildFacts } from '../src/facts';
+import type { Effect, Settings, Stats } from '../src/types';
+import type { Context } from '../src/brain';
 import { renderBaseline } from '../src/voice';
 import { buttonsFor } from '../src/buttons';
 import { handleSlash } from '../src/slash';
@@ -20,6 +23,20 @@ import { callbackUpdate, check, createRig, done, eq, section, withNow, type Rig 
 
 const CHAT = '12345';
 const TZ = 'Asia/Jerusalem';
+
+/** Bare context for the pure validator checks — no rig, no database. */
+function factsCtx(): Context {
+  return {
+    settings: {
+      chat_id: CHAT, tz: TZ, intensity: 2, muted_until: null, off_limits: null,
+      checkins_enabled: 0, checkin_per_day: 2, quiet_start_hour: 23, quiet_end_hour: 8,
+      next_checkin_at: null, awaiting: null, brief_hour: 8, closeout_hour: 21,
+      last_brief_on: null, last_closeout_on: null,
+    } as Settings,
+    stats: { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 } as Stats,
+    reminders: [], goals: [], open: [], nowLabel: 'עכשיו',
+  };
+}
 
 async function runCron(rig: Rig): Promise<void> {
   const pending: Promise<unknown>[] = [];
@@ -174,27 +191,165 @@ section('the write-claim validator knows the softer claims too');
 
 // ---------------------------------------------------------------------------
 
-section('asking to move a reminder does not create a second one');
+section('"the reminder" is a reference, never a request for a new one');
 {
-  // quickparse's ASKED gate matches the bare word "תזכורת", and quickParse
-  // only ever returns create_reminder. "תזיז את התזכורת של הבשר ב15:00" was
-  // therefore one letter away from silently creating a duplicate — he wrote
-  // "ל15:00" on 13.08 and only the unrecognised ל saved him.
+  // 14.08 23:23, in production: "בוא הזיז את התזכורת של הבשר ל15:00" created a
+  // THIRD reminder titled "בוא הזיז את ה של הבשר" — the mangled "ה" being what
+  // is left of "התזכורת" after cleanTitle strips the noun out of the title.
+  //
+  // The gate asked the wrong question. ASKED looked for the bare NOUN
+  // "תזכורת" anywhere in the sentence, and "התזכורת" — definite, *the*
+  // reminder — is a reference to one that already exists. A blocklist of move
+  // verbs was then bolted on to subtract what the gate should never have let
+  // in, and it could not possibly be complete: "הזיז" is not "הזז" and not
+  // "תזיז", and Hebrew has more forms where those came from.
+  //
+  // None of the cases below name a verb this file knows. They are all refused
+  // for the same reason: the definite article.
   const now = Date.UTC(2026, 7, 13, 8, 0);
   for (const text of [
+    'בוא הזיז את התזכורת של הבשר ל15:00',
     'תזיז את התזכורת של הבשר ב15:00',
     'תעביר את התזכורת של הבשר ב-15:00',
     'תמחק את התזכורת ב8 בבוקר',
     'תבטל את התזכורת של מחר ב9',
+    // Written with a colon on purpose: "ל-9" parses as no time at all, so it
+    // would be refused whatever the gate did, and would prove nothing.
+    'תקדים את התזכורת ל-09:00',
+    'אולי כדאי שנשנה את התזכורת ל-11:00',
   ]) {
     const got = quickParse(text, now, TZ);
     check(`"${text}" is not a create`, got === null, `got: ${JSON.stringify(got)}`);
   }
 
+  // A request verb AND a definite reference in the same sentence. This is the
+  // one shape where the definite-article rule is doing the work on its own —
+  // "תזכיר" opens the gate, and only ABOUT_EXISTING closes it again. Without
+  // this case the two halves of asksForNewReminder cover each other and
+  // neither is actually proved.
+  eq(
+    'a request verb does not license a definite reference',
+    quickParse('תזכיר לי להזיז את התזכורת של הבשר ל15:00', now, TZ),
+    null,
+  );
+
   // ...and the gate must not have swallowed the thing it exists for.
   const real = quickParse('תזכיר לי לקנות בשר מחר ב10', now, TZ);
   check('a real request still fast-paths', real?.action === 'create_reminder');
   eq('with the right title', real?.title, 'לקנות בשר');
+}
+
+section('the 14.08 production turn, end to end');
+{
+  // Verbatim from the chat. Two messages, exactly as he sent them: create the
+  // reminder, then ask to move it. Before this, the second message created a
+  // THIRD reminder called "בוא הזיז את ה של הבשר" and the reply claimed
+  // "הזזתי" about it.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 14, 23, 23, TZ);
+
+  rig.speakQueue.push('קבעתי "ללכת לקנות בשר" ל-15.08 ב-10:00.');
+  await withNow(now, () => runWebhook(rig, 'תזכיר לי ללכת לקנות בשר מחר ב10 בבוקר'));
+  eq(
+    'the first message makes one reminder',
+    Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n),
+    1,
+  );
+  const id = (rig.db.prepare('SELECT id FROM reminders').get() as any).id;
+
+  // The move now reaches the router instead of the fast path.
+  rig.routerQueue.push({
+    actions: [{ action: 'reschedule', target_id: id, schedule_type: 'once', once_at: '2026-08-15T15:00' }],
+  });
+  rig.speakQueue.push('הזזתי את "ללכת לקנות בשר" ל-15:00.');
+  await withNow(now + 30_000, () => runWebhook(rig, 'בוא הזיז את התזכורת של הבשר ל15:00'));
+
+  eq(
+    'and the move does NOT make a second one',
+    Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n),
+    1,
+  );
+  const row = rig.db.prepare('SELECT next_fire_at, title FROM reminders').get() as any;
+  eq('the meat moved to 15:00', Number(row.next_fire_at), wallToUtc(2026, 8, 15, 15, 0, TZ));
+  eq('and kept its name', row.title, 'ללכת לקנות בשר');
+  check(
+    'nothing is titled with his instruction',
+    !rig.texts().some((t) => t.includes('בוא הזיז')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  rig.restore();
+}
+
+section('claiming a MOVE when it created something is still a lie');
+{
+  // The second half of what he saw on 14.08: the bot said
+  // "הזזתי את ... ל-15:00" about a row it had just CREATED. Rule 2 passed it,
+  // because rule 2 only ever asked whether SOMETHING was written — never
+  // which kind of something. So any turn that wrote anything licensed any
+  // write verb, and a create could be reported as a move.
+  //
+  // Worth fixing on its own account: with quickparse now refusing the message,
+  // this exact sentence cannot recur — but the hole it went through is still
+  // there for every other write.
+  const at = wallToUtc(2026, 8, 15, 15, 0, TZ);
+  const created: Effect[] = [
+    { kind: 'reminder_created', id: 27, title: 'ללכת לקנות בשר', at,
+      schedule: { type: 'once', at: '2026-08-15T15:00' }, requiresProof: false },
+  ];
+  const retimed: Effect[] = [{ kind: 'reminder_retimed', id: 27, title: 'ללכת לקנות בשר', at }];
+
+  const f = (effects: Effect[]) => buildFacts(factsCtx(), effects, TZ);
+  const say = 'הזזתי את "ללכת לקנות בשר" ל-15:00.';
+
+  check(
+    'a create cannot be reported as a move',
+    !validate(say, f(created), renderBaseline(created, TZ)).ok,
+    'the validator let a create claim a move',
+  );
+  check(
+    'but a real move can',
+    validate(say, f(retimed), renderBaseline(retimed, TZ)).ok,
+    validate(say, f(retimed), renderBaseline(retimed, TZ)).reason,
+  );
+  check(
+    'and a create can still say it created',
+    validate('קבעתי לך את זה.', f(created), renderBaseline(created, TZ)).ok,
+  );
+  check(
+    'a create cannot claim a cancellation either',
+    !validate('ביטלתי את זה.', f(created), renderBaseline(created, TZ)).ok,
+  );
+}
+
+section('a move verb inside a real request is still a real request');
+{
+  // The reason a verb blocklist is not merely incomplete but wrong. "הזיז" is
+  // a SUBSTRING of "להזיז", so the obvious patch — adding the form he actually
+  // typed — would have broken every one of these the moment it shipped. What
+  // he is asking to be reminded OF is none of the parser's business.
+  const now = Date.UTC(2026, 7, 13, 8, 0);
+  const cases: [string, string][] = [
+    ['תזכיר לי להזיז את הארון מחר ב8', 'להזיז את הארון'],
+    ['תזכיר לי לבטל את המנוי מחר ב9', 'לבטל את המנוי'],
+    ['תזכיר לי למחוק את הגיבויים מחר ב10', 'למחוק את הגיבויים'],
+    ['תזכיר לי להעביר כסף מחר ב11', 'להעביר כסף'],
+  ];
+  for (const [text, title] of cases) {
+    const got = quickParse(text, now, TZ);
+    check(`"${text}" still fast-paths`, got?.action === 'create_reminder', `got: ${JSON.stringify(got)}`);
+    eq('  with his words intact', got?.title, title);
+  }
+}
+
+section('placing a reminder is a request; operating on one is not');
+{
+  const now = Date.UTC(2026, 7, 13, 8, 0);
+  // An indefinite "תזכורת" behind a placement verb is still a create.
+  const placed = quickParse('שים לי תזכורת מחר ב8', now, TZ);
+  check('"שים לי תזכורת" creates', placed?.action === 'create_reminder', `got: ${JSON.stringify(placed)}`);
+  // But the bare noun on its own no longer opens the gate. This is the change:
+  // the noun says what he is talking ABOUT, not what he is asking FOR.
+  eq('a bare noun with a verb of its own does not', quickParse('תמחק תזכורת ב8', now, TZ), null);
 }
 
 section('"ל-15:00" is a time, not noise');

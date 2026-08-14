@@ -1,4 +1,4 @@
-import type { Facts } from './types';
+import type { Effect, Facts } from './types';
 import { scanDurations } from './quickparse';
 
 export interface Verdict {
@@ -25,7 +25,60 @@ export interface Verdict {
  * check whether that rule's examples still cover it.
  */
 export const CLAIM =
-  /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי/;
+  /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
+
+/**
+ * The same verbs, grouped by WHICH write they assert — and which effects can
+ * back each group up.
+ *
+ * Rule 2 used to ask only whether *something* had been written. On 14.08.2026
+ * that let the bot say "הזזתי את ... ל-15:00" about a row it had just CREATED:
+ * a write had happened, so the claim passed, and the message described an
+ * operation that never took place. "I moved it" and "I made a new one" are
+ * different claims about the database, and a user acting on the wrong one goes
+ * looking for a reminder that is not where he was told it is.
+ *
+ * The invariant from CLAIM extends here: no verb may sit in a group whose
+ * `kinds` excludes the effect voice.ts emits it for, or the deterministic
+ * baseline fails its own validator. `test/validate.test.ts` renders every
+ * sample and checks exactly that, which is what makes this safe to edit.
+ */
+const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['kind']> }[] = [
+  {
+    name: 'create',
+    verbs: /רשמתי|קבעתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי/,
+    kinds: new Set<Effect['kind']>([
+      'reminder_created', 'reminder_captured', 'reminder_scheduled',
+      'reminder_annotated', 'goal_created', 'profile_noted',
+    ]),
+  },
+  {
+    name: 'move',
+    verbs: /הזזתי|דחיתי|העברתי/,
+    // reminder_scheduled belongs here too: giving an inbox item its first time
+    // is as fairly described as a move as it is as a create.
+    kinds: new Set<Effect['kind']>([
+      'reminder_retimed', 'instance_snoozed', 'reminder_scheduled',
+    ]),
+  },
+  {
+    name: 'delete',
+    verbs: /ביטלתי|מחקתי/,
+    kinds: new Set<Effect['kind']>(['reminder_deleted', 'goal_closed', 'profile_forgotten']),
+  },
+  {
+    name: 'close',
+    verbs: /סימנתי/,
+    kinds: new Set<Effect['kind']>([
+      'instance_done', 'item_done', 'goal_closed', 'photo_accepted', 'instance_skipped',
+    ]),
+  },
+  {
+    name: 'update',
+    verbs: /עדכנתי/,
+    kinds: new Set<Effect['kind']>(['goal_progress', 'reminder_annotated']),
+  },
+];
 
 const CLOCK = /\b\d{1,2}:\d{2}\b/g;
 const QUOTED = /"([^"\n]{2,80})"/g;
@@ -92,8 +145,19 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
     }
   }
 
-  if (!facts.wrote && CLAIM.test(text)) {
-    return { ok: false, reason: `claimed a write with no effect (${CLAIM.exec(text)?.[0]})` };
+  // Rule 2, per KIND of write rather than merely "a write happened". A turn
+  // that wrote nothing fails every group, so the original rule is subsumed.
+  const kinds = new Set(facts.effects.map((e) => e.kind));
+  for (const group of CLAIM_GROUPS) {
+    const hit = group.verbs.exec(text);
+    if (!hit) continue;
+    if ([...group.kinds].some((k) => kinds.has(k))) continue;
+    return {
+      ok: false,
+      reason: facts.wrote
+        ? `claimed a ${group.name} ("${hit[0]}") but the turn did: ${[...kinds].join(', ')}`
+        : `claimed a write with no effect (${hit[0]})`,
+    };
   }
 
   const allowedTitles = facts.titles.map((t) => t.trim());

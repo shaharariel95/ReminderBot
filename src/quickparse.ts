@@ -94,23 +94,47 @@ const PERIOD = String.raw`בלילה|בבוקר|בערב|בצהריי?ם|אחה"
 const RECURRING =
   /כל\s+(יום|יומיים|שבוע|שבועיים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)|כל\s+\d{1,3}\s*(דקות|דקה|שעות|שעה)|מדי\s+(יום|בוקר|ערב|שבוע)|פעמיים\s+ביום|\bevery\s+(\d{1,3}\s+)?(day|week|morning|evening|night|hour|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:יומי|שבועי)[תם]?(?![א-ת])/i;
 
-/** Did he actually ask to be reminded, or is he just telling me something? */
-const ASKED = /תזכיר|תזכורת|תנדנד|תעיר\s+לי|remind|ping/i;
-
 /**
- * He is operating on a reminder that already exists, not asking for a new one.
+ * Did he ask for a NEW reminder — as opposed to talking about one he has?
  *
- * ASKED matches the bare word "תזכורת" ANYWHERE, and this file only ever
- * returns `create_reminder` — so "תזיז את התזכורת של הבשר ב-15:00" satisfied
- * rule 1 by accident and would have fast-pathed into a second, duplicate
- * reminder titled "תזיז את התזכורת של הבשר". On 13.08.2026 he wrote "ל15:00"
- * instead of "ב15:00" and only the unrecognised ל stood between him and that.
+ * This used to be `/תזכיר|תזכורת|תנדנד|תעיר לי|remind|ping/`, and the bare noun
+ * in the middle of it was the bug. "תזכורת" is a NOUN: it says what he is
+ * talking about, not what he is asking for. "בוא הזיז את התזכורת של הבשר
+ * ל15:00" satisfied that gate on 14.08.2026 and produced a third reminder
+ * called "בוא הזיז את ה של הבשר" — the stray "ה" being what survives of
+ * "התזכורת" once cleanTitle strips the noun out of the title.
  *
- * Over-matching here is free: the message goes to the router, which knows the
- * difference between reschedule, delete and create. Under-matching writes a
- * row he never asked for, which is rule 1's whole subject.
+ * The first attempt at a fix was a blocklist of move verbs, and it was wrong
+ * twice over. It could not be complete — "הזיז" is neither "הזז" nor "תזיז",
+ * and Hebrew has more forms where those came from. And it was actively
+ * harmful: "הזיז" is a SUBSTRING of "להזיז", so adding the form he actually
+ * typed would have refused "תזכיר לי להזיז את הארון מחר ב8" — a perfectly good
+ * reminder whose SUBJECT happens to be moving something. What he wants to be
+ * reminded of is none of this file's business.
+ *
+ * So the gate asks about grammar instead, and there is no verb list anywhere:
+ *
+ *   1. A request aimed at the bot — "תזכיר לי", "תנדנד לי", "remind me".
+ *   2. A placement — "שים לי תזכורת", "תקבע תזכורת".
+ *   3. Never, if the reminder is DEFINITE. "התזכורת" is *the* reminder, which
+ *      by definition already exists, so the message is about operating on it.
+ *      That one line retires the whole blocklist: it does not care which verb
+ *      he reached for, or whether this file has ever heard of it.
  */
-const MOVE = /תזיז|הזז|תעביר|תדחה|תמחק|תבטל|תשנה|תסמן|תחליף/;
+const REQUEST_VERB = /תזכיר|תנדנד|תעיר\s+לי|remind|ping/i;
+const PLACE_REMINDER = /(?:^|\s)(?:תשים|שים|תקבע|קבע|תוסיף|הוסף)\s+(?:לי\s+)?תזכורת(?![א-ת])/;
+/** The definite article is the tell. Longest alternative first, or "התזכורות"
+ *  matches "התזכורת" and then trips the letter boundary. */
+const ABOUT_EXISTING = /ה(?:תזכורות|תזכורת)(?![א-ת])/;
+
+function asksForNewReminder(t: string): boolean {
+  if (ABOUT_EXISTING.test(t)) return false;
+  return REQUEST_VERB.test(t) || PLACE_REMINDER.test(t);
+}
+
+// A blocklist of move verbs used to live here. It is gone on purpose — see
+// asksForNewReminder above for why enumerating verb forms was both impossible
+// to finish and harmful to get right.
 
 /**
  * Time phrases in the message, however they are worded. Two or more means he
@@ -809,10 +833,10 @@ export function findFutureInstant(text: string, nowMs: number, tz: string): numb
 export function quickParse(text: string, nowMs: number, tz: string): Intent | null {
   const t = text.trim();
   if (!t) return null;
-  // Rule 1: this path only ever answers an explicit request.
-  if (!ASKED.test(t)) return null;
-  // ...and a request to MOVE one is not a request to make one. See MOVE.
-  if (MOVE.test(t)) return null;
+  // Rule 1: this path only ever answers an explicit request for a NEW reminder.
+  // A definite "התזכורת" is a reference to one he already has, and no verb list
+  // is consulted to work that out — see asksForNewReminder.
+  if (!asksForNewReminder(t)) return null;
   // Two times in one message means two reminders. One Intent cannot hold both,
   // and guessing which one he meant is how a reminder goes missing.
   if (countTimeAnchors(t) > 1) return null;
