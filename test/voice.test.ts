@@ -59,6 +59,9 @@ const samples: Effect[] = [
   { kind: 'needs_time', id: 1, title: 'לרוץ' },
   { kind: 'nothing', why: 'failed', userText: 'סיימתי הכל' },
   { kind: 'nothing', why: 'not_understood', userText: 'תעשה משהו' },
+  { kind: 'item_done', id: 5, title: 'להחזיר ראוטר', reminderId: 1, remaining: 2 },
+  { kind: 'item_done', id: 5, title: 'להחזיר ראוטר', reminderId: 1, remaining: 0 },
+  { kind: 'needs_item_choice', open: [{ id: 5, reminder_id: 1, chat_id: '1', title: 'להחזיר ראוטר', position: 0, done_at: null, created_at: 0 }] },
   { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
   {
     kind: 'needs_task_choice', action: 'complete',

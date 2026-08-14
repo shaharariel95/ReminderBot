@@ -63,6 +63,9 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     addElapsed(i.fired_at);
   }
   for (const g of ctx.goals) titles.add(g.title);
+  // Item titles are shown to the model in openSummary, so it may truthfully
+  // quote one back — and rule 3 would discard the whole rewrite for it.
+  for (const list of ctx.items?.values() ?? []) for (const i of list) titles.add(i.title);
 
   // Plus whatever this turn produced.
   for (const e of effects) {
@@ -82,6 +85,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       titles.add(e.from);
       titles.add(e.to);
     }
+    if (e.kind === 'needs_item_choice') for (const i of e.open) titles.add(i.title);
+    if (e.kind === 'reminder_fired' && e.items) for (const i of e.items) titles.add(i.title);
     if (e.kind === 'needs_reminder_choice') {
       for (const r of e.rows) {
         titles.add(r.title);

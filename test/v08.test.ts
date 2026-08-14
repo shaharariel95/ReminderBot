@@ -682,4 +682,222 @@ section('the daily counters roll over at his midnight, not UTC');
   rig.restore();
 }
 
+// ---------------------------------------------------------------------------
+
+section('three errands in one message are three things to tick off');
+{
+  // 12.08 21:49: "תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה
+  // מחר ב8 בבוקר" became ONE row with a comma-spliced title. On the 13th he
+  // wrote "זה שלוש משימות, החזרתי את הראוטר ואני עכשיו קונה מחבת, וסיימתי עם
+  // מחסני תאורה" and there was no way to represent any of that.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי לך.');
+  await withNow(now, () =>
+    runWebhook(rig, 'תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה מחר ב8 בבוקר'),
+  );
+
+  const rem = rig.db.prepare('SELECT id, title FROM reminders').get() as any;
+  check('one reminder, not three', !!rem);
+  const items = rig.db
+    .prepare('SELECT title, done_at FROM reminder_items WHERE reminder_id = ? ORDER BY position')
+    .all(rem.id) as any[];
+  eq('but three items under it', items.length, 3);
+  check('in his own words', String(items[0].title).includes('ראוטר'), `got: ${items[0]?.title}`);
+  check('and the last one survived the missing space', String(items[2].title).includes('תאורה'));
+  rig.restore();
+}
+
+section('a list that is not three errands is left alone');
+{
+  // Over-splitting is worse than not splitting: it turns one task into a
+  // checklist he did not ask for. The infinitive ל is the signal — "errand,
+  // errand, errand" has it repeatedly, a shopping list does not.
+  const rig = createRig();
+  const now = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי.');
+  await withNow(now, () => runWebhook(rig, 'תזכיר לי לקנות חלב, ביצים ולחם מחר ב8'));
+  const n = rig.db.prepare('SELECT COUNT(*) AS n FROM reminder_items').get() as any;
+  eq('no items were invented', Number(n.n), 0);
+  rig.restore();
+}
+
+section('the items can be ticked off one at a time');
+{
+  const rig = createRig();
+  const created = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי לך.');
+  await withNow(created, () =>
+    runWebhook(rig, 'תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה מחר ב8 בבוקר'),
+  );
+
+  const fireAt = wallToUtc(2026, 8, 13, 8, 0, TZ);
+  rig.speakQueue.push('נו? שלושת הדברים.');
+  await withNow(fireAt, () => runCron(rig));
+
+  const fired = rig.sent.filter((s) => s.markup).pop();
+  const rows: any[] = (fired?.markup as any)?.inline_keyboard ?? [];
+  const itemButtons = rows.flat().filter((b: any) => String(b.callback_data).startsWith('i:'));
+  eq('one button per errand', itemButtons.length, 3);
+
+  // Tick the router off. The task stays open — two errands are still out there.
+  await withNow(fireAt + 60_000, () => runCallback(rig, String(itemButtons[0].callback_data)));
+  const inst = rig.db.prepare("SELECT status FROM instances").get() as any;
+  eq('the task is still open', inst.status, 'open');
+  const doneCount = rig.db
+    .prepare('SELECT COUNT(*) AS n FROM reminder_items WHERE done_at IS NOT NULL')
+    .get() as any;
+  eq('but one errand is closed', Number(doneCount.n), 1);
+
+  // Tick the other two — the last one closes the whole thing.
+  await withNow(fireAt + 120_000, () => runCallback(rig, String(itemButtons[1].callback_data)));
+  await withNow(fireAt + 180_000, () => runCallback(rig, String(itemButtons[2].callback_data)));
+  const closed = rig.db.prepare('SELECT status FROM instances').get() as any;
+  eq('the last errand closes the task', closed.status, 'done');
+  rig.restore();
+}
+
+section('telling it what you did closes just that errand');
+{
+  // The message that got no reply at all on 13.08 11:04.
+  const rig = createRig();
+  const created = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי לך.');
+  await withNow(created, () =>
+    runWebhook(rig, 'תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה מחר ב8 בבוקר'),
+  );
+  const fireAt = wallToUtc(2026, 8, 13, 8, 0, TZ);
+  rig.speakQueue.push('נו?');
+  await withNow(fireAt, () => runCron(rig));
+
+  const itemId = (
+    rig.db.prepare('SELECT id FROM reminder_items ORDER BY position').get() as any
+  ).id;
+  rig.routerQueue.push({ actions: [{ action: 'complete_item', item_id: itemId }] });
+  rig.speakQueue.push('ראוטר סגור.');
+  await withNow(fireAt + 3 * 3_600_000, () => runWebhook(rig, 'החזרתי את הראוטר'));
+
+  const row = rig.db
+    .prepare('SELECT done_at FROM reminder_items WHERE id = ?')
+    .get(itemId) as any;
+  check('the router is marked done', row.done_at !== null);
+  const inst = rig.db.prepare('SELECT status FROM instances').get() as any;
+  eq('and the other two keep it open', inst.status, 'open');
+  check(
+    'he was actually answered',
+    rig.texts().length > 0 && !rig.texts().some((t) => t.includes('נפל לי משהו')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  rig.restore();
+}
+
+section('when two errands fit equally well, it asks instead of guessing');
+{
+  // Marking the wrong errand is a claim that he did something he did not.
+  // Asking costs one exchange; guessing costs the one rule this bot has.
+  const rig = createRig();
+  const created = wallToUtc(2026, 8, 12, 21, 0, TZ);
+  rig.speakQueue.push('רשמתי.');
+  await withNow(created, () => runWebhook(rig, 'תזכיר לי לקנות לחם, לקנות חלב מחר ב8'));
+  eq(
+    'two errands were split out',
+    Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminder_items').get() as any).n),
+    2,
+  );
+
+  const fireAt = wallToUtc(2026, 8, 13, 8, 0, TZ);
+  rig.speakQueue.push('נו?');
+  await withNow(fireAt, () => runCron(rig));
+
+  // No item_id, and his words fit both errands exactly as well.
+  rig.routerQueue.push({ actions: [{ action: 'complete_item' }] });
+  rig.speakQueue.push('על מה מהם?');
+  await withNow(fireAt + 60_000, () => runWebhook(rig, 'לקנות'));
+
+  const done = rig.db
+    .prepare('SELECT COUNT(*) AS n FROM reminder_items WHERE done_at IS NOT NULL')
+    .get() as any;
+  eq('nothing was marked on a guess', Number(done.n), 0);
+  check(
+    'and he was asked which',
+    rig.texts().some((t) => t.includes('על מה')),
+    `got: ${JSON.stringify(rig.texts())}`,
+  );
+  rig.restore();
+}
+
+section('/list shows which errands are still open');
+{
+  const rig = createRig();
+  const created = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי.');
+  await withNow(created, () =>
+    runWebhook(rig, 'תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה מחר ב8 בבוקר'),
+  );
+  const itemId = (rig.db.prepare('SELECT id FROM reminder_items ORDER BY position').get() as any).id;
+  await db.completeItem(rig.env, itemId);
+
+  const out = (await handleSlash(rig.env, CHAT, '/list')) ?? '';
+  check('the done one is ticked', out.includes('✓ להחזיר ראוטר'), `got: ${out}`);
+  check('the open ones are not', out.includes('☐ לקנות מחבת לטבון'), `got: ${out}`);
+  rig.restore();
+}
+
+section('the router is told what the items are');
+{
+  // It cannot return an item_id it was never shown.
+  const rig = createRig();
+  const created = wallToUtc(2026, 8, 12, 21, 49, TZ);
+  rig.speakQueue.push('רשמתי.');
+  await withNow(created, () =>
+    runWebhook(rig, 'תזכיר לי להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה מחר ב8 בבוקר'),
+  );
+  // Items are listed under the OPEN task, which is the only context where
+  // "החזרתי את הראוטר" can mean anything — so the reminder has to have fired.
+  const fireAt = wallToUtc(2026, 8, 13, 8, 0, TZ);
+  rig.speakQueue.push('נו?');
+  await withNow(fireAt, () => runCron(rig));
+
+  rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+  rig.speakQueue.push('נו?');
+  await withNow(fireAt + 60_000, () => runWebhook(rig, 'מה נשמע'));
+
+  const system = rig.geminiCalls.filter((c) => c.kind === 'router').pop()?.system ?? '';
+  const openBlock = system.slice(system.indexOf('משימות פתוחות'));
+  check(
+    'the items are listed under the open task',
+    openBlock.includes('ראוטר'),
+    'the router cannot see the items',
+  );
+  check('with their ids', /item:\d+/.test(openBlock), 'no item ids in the prompt');
+  check('and their state', /☐/.test(openBlock), 'no open/done marker on the items');
+  rig.restore();
+}
+
+// ---------------------------------------------------------------------------
+
+section('a mutation says which row it touched');
+{
+  // "נקבע. מחר ב-10:00." gave him nothing to point at, so "תזיז את זה ל-15"
+  // had no referent and every follow-up had to re-describe the task.
+  const at = wallToUtc(2026, 8, 14, 10, 0, TZ);
+  const created = renderBaseline(
+    [{ kind: 'reminder_created', id: 23, title: 'לקנות בשר', at,
+       schedule: { type: 'once', at: '2026-08-14T10:00' }, requiresProof: false }],
+    TZ,
+  );
+  check('a new reminder carries its number', created.includes('#23'), `got: ${created}`);
+
+  const moved = renderBaseline([{ kind: 'reminder_retimed', id: 23, title: 'לקנות בשר', at }], TZ);
+  check('and so does a move', moved.includes('#23'), `got: ${moved}`);
+
+  // Nags and fires deliberately do NOT — an id in the middle of being chased
+  // reads like a ticketing system, and he already knows what it is about.
+  const nag = renderBaseline(
+    [{ kind: 'nagged', instanceId: 9, title: 'לקנות בשר', since: at, round: 1 }],
+    TZ,
+  );
+  check('a nag stays clean', !nag.includes('#'), `got: ${nag}`);
+}
+
 done();

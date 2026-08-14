@@ -157,6 +157,20 @@ CREATE TABLE rejections (
 );
 CREATE INDEX idx_rejections_chat ON rejections(chat_id, id DESC);
 
+-- One reminder, several things to tick off — see migrations/011. Items hang off
+-- the reminder and are cleared when it fires again, so "החזרתי את הראוטר" can
+-- close one errand out of three without closing the whole task.
+CREATE TABLE reminder_items (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  reminder_id INTEGER NOT NULL,
+  chat_id     TEXT    NOT NULL,
+  title       TEXT    NOT NULL,
+  position    INTEGER NOT NULL,
+  done_at     INTEGER,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX idx_items_reminder ON reminder_items(reminder_id, position);
+
 -- The life story of a reminder — see migrations/009. Answers "what happened to
 -- #18" (/why) and, counted over a day, "did the cron run, and did anything
 -- fail to reach him" (/diag). Two reminders went missing in August 2026 and

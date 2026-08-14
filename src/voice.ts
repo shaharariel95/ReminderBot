@@ -53,7 +53,7 @@ function one(e: Effect, tz: string): string {
         // Ask now, while he still remembers. In an hour he won't.
         return `קבעתי לך משהו ל-${when(e.at, tz)}. על מה להזכיר?`;
       }
-      return `קבעתי: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
+      return `קבעתי #${e.id}: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
         e.requiresProof ? ' דורש תמונה.' : ''
       }${
         e.duplicateOf
@@ -63,17 +63,17 @@ function one(e: Effect, tz: string): string {
     case 'reminder_captured':
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
-        : `תפסתי: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
+        : `תפסתי #${e.id}: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
     case 'reminder_duplicate':
       return `כבר יש לך את זה — #${e.id} "${e.title}" ב-${hhmm(e.at, tz)}.`;
     case 'reminder_scheduled':
-      return `"${e.title}" — נקבע ל-${when(e.at, tz)}.`;
+      return `#${e.id} "${e.title}" — נקבע ל-${when(e.at, tz)}.`;
     case 'reminder_retimed':
-      return `שיניתי. "${e.title}" ב-${when(e.at, tz)}.`;
+      return `שיניתי. #${e.id} "${e.title}" ב-${when(e.at, tz)}.`;
     case 'reminder_renamed':
-      return `עכשיו זה "${e.to}" במקום "${e.from}". השעה לא זזה.`;
+      return `#${e.id} עכשיו "${e.to}" במקום "${e.from}". השעה לא זזה.`;
     case 'reminder_deleted':
-      return `ביטלתי את "${e.title}".`;
+      return `ביטלתי את #${e.id} "${e.title}".`;
     case 'instance_done':
       return `נסגר: "${e.title}". רצף ${e.streak}.`;
     case 'instance_skipped':
@@ -97,6 +97,16 @@ function one(e: Effect, tz: string): string {
       // A question, not a confirmation. Nothing was written and the wording
       // must not suggest otherwise — same rule as followup_suggested above.
       return `רגע — ${when(e.at, tz)}: "${e.title}". לשים לך תזכורת?`;
+    case 'item_done':
+      // When that was the LAST errand, an `instance_done` rides in the same
+      // array and says the rest — so this stays a tick and does not also try
+      // to congratulate him twice in one message.
+      return e.remaining > 0
+        ? `✓ "${e.title}". נשארו ${e.remaining}.`
+        : `✓ "${e.title}".`;
+    case 'needs_item_choice':
+      // Asking, because guessing here marks an errand he did not do.
+      return `על מה מהם? ${e.open.map((i) => `"${i.title}"`).join(' · ')}`;
     case 'needs_time':
       // Names the reminder rather than asking a bare "מתי?". He may be doing
       // three things at once, and an unattributed question is one he has to
@@ -160,10 +170,19 @@ function one(e: Effect, tz: string): string {
         : 'האינבוקס ריק.';
     case 'reminder_fired': {
       const proof = e.requiresProof ? '\n\nותשלח תמונה.' : '';
+      // A multi-errand reminder reads as a checklist, not as one comma-spliced
+      // sentence. Rendered on single newlines: sendBurst splits on BLANK lines,
+      // and three errands arriving as three separate Telegram messages is
+      // exactly the notification spam this is meant to replace.
+      const list = e.items?.length
+        ? `\n${e.items.map((i) => `${i.done_at ? '✓' : '☐'} ${i.title}`).join('\n')}`
+        : '';
       const head = untitled(e.title)
         ? 'נו? ביקשת שאזכיר לך משהו עכשיו. לא אמרת מה.'
-        : `נו? ${e.title}.`;
-      return `${head}${missNote(e.misses)}${proof}`;
+        : e.items?.length
+          ? `נו? ${e.items.length} דברים:`
+          : `נו? ${e.title}.`;
+      return `${head}${list}${missNote(e.misses)}${proof}`;
     }
     case 'nagged':
       return untitled(e.title)

@@ -74,7 +74,18 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
     db.listGoals(env, chatId),
     db.openInstances(env, chatId),
   ]);
-  return { settings, stats, reminders, goals, open, nowLabel: formatLocal(Date.now(), settings.tz) };
+  // Only when something is actually being chased. A chat with nothing open has
+  // no errands to tick off, and this would otherwise be a query per message to
+  // build an empty map.
+  const items = open.length
+    ? await db
+        .itemsForReminders(env, [...new Set(open.map((i) => i.reminder_id))])
+        .catch(() => undefined)
+    : undefined;
+  return {
+    settings, stats, reminders, goals, open, items,
+    nowLabel: formatLocal(Date.now(), settings.tz),
+  };
 }
 
 async function handleUpdate(update: any, env: Env): Promise<void> {
@@ -584,6 +595,32 @@ async function handleCallback(update: any, env: Env): Promise<void> {
         }
         break;
       }
+      // One errand out of several. The instance stays open until the last
+      // tick, which is the entire point — a task with three things in it had
+      // only "עשיתי", and tapping that after doing two was a false report.
+      case 'item': {
+        const item = await db.getItem(env, cb.item);
+        // chat_id is on the row precisely so this check needs no join.
+        if (item && item.chat_id === chatId && (await db.completeItem(env, item.id))) {
+          const remaining = await db.openItemCount(env, item.reminder_id);
+          effects.push({
+            kind: 'item_done', id: item.id, title: item.title,
+            reminderId: item.reminder_id, remaining,
+          });
+          if (remaining === 0) {
+            const open = await db.openInstances(env, chatId);
+            const inst = open.find((i) => i.reminder_id === item.reminder_id);
+            if (inst && (await db.closeIfOpen(env, inst.id, 'done', 'כל הפריטים'))) {
+              const fresh = await db.stats(env, chatId);
+              effects.push({
+                kind: 'instance_done', id: inst.id, title: inst.title,
+                streak: fresh.currentStreak,
+              });
+            }
+          }
+        }
+        break;
+      }
       case 'gdone':
       case 'gdrop': {
         const status = cb.t === 'gdone' ? 'done' : 'dropped';
@@ -1053,11 +1090,21 @@ async function tickChat(
       now + nagDelayMinutes(0) * 60_000,
     );
     console.log(`fired reminder ${r.id} → instance ${instanceId}${misses ? ` (${misses} missed)` : ''}`);
+    // Ticks from the LAST time this fired are cleared before it goes out
+    // again, or a daily three-errand reminder arrives on day two already
+    // showing all three done. Items hang off the reminder, not the instance
+    // (see migrations/011), which is what makes this line necessary — and
+    // best-effort, because a stale ✓ in one message is worth far less than
+    // everyone's reminders.
+    await db.resetItems(env, r.id).catch((e) => console.error('resetItems', e));
+    const items = await db.listItems(env, r.id).catch(() => []);
+
     if (muted) continue;
     fired.push({
       kind: 'reminder_fired', id: r.id, title: r.title, instanceId,
       requiresProof: r.requires_proof === 1,
       ...(misses > 0 ? { misses } : {}),
+      ...(items.length ? { items } : {}),
     });
   }
 

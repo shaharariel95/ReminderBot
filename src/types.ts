@@ -58,6 +58,21 @@ export interface Reminder {
   created_at: number;
 }
 
+/**
+ * One tickable thing inside a reminder. See migrations/011 for why these hang
+ * off the reminder rather than off the instance.
+ */
+export interface ReminderItem {
+  id: number;
+  reminder_id: number;
+  chat_id: string;
+  title: string;
+  position: number;
+  /** NULL while it is still open. */
+  done_at: number | null;
+  created_at: number;
+}
+
 export interface Instance {
   id: number;
   reminder_id: number;
@@ -118,6 +133,14 @@ export interface Intent {
   action:
     | 'create_reminder'
     | 'complete'
+    /**
+     * Close ONE errand inside a multi-item reminder, leaving the rest open.
+     *
+     * Without this the only honest answer to "החזרתי את הראוטר" was silence:
+     * `complete` closes the whole instance, which would have been a claim about
+     * the two errands he had NOT done.
+     */
+    | 'complete_item'
     | 'snooze'
     /** "I'm on it / on my way." Neither done nor postponed: the task stays
      *  open and the nag ladder is held off for a grace window. Without this,
@@ -157,6 +180,8 @@ export interface Intent {
   requires_proof?: boolean;
   proof_type?: 'text' | 'photo' | 'any';
   target_id?: number;
+  /** Which item of a multi-errand reminder — see the complete_item action. */
+  item_id?: number;
   goal_id?: number;
   why?: string;
   snooze_minutes?: number;
@@ -240,6 +265,9 @@ export type Effect =
    * not to which reminder, and there was more than one candidate.
    */
   | { kind: 'needs_reminder_choice'; action: 'reschedule' | 'rename'; rows: Reminder[] }
+  /** He reported doing something, and more than one open errand fits. Asking
+   *  is the only truthful move: guessing marks an errand he did not do. */
+  | { kind: 'needs_item_choice'; open: ReminderItem[] }
   /**
    * "מתי?" — WHICH reminder is known, the hour is not.
    *
@@ -249,6 +277,15 @@ export type Effect =
    * bot asked for an hour, he gave one, and it was applied to nothing at all.
    * Carrying the id is what lets db.setAwaiting remember the question.
    */
+  /**
+   * One errand out of several is done; the task itself is still open.
+   *
+   * `remaining` is what makes the wording true without a second query — it is
+   * read after the write, so it is the count he actually has left. When it
+   * reaches zero the caller closes the instance too and an `instance_done`
+   * rides alongside this one.
+   */
+  | { kind: 'item_done'; id: number; title: string; reminderId: number; remaining: number }
   | { kind: 'needs_time'; id: number; title: string }
   /**
    * He MENTIONED something with a time in it — "יש לי מחר ב-9 אימון" — and was
@@ -285,7 +322,7 @@ export type Effect =
    * without being done. Carried so the wording can name the pattern instead of
    * repeating the identical ping for the fifth time as though it were the first.
    */
-  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number }
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number; items?: ReminderItem[] }
   | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
   | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
@@ -343,7 +380,7 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'instance_started', 'reminder_annotated',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
-  'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten',
+  'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten', 'item_done',
 ]);
 
 /**

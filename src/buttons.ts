@@ -32,7 +32,10 @@ export type Callback =
    *  payload at all: callback_data has 64 bytes and a title does not fit, so
    *  the title and instant live in the chat's `awaiting` slot and the tap just
    *  says yes. One outstanding offer per chat, which is all there can be. */
-  | { t: 'offer' };
+  | { t: 'offer' }
+  /** Tick one errand off a multi-item reminder. The whole task stays open
+   *  until the last one goes — see db.completeItem. */
+  | { t: 'item'; item: number };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
@@ -60,6 +63,8 @@ export function encode(c: Callback): string {
       return `gx:${c.goal}`;
     case 'offer':
       return 'o';
+    case 'item':
+      return `i:${c.item}`;
   }
 }
 
@@ -91,6 +96,8 @@ export function decode(s: string): Callback | null {
         : null;
     case 'o':
       return parts.length === 1 ? { t: 'offer' } : null;
+    case 'i':
+      return parts.length === 2 && isNat(parts[1]) ? { t: 'item', item: +parts[1] } : null;
     default:
       return null;
   }
@@ -147,6 +154,30 @@ export function buttonsFor(
   if (fired.length === 1) {
     const instance = positiveId(fired[0].instanceId);
     if (instance === null) return undefined;
+
+    // A multi-errand reminder gets one tick per errand, above the usual row.
+    // "עשיתי" on its own would be the only affordance for a task with three
+    // things in it, and tapping it after doing two of them is exactly the
+    // false report this whole feature exists to make unnecessary.
+    const items = Array.isArray(fired[0].items) ? (fired[0].items as any[]) : [];
+    const open = items.filter((i) => i && i.done_at === null);
+    if (open.length) {
+      const rows = open.flatMap((i) => {
+        const item = positiveId(i.id);
+        return item === null
+          ? []
+          : [[{ text: `✓ ${shortLabel(i.title)}`, data: { t: 'item', item } }] as Button[]];
+      });
+      if (rows.length) {
+        rows.push([
+          { text: 'הכל', data: { t: 'done', instance } },
+          { text: 'עוד 10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
+          { text: 'לא היום', data: { t: 'skip', instance } },
+        ]);
+        return rows;
+      }
+    }
+
     return [
       [
         { text: 'עשיתי', data: { t: 'done', instance } },

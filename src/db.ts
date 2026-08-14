@@ -1,4 +1,4 @@
-import type { Env, Goal, Instance, Reminder, Settings, Stats } from './types';
+import type { Env, Goal, Instance, Reminder, ReminderItem, Settings, Stats } from './types';
 import { localDateKey } from './time';
 
 const DAY = 86_400_000;
@@ -1412,4 +1412,104 @@ export function readAwaiting(raw: string | null, now: number = Date.now()): Awai
     // safe; acting on half of it is not.
     return null;
   }
+}
+
+// ------------------------------------------------------------------- items
+
+/**
+ * More than this in one reminder is a misparse, not a checklist. Six errands
+ * in one sentence is already unusual; sixty is a comma-separated paragraph
+ * that happened to contain the word "תזכיר".
+ */
+export const MAX_ITEMS = 6;
+
+export async function addItems(
+  env: Env,
+  reminderId: number,
+  chatId: string,
+  titles: string[],
+): Promise<void> {
+  const now = Date.now();
+  for (let i = 0; i < titles.length; i++) {
+    await env.DB.prepare(
+      `INSERT INTO reminder_items (reminder_id, chat_id, title, position, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(reminderId, chatId, titles[i].slice(0, 120), i, now)
+      .run();
+  }
+}
+
+export async function listItems(env: Env, reminderId: number): Promise<ReminderItem[]> {
+  const res = await env.DB.prepare(
+    'SELECT * FROM reminder_items WHERE reminder_id = ? ORDER BY position',
+  )
+    .bind(reminderId)
+    .all<ReminderItem>();
+  return res.results ?? [];
+}
+
+/** Every item on every reminder in `ids`, so a list of reminders costs one query. */
+export async function itemsForReminders(
+  env: Env,
+  ids: number[],
+): Promise<Map<number, ReminderItem[]>> {
+  const out = new Map<number, ReminderItem[]>();
+  if (!ids.length) return out;
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminder_items WHERE reminder_id IN (${ids.map(() => '?').join(',')})
+      ORDER BY reminder_id, position`,
+  )
+    .bind(...ids)
+    .all<ReminderItem>();
+  for (const row of res.results ?? []) {
+    const list = out.get(row.reminder_id) ?? [];
+    list.push(row);
+    out.set(row.reminder_id, list);
+  }
+  return out;
+}
+
+export async function getItem(env: Env, id: number): Promise<ReminderItem | null> {
+  return env.DB.prepare('SELECT * FROM reminder_items WHERE id = ?').bind(id).first<ReminderItem>();
+}
+
+/**
+ * Tick one item off. Returns false when it was already done, so a double tap
+ * cannot report the same errand twice — same contract as closeIfOpen.
+ */
+export async function completeItem(env: Env, id: number, at: number = Date.now()): Promise<boolean> {
+  const res = await env.DB.prepare(
+    'UPDATE reminder_items SET done_at = ? WHERE id = ? AND done_at IS NULL',
+  )
+    .bind(at, id)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/** How many items are still open on a reminder. Zero means the task is finished. */
+export async function openItemCount(env: Env, reminderId: number): Promise<number> {
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM reminder_items WHERE reminder_id = ? AND done_at IS NULL',
+  )
+    .bind(reminderId)
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * Clear every tick when the reminder comes round again.
+ *
+ * Items live on the reminder rather than on the instance (see migrations/011),
+ * so this is what makes a daily three-errand reminder work on the second day.
+ * Called from the tick right after the instance is created, which is also why
+ * it must be cheap and must not throw the tick — a stale tick costs a wrong ☑
+ * in one message, and a thrown tick costs everyone their reminders.
+ */
+export async function resetItems(env: Env, reminderId: number): Promise<void> {
+  await env.DB.prepare(
+    'UPDATE reminder_items SET done_at = NULL WHERE reminder_id = ? AND done_at IS NOT NULL',
+  )
+    .bind(reminderId)
+    .run();
 }

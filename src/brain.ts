@@ -1,6 +1,6 @@
 import { generate, generateJson, type Part, type Turn } from './gemini';
 import { buildSystemPrompt } from './persona';
-import type { Env, Facts, Goal, Instance, Intent, Reminder, Settings, Stats } from './types';
+import type { Env, Facts, Goal, Instance, Intent, Reminder, ReminderItem, Settings, Stats } from './types';
 import { describeSchedule, formatLocal, wallString } from './time';
 
 /**
@@ -19,6 +19,7 @@ const ACTION_SCHEMA = {
       enum: [
         'create_reminder',
         'complete',
+        'complete_item',
         'snooze',
         'on_my_way',
         'annotate',
@@ -54,6 +55,7 @@ const ACTION_SCHEMA = {
     requires_proof: { type: 'BOOLEAN' },
     proof_type: { type: 'STRING', enum: ['text', 'photo', 'any'] },
     target_id: { type: 'INTEGER' },
+    item_id: { type: 'INTEGER' },
     snooze_minutes: { type: 'INTEGER' },
     chill_hours: { type: 'INTEGER' },
     intensity: { type: 'INTEGER' },
@@ -83,6 +85,12 @@ export interface Context {
   reminders: Reminder[];
   goals: Goal[];
   open: Instance[];
+  /**
+   * Items of the reminders behind `open`, keyed by reminder_id. Only loaded
+   * when something is actually open — a chat with no task being chased has
+   * nothing to tick off, and this would be a query per turn for an empty map.
+   */
+  items?: Map<number, ReminderItem[]>;
   nowLabel: string;
 }
 
@@ -116,12 +124,22 @@ export function remindersSummary(ctx: Context): string {
 export function openSummary(ctx: Context): string {
   if (!ctx.open.length) return '  (אין)';
   return ctx.open
-    .map(
-      (i) =>
-        `  instance ${i.id} → "${i.title}" (נשלח ${formatLocal(i.fired_at, ctx.settings.tz)}, ${
-          i.nag_count
-        } נדנודים)`,
-    )
+    .map((i) => {
+      const head = `  instance ${i.id} → "${i.title}" (נשלח ${formatLocal(
+        i.fired_at,
+        ctx.settings.tz,
+      )}, ${i.nag_count} נדנודים)`;
+      // The errands inside the task, with their ids. Without these the router
+      // cannot return a `complete_item` — it would be naming a row it has
+      // never been shown, which the prompt forbids and which effects.ts would
+      // refuse anyway. "החזרתי את הראוטר" is unanswerable without this line.
+      const items = ctx.items?.get(i.reminder_id) ?? [];
+      if (!items.length) return head;
+      return [
+        head,
+        ...items.map((it) => `      item:${it.id} ${it.done_at ? '✓' : '☐'} "${it.title}"`),
+      ].join('\n');
+    })
     .join('\n');
 }
 
@@ -173,6 +191,10 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 
 כללי החלטה:
 - "complete" — המשתמש מדווח שביצע משימה, או שולח תמונה כהוכחה. חובה target_id = ה-instance id הרלוונטי מהרשימה למעלה. אם אין משימה פתוחה מתאימה, החזר "chat".
+- "complete_item" — הוא דיווח שעשה **חלק** ממשימה שיש בה כמה פריטים ("החזרתי את הראוטר" כשהמשימה היא ראוטר + מחבת + מחסני תאורה). item_id = ה-item id מהרשימה למעלה, ורק אחד שמופיע שם.
+  זה לא complete — complete סוגר את כל המשימה, וזו תהיה אמירה על פריטים שהוא לא עשה.
+  אם הוא דיווח על כמה פריטים בהודעה אחת — החזר איבר complete_item נפרד לכל אחד.
+  אם אין פריטים ברשימה למעלה, זה לא הפעולה הזאת.
 - "create_reminder" — הוא מבקש תזכורת/משימה חדשה. חלץ title קצר בלשון המשתמש.
   אם אין לו כותרת ברורה (למשל "תזכיר לי עוד 5 דקות" בלי לומר על מה) — תן title כללי כמו "תזכורת" ותמשיך. אל תחזיר "chat" רק בגלל שחסרה כותרת.
 

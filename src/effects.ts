@@ -1,6 +1,6 @@
 import * as db from './db';
 import type { Context } from './brain';
-import type { Effect, Env, Intent, Reminder, Schedule } from './types';
+import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDayBounds, wallString } from './time';
 import { findFutureInstant, parseDuration } from './quickparse';
@@ -58,6 +58,34 @@ function isNearMatch(normA: string, normB: string): boolean {
   if (jaccard(tokensA, tokensB) >= 0.5) return true;
   const [shorter, longer] = normA.length <= normB.length ? [normA, normB] : [normB, normA];
   return shorter.length >= 3 && longer.includes(shorter);
+}
+
+/**
+ * "להחזיר ראוטר, לקנות מחבת לטבון,ללכת למחסני תאורה" → three things to tick
+ * off. Anything else → nothing, and the title stays exactly as he typed it.
+ *
+ * The rule is deliberately narrow, because over-splitting is the worse error.
+ * A checklist he did not ask for turns one task into three ticks he has to
+ * clear before the bot stops chasing him; a title with commas in it is just
+ * what he wrote. So a split has to be obviously a list of ERRANDS:
+ *
+ *   - 2 to MAX_ITEMS comma-separated parts, each with something in it
+ *   - at least two of them starting with an infinitive ל
+ *
+ * That last condition is what does the work. "להחזיר ראוטר, לקנות מחבת, ללכת
+ * למחסני תאורה" has three; "לקנות חלב, ביצים ולחם" has one, and stays a single
+ * shopping errand — which is correct, because that is one trip to one shop.
+ */
+export function splitIntoItems(title: string): string[] {
+  const parts = title
+    .split(/\s*[,;]\s*/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 3);
+  if (parts.length < 2 || parts.length > db.MAX_ITEMS) return [];
+  // The Hebrew infinitive marker, followed by a real letter. Two of them means
+  // he listed actions, not the parts of one action.
+  const verbs = parts.filter((p) => /^ל[א-ת]/.test(p)).length;
+  return verbs >= 2 ? parts : [];
 }
 
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
@@ -139,6 +167,100 @@ async function suggestFollowup(
 /** Anything scheduled within this of the appointment counts as "already handled". */
 const FOLLOWUP_QUIET_WINDOW_MS = 4 * 3_600_000;
 
+/**
+ * Every still-open item across the reminders he currently has firing.
+ *
+ * Scoped to OPEN INSTANCES rather than to every reminder he owns: "החזרתי את
+ * הראוטר" is about the thing being chased right now, and matching it against a
+ * reminder scheduled for next Thursday would tick off an errand he has not
+ * reached yet.
+ */
+async function openItemsFor(env: Env, chatId: string, ctx: Context): Promise<ReminderItem[]> {
+  const ids = [...new Set(ctx.open.map((i) => i.reminder_id))];
+  if (!ids.length) return [];
+  const byReminder = await db.itemsForReminders(env, ids);
+  const out: ReminderItem[] = [];
+  for (const list of byReminder.values()) {
+    for (const item of list) if (item.done_at === null && item.chat_id === chatId) out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Which open item his words are about, or null when it is not obvious.
+ *
+ * Deliberately requires a real word in common — a shared "את" or "ל" is not
+ * evidence of anything. Returning null when two items match equally well is
+ * the whole point: the caller then ASKS, and asking is always truthful where
+ * guessing is a claim about what he did.
+ */
+function matchItem(open: ReminderItem[], text: string): ReminderItem | null {
+  const words = new Set(
+    normalizeTitle(text)
+      .split(' ')
+      .filter((w) => w.length >= 3),
+  );
+  if (!words.size) return null;
+
+  const scored = open
+    .map((item) => {
+      const itemWords = normalizeTitle(item.title)
+        .split(' ')
+        .filter((w) => w.length >= 3);
+      return { item, hits: itemWords.filter((w) => words.has(w)).length };
+    })
+    .filter((s) => s.hits > 0)
+    .sort((a, b) => b.hits - a.hits);
+
+  if (!scored.length) return null;
+  // A tie means two errands fit his sentence equally well and nothing in it
+  // separates them.
+  if (scored.length > 1 && scored[0].hits === scored[1].hits) return null;
+  return scored[0].item;
+}
+
+/**
+ * Close the loop after an item is ticked: report it, and when it was the last
+ * one, close the task itself.
+ *
+ * The instance close rides in the SAME effects array rather than being left to
+ * the next turn, so "that was the last one" is one message with one streak,
+ * not a tick followed by silence.
+ */
+async function finishItem(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  item: ReminderItem,
+): Promise<Effect[]> {
+  const remaining = await db.openItemCount(env, item.reminder_id);
+  const effects: Effect[] = [
+    {
+      kind: 'item_done',
+      id: item.id,
+      title: item.title,
+      reminderId: item.reminder_id,
+      remaining,
+    },
+  ];
+  if (remaining > 0) return effects;
+
+  // Last errand. Close whichever open instance belongs to this reminder — by
+  // reminder_id, never "the only open one", or a second task firing in the
+  // same minute would be closed by the wrong tick.
+  const inst = ctx.open.find((i) => i.reminder_id === item.reminder_id);
+  if (inst && (await db.closeIfOpen(env, inst.id, 'done', 'כל הפריטים'))) {
+    const fresh = await db.stats(env, chatId);
+    effects.push({
+      kind: 'instance_done',
+      id: inst.id,
+      title: inst.title,
+      streak: fresh.currentStreak,
+    });
+  }
+  return effects;
+}
+
 export async function applyIntent(
   env: Env,
   chatId: string,
@@ -211,6 +333,13 @@ export async function applyIntent(
         next_fire_at: next,
       });
 
+      // Three errands in one sentence become three things to tick off, under
+      // one reminder. The title is left exactly as he typed it — the items are
+      // additional structure, not a replacement, so /list, the nag and every
+      // existing test still see the sentence he wrote.
+      const itemTitles = splitIntoItems(title);
+      if (itemTitles.length) await db.addItems(env, id, chatId, itemTitles);
+
       // Nothing within a minute, so widen to the whole local day. He asked for
       // the same thing twice, hours apart, having forgotten the first — the
       // case the 60-second window was never going to catch. Only ever a
@@ -250,6 +379,33 @@ export async function applyIntent(
         { kind: 'instance_done', id: inst.id, title: inst.title, streak: fresh.currentStreak },
         ...(await suggestFollowup(env, chatId, ctx, inst.id, inst.title)),
       ];
+    }
+
+    /**
+     * "החזרתי את הראוטר" — one errand out of three.
+     *
+     * The item is resolved by id when the router names one, and otherwise by
+     * matching his words against the open items. That fallback matters: this
+     * is the intent the model is newest at, and the deterministic path costs
+     * nothing and cannot hallucinate an id.
+     */
+    case 'complete_item': {
+      const open = await openItemsFor(env, chatId, ctx);
+      const item =
+        open.find((i) => i.id === intent.item_id) ??
+        matchItem(open, intent.title ?? intent.note ?? userText);
+      if (!item) {
+        // Never silently falls back to closing the whole task. Getting this
+        // wrong claims he did errands he did not do, which is the one thing
+        // this pipeline exists to prevent.
+        return open.length
+          ? [{ kind: 'needs_item_choice', open }]
+          : [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
+      if (!(await db.completeItem(env, item.id))) {
+        return [{ kind: 'nothing', why: 'no_open_task', userText }];
+      }
+      return finishItem(env, chatId, ctx, item);
     }
 
     case 'annotate': {

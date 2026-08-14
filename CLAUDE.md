@@ -90,6 +90,24 @@ It expires (`AWAITING_TTL_MS`) **and** is cleared by any turn that does not
 re-ask. Both matter: a slot left open means a bare "15:00" typed later, about
 something else, silently retimes whatever was last asked about.
 
+## Items
+
+A reminder can hold several errands (, migrations/011). Items
+hang off the REMINDER, and  clears the ticks each time it fires
+— that line is what makes a daily three-errand reminder work on day two.
+
+Splitting is deliberately narrow (): commas, plus at
+least two parts starting with an infinitive ל. Over-splitting is the worse
+error — a checklist he did not ask for turns one task into three ticks he has
+to clear, whereas a title with commas in it is just what he typed.
+
+ NEVER falls back to closing the whole task, and returns null on a tie. Marking the wrong errand is a claim that he did
+something he did not, so asking is the only honest move.
+
+Items are shown to the router only under OPEN instances, which is also the
+scope  matches against. Keep those two together or the model
+will name an item the code then refuses.
+
 ## Things that look like bugs and are not
 
 - **`quickparse.ts` bails a lot on purpose.** A partial parse is a confident
@@ -151,6 +169,7 @@ a deploy; a fresh rig is a bot that is already running the current version.
 ```bash
 npx wrangler d1 execute nu-bot --remote --file=./migrations/009_events_and_errors.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/010_awaiting.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/011_reminder_items.sql
 npm run deploy
 ```
 

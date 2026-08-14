@@ -1,6 +1,6 @@
 import * as db from './db';
 import { describeSchedule, formatLocal, localDayBounds } from './time';
-import type { Env, Schedule } from './types';
+import type { Env, ReminderItem, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
 
@@ -39,7 +39,10 @@ const ALIASES: Record<string, string> = {
   תקלות: '/errors',
   שגיאות: '/errors',
   מחכים: '/pending',
-  שקט: '/chill',
+  // Deliberately NOT here: שקט → /chill. Every other alias answers a question;
+  // that one takes an action — four hours of silence — off a single bare word
+  // that could easily be part of something else. "תשתוק" reaches the router's
+  // `chill` intent perfectly well, and that path can see the whole sentence.
 };
 
 /**
@@ -188,6 +191,10 @@ export async function handleSlash(
         '',
         'הכל עובד גם בעברית, עם או בלי לוכסן:',
         'רשימה · היום · מטרות · עזרה · אינבוקס · תקלות',
+        '',
+        'כמה דברים בתזכורת אחת:',
+        '"תזכיר לי להחזיר ראוטר, לקנות מחבת, ללכת למחסני תאורה מחר ב8"',
+        'כל אחד מהם נסגר בנפרד — בכפתור, או "החזרתי את הראוטר".',
         '',
         'כל השאר בשפה חופשית:',
         '"תזכיר לי כל יום ב-7 לרוץ" · "אני רוצה לפתוח תיק מסחר"',
@@ -365,6 +372,12 @@ export async function handleSlash(
       const reminders = await db.listReminders(env, chatId);
       if (!reminders.length) return 'אין לך תזכורות פעילות.';
       const settings = await db.getSettings(env, chatId);
+      // One query for every reminder's errands, not one per row. This is the
+      // command he runs most, and it is also where "which of the three is
+      // still open" is the actual question.
+      const items = await db
+        .itemsForReminders(env, reminders.map((r) => r.id))
+        .catch(() => new Map<number, ReminderItem[]>());
       return reminders
         .map((r) => {
           let s = r.schedule;
@@ -374,7 +387,13 @@ export async function handleSlash(
             /* raw */
           }
           const next = r.next_fire_at ? formatLocal(r.next_fire_at, settings.tz) : 'לא מתוזמן';
-          return `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${r.requires_proof ? ' · דורש הוכחה' : ''}`;
+          const head = `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${
+            r.requires_proof ? ' · דורש הוכחה' : ''
+          }`;
+          const own = items.get(r.id) ?? [];
+          return own.length
+            ? [head, ...own.map((i) => `   ${i.done_at ? '✓' : '☐'} ${i.title}`)].join('\n')
+            : head;
         })
         .join('\n');
     }
