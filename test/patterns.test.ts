@@ -536,11 +536,66 @@ async function givingUpStaysQuietBelowTheFloor(): Promise<void> {
   two.restore();
 }
 
+
+// --------------------------------------------------------------------------
+section('the bot stops raising a goal he has never once answered about');
+
+/**
+ * `stalestGoal`'s backoff tops out at four days and then repeats forever.
+ * `checkin_count` counts CONSECUTIVE unanswered check-ins (recordGoalProgress
+ * resets it), so a goal he never engages with is asked about indefinitely.
+ *
+ * Production, 19.08.2026: one goal, `checkin_count = 11`, last progress on
+ * 07.08 — twelve days of being asked, and the count is a floor rather than a
+ * total, because an answer the router files as `chat` never resets it. He
+ * replied "מחכה לנס" that morning and the counter still went up.
+ *
+ * Past the floor the bot simply stops bringing it up on its own. Nothing is
+ * claimed and nothing is deleted: it stays in /goals, the persona may still
+ * use its name, and every check-in already carried "עשיתי" and "תוריד את זה"
+ * buttons. Going quiet about something ignored eight times running is not a
+ * statement about him, which is why it needs no announcement to stay honest.
+ */
+async function aGoalHeNeverAnswersGoesQuiet(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const now = Date.UTC(2026, 7, 17, 9, 0, 0);
+
+  rig.db.prepare(
+    "INSERT INTO goals (chat_id, title, why, status, last_progress, last_progress_at," +
+      " last_checkin_at, checkin_count, created_at) VALUES (?, 'להגיד לאישתי משהו יפה', NULL," +
+      " 'active', NULL, NULL, ?, ?, ?)",
+  ).run(HIM, now - 30 * 86_400_000, db.GOAL_QUIET_AFTER, now - 60 * 86_400_000);
+
+  const silent = await db.stalestGoal(rig.env, HIM, now);
+  check(
+    'past the floor it is no longer offered for an unprompted check-in',
+    silent === null,
+    JSON.stringify(silent),
+  );
+
+  // One below the floor it is still fair game — the bot has not given up on
+  // him, it has given up on ASKING about this one unprompted.
+  rig.db.prepare('UPDATE goals SET checkin_count = ? WHERE chat_id = ?')
+    .run(db.GOAL_QUIET_AFTER - 1, HIM);
+  const stillAsked = await db.stalestGoal(rig.env, HIM, now);
+  check('one below it, the bot still asks', stillAsked !== null, JSON.stringify(stillAsked));
+
+  // And engaging brings it straight back: recordGoalProgress zeroes the count,
+  // which is what makes it "consecutive" rather than "ever".
+  rig.db.prepare('UPDATE goals SET checkin_count = ? WHERE chat_id = ?')
+    .run(db.GOAL_QUIET_AFTER + 5, HIM);
+  await db.recordGoalProgress(rig.env, 1, 'שלחתי לה משהו');
+  const revived = await db.stalestGoal(rig.env, HIM, now + 10 * 86_400_000);
+  check('and one answer from him brings it back', revived !== null, JSON.stringify(revived));
+  rig.restore();
+}
+
 await endToEnd();
 await declineAndDrop();
 await crowding();
 await crowdingNamesTheRightDay();
 await givingUpAsksWhetherItIsWorthKeeping();
 await givingUpStaysQuietBelowTheFloor();
+await aGoalHeNeverAnswersGoesQuiet();
 await ladderHonesty();
 done();

@@ -170,6 +170,27 @@ export async function listGoals(env: Env, chatId: string): Promise<Goal[]> {
  * Done in SQL rather than filtered afterwards for the same reason the due
  * queries are: a goal in cooldown must not occupy the one row this returns.
  */
+/**
+ * Consecutive unanswered check-ins after which the bot stops raising a goal
+ * on its own.
+ *
+ * The backoff below tops out at four days and then repeats forever, so a goal
+ * he never engages with is asked about indefinitely. Production, 19.08.2026:
+ * one goal, `checkin_count = 11`, last progress twelve days earlier. And 11 is
+ * a FLOOR, not a total — recordGoalProgress is what resets the counter, so an
+ * answer the router files as `chat` never does. He replied "מחכה לנס" that
+ * morning and the count still went up.
+ *
+ * Eight is roughly three weeks under the ladder below. Past it the bot simply
+ * stops bringing this one up unprompted. Nothing is claimed and nothing is
+ * deleted: it stays in /goals, the persona may still use its name against him,
+ * and every check-in already carried "עשיתי" and "תוריד את זה" buttons. Going
+ * quiet about something ignored eight times running is not a statement about
+ * HIM, which is what lets it need no announcement to stay honest — the same
+ * reason `deferNag` says nothing.
+ */
+export const GOAL_QUIET_AFTER = 8;
+
 export async function stalestGoal(
   env: Env,
   chatId: string,
@@ -177,6 +198,7 @@ export async function stalestGoal(
 ): Promise<Goal | null> {
   return env.DB.prepare(
     `SELECT * FROM goals WHERE chat_id = ? AND status = 'active'
+       AND checkin_count < ${GOAL_QUIET_AFTER}
        AND (last_checkin_at IS NULL OR ? - last_checkin_at >= CASE
               WHEN checkin_count <= 0 THEN 0
               WHEN checkin_count = 1 THEN 43200000
