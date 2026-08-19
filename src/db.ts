@@ -1237,6 +1237,20 @@ export async function recentRejections(
  * between a table and unbounded growth.
  */
 export const EVENT_KEEP = 400;
+
+/**
+ * ...and no row younger than this is pruned, however many there are.
+ *
+ * EVENT_KEEP alone is a promise about ROWS, and the two things that read this
+ * table make promises about TIME: `behaviourOf` reads 45 days and
+ * `PATTERN_COOLDOWN_MS` is 14. On a busy chat the count wins and a cooldown
+ * row can vanish inside its own window, which turns the feature meant to
+ * notice he is over-reminded into another reminder.
+ *
+ * Sized to the longest of those readers, so whichever rule binds, the answer
+ * is still correct.
+ */
+export const EVENT_KEEP_MS = 45 * 24 * 3_600_000;
 export const ERROR_KEEP = 30;
 
 export interface Event {
@@ -1422,12 +1436,22 @@ export async function recordEvents(
       .run();
   }
 
+  // Bounded by rows AND by time, because two readers work on a horizon far
+  // longer than EVENT_KEEP can promise on a busy chat: `behaviourOf` looks
+  // back 45 days, and `pattern_offered` is a 14-day cooldown. Pruning by id
+  // alone could delete a cooldown row INSIDE its own window, and then every
+  // push past the threshold re-asks the identical question — which is the one
+  // thing that cooldown exists to prevent.
+  //
+  // So anything recent is spared whatever the count says. Growth is still
+  // bounded; it is just bounded by the shorter of the two rules rather than
+  // always by the row count.
   await env.DB.prepare(
-    `DELETE FROM events WHERE chat_id = ? AND id NOT IN (
+    `DELETE FROM events WHERE chat_id = ? AND at < ? AND id NOT IN (
        SELECT id FROM events WHERE chat_id = ? ORDER BY id DESC LIMIT ?
      )`,
   )
-    .bind(chatId, chatId, EVENT_KEEP)
+    .bind(chatId, at - EVENT_KEEP_MS, chatId, EVENT_KEEP)
     .run();
 }
 

@@ -529,6 +529,13 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'instance_started', 'reminder_annotated',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten', 'item_done',
+  // A give-up closes an instance, which is a write, and it was missing here.
+  // The consequence is only in the REASON validate.ts records — but that
+  // reason is what /diag shows, and "claimed a write with no effect" reads as
+  // "the model invented a write out of nothing" when the truth was "the model
+  // called a close a create". Different bug, different fix, and the rejection
+  // log is the only place either is visible.
+  'gave_up',
 ]);
 
 /**

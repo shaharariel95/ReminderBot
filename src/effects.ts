@@ -957,6 +957,26 @@ export async function applyIntent(
       // The `plan` button already takes this path via scheduleInboxItem. Two
       // routes to one user-visible action have to produce one sentence.
       if (wasInbox) {
+        // The errands, at the moment the row becomes a real reminder.
+        //
+        // splitIntoItems ran in create_reminder and nowhere else, so the same
+        // sentence got three tickable errands when he named an hour and none
+        // at all when he did not — because without an hour it is captured, and
+        // the hour arrives later through here. Whether he happened to say the
+        // time in the same breath decided whether he could tick them off one
+        // at a time.
+        //
+        // Only on the inbox→scheduled transition, never on an ordinary retime:
+        // a reminder that already exists may have had its items ticked, and
+        // re-splitting would silently un-tick them. Best-effort for the same
+        // reason it is in create_reminder — the reminder is real either way,
+        // and the checklist is additional structure on top of it.
+        const itemTitles = splitIntoItems(rem.title);
+        if (itemTitles.length) {
+          await db.addItems(env, rem.id, chatId, itemTitles).catch((e) =>
+            console.error('addItems on promotion', e),
+          );
+        }
         return [{ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at: next }];
       }
       return [{ kind: 'reminder_retimed', id: rem.id, title: rem.title, at: next }];

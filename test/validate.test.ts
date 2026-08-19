@@ -533,4 +533,21 @@ section('ambiguous-hour altHour never reaches validate() — it is a button labe
 }
 
 
+section('rule 2 reports WHAT the turn did, so a rejection is diagnosable');
+{
+  // gave_up closes an instance — a real write — but sat outside WROTE, so a
+  // false create-claim on that turn was reported as 'claimed a write with no
+  // effect'. That reads in /diag as 'the model invented a write out of
+  // nothing' when what actually happened is 'the model called a close a
+  // create', which is a different bug with a different fix.
+  const gaveUp: Effect = { kind: 'gave_up', instanceId: 9, title: 'לרוץ', rounds: 3 };
+  const v = validate('קבעתי לך את זה מחדש.', facts([gaveUp]), base([gaveUp]));
+  check('a create claimed over a give-up is still rejected', !v.ok, v.reason);
+  check(
+    'and the reason names what the turn really did',
+    (v.reason ?? '').includes('gave_up'),
+    v.reason ?? '(none)',
+  );
+}
+
 done();

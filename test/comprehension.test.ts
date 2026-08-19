@@ -948,6 +948,89 @@ async function theNagSeesWhichErrandsAreDone(): Promise<void> {
   rig.restore();
 }
 
+// --------------------------------------------------------------------------
+section('promoting a capture gives it the same checklist a direct request would');
+
+/**
+ * `splitIntoItems` ran in `create_reminder` and nowhere else. So
+ * "תזכיר לי להחזיר ראוטר, לקנות מחבת, ללכת למחסני תאורה" got three tickable
+ * errands when it named an hour — and got none at all when it did not, because
+ * that path captures to the inbox and the hour arrives later through
+ * `reschedule`.
+ *
+ * Same sentence, same errands, and whether he happened to say the time in the
+ * same breath decided whether he could tick them off one at a time.
+ */
+async function promotingACaptureSplitsItsErrands(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const title = 'להחזיר ראוטר, לקנות מחבת, ללכת למחסני תאורה';
+
+  await withNow(NOW, async () => {
+    // No hour, so this is captured rather than scheduled.
+    rig.routerQueue.push({ actions: [{ action: 'create_reminder', title }] });
+    rig.speakQueue.push('תפסתי. מתי?');
+    await say(rig, `תזכיר לי ${title}`);
+
+    const captured = reminderRows(rig);
+    eq('it is an inbox row', captured[0]?.status, 'inbox');
+    eq(
+      'and a capture has no errands yet — there is nothing to tick before it is real',
+      (rig.db.prepare('SELECT count(*) AS n FROM reminder_items').get() as any).n,
+      0,
+    );
+
+    // He answers the question. This is the promotion path.
+    rig.speakQueue.push('סגור.');
+    await say(rig, 'ב-15:00');
+
+    eq('it is scheduled now', reminderRows(rig)[0]?.status, 'scheduled');
+    const items = rig.db.prepare('SELECT title FROM reminder_items ORDER BY position').all() as any[];
+    eq('and NOW it has the three errands', items.length, 3);
+    eq('in the order he typed them', items[0]?.title, 'להחזיר ראוטר');
+  });
+  rig.restore();
+}
+
+// --------------------------------------------------------------------------
+section('the behavioural record survives long enough to be read');
+
+/**
+ * `recordEvents` pruned to EVENT_KEEP rows per chat, by id alone. But two
+ * things read that table on a much longer horizon: `behaviourOf` looks back 45
+ * days, and `pattern_offered` is a 14-day cooldown. On a busy chat the
+ * cooldown row could be pruned INSIDE its own window — and then every push
+ * past the threshold re-asks the identical question, which is the one thing
+ * the cooldown exists to prevent.
+ *
+ * So the prune now spares anything recent regardless of count. Growth is still
+ * bounded, just by time as well as by rows.
+ */
+async function recentHistoryIsNotPrunedAway(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const now = Date.UTC(2026, 7, 17, 6, 0, 0);
+  const remId = 1;
+
+  await withNow(now, async () => {
+    // The cooldown row: the bot asked about this reminder yesterday.
+    rig.db
+      .prepare("INSERT INTO events (chat_id, reminder_id, at, kind) VALUES (?,?,?,'הצעתי שינוי')")
+      .run(HIM, remId, now - 86_400_000);
+
+    // Then a very busy few days — far more than EVENT_KEEP rows.
+    for (let i = 0; i < db.EVENT_KEEP + 50; i++) {
+      await db.recordEvents(rig.env, HIM, [{ kind: 'nagged', instanceId: 0, title: 'x' }], now - 3_600_000);
+    }
+
+    const survived = await db.patternOfferedSince(rig.env, HIM, remId, now - 14 * 86_400_000);
+    check(
+      'a cooldown row inside its own window is still there',
+      survived,
+      'without it, every push past the threshold re-asks the identical question',
+    );
+  });
+  rig.restore();
+}
+
 await captureThenAnswer();
 await anOpenQuestionDoesNotEatANewRequest();
 await inboxIsVisibleToTheRouter();
@@ -962,4 +1045,6 @@ await elapsedOnlyWhenChasing();
 await quotingHimBackIsNotInvention();
 await inventionIsStillCaught();
 await theNagSeesWhichErrandsAreDone();
+await promotingACaptureSplitsItsErrands();
+await recentHistoryIsNotPrunedAway();
 done();
