@@ -136,6 +136,17 @@ export interface Context {
    * another was the only move available to it.
    */
   inbox?: Reminder[];
+  /**
+   * Reminders that already ran their course (`status='done'`), newest first.
+   *
+   * Absent from BOTH other lists — listReminders wants 'scheduled', listInbox
+   * wants 'inbox' — so the router could not see a reminder it had watched fire
+   * ten minutes earlier. On 18.08.2026 it answered `reschedule target_id=52`
+   * for exactly such a row, recovering the id from the conversation, which the
+   * prompt forbids outright. It happened to be right; a wrong guess would have
+   * silently retimed a closed reminder he cannot see in /list.
+   */
+  done?: Reminder[];
   nowLabel: string;
 }
 
@@ -237,6 +248,25 @@ export function inboxSummary(ctx: Context): string {
   return lines.join('\n');
 }
 
+/**
+ * What has already happened, so the router does not have to remember it.
+ *
+ * Rendered with ids for the same reason inboxSummary is: the id is the entire
+ * point. Naming an hour for one of these is a `reschedule` that revives it,
+ * and without this block the only action available to the model is
+ * `create_reminder` — or, as on 18.08.2026, quoting an id it was never shown
+ * and hoping.
+ *
+ * Deliberately short. This is prompt space and a D1 read on every turn, and a
+ * long tail of finished errands is noise the model has to read past to find
+ * the two lists that describe what is actually pending.
+ */
+export function doneSummary(ctx: Context): string {
+  const rows = ctx.done ?? [];
+  if (!rows.length) return '  (אין)';
+  return rows.map((r) => `  #${r.id} "${r.title}" — כבר נסגרה`).join('\n');
+}
+
 export function goalsSummary(ctx: Context): string {
   if (!ctx.goals.length) return '  (אין)';
   return ctx.goals
@@ -258,6 +288,8 @@ function contextBlock(ctx: Context): string {
   )}\n\nתזכורות פעילות (מתוזמנות לשעה):\n${remindersSummary(
     ctx,
   )}\n\nנתפסו אבל עדיין בלי שעה — אם הוא נוקב עכשיו בשעה לאחת מהן, זה reschedule עם ה-target_id שלה, לא תזכורת חדשה:\n${inboxSummary(
+    ctx,
+  )}\n\nכבר קרו והסתיימו — אם הוא נוקב עכשיו בשעה לאחת מהן, הוא רוצה אותה שוב: זה reschedule עם ה-target_id שלה, לא תזכורת חדשה:\n${doneSummary(
     ctx,
   )}\n\nמטרות מתמשכות (בלי שעה — אתה מעלה אותן ביוזמתך):\n${goalsSummary(
     ctx,

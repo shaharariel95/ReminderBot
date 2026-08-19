@@ -1031,6 +1031,85 @@ async function recentHistoryIsNotPrunedAway(): Promise<void> {
   rig.restore();
 }
 
+
+// --------------------------------------------------------------------------
+section('a reminder that already fired is still nameable');
+
+/**
+ * 18.08.2026 08:57, production. He typed "ללכת למוסך ב10:30" and the router
+ * returned `reschedule target_id=52` — for a reminder it could not possibly
+ * have seen. #52 fired at 08:20 and was closed at 08:50; a `once` schedule
+ * then sets next_fire_at = null and status = 'done', and BOTH context lists
+ * filter it out (listReminders wants 'scheduled', listInbox wants 'inbox').
+ *
+ * It recovered the id from the conversation and happened to be right. The
+ * prompt forbids exactly that ("אל תמציא target_id שלא מופיעים ברשימה
+ * למעלה"), and resolveReminder accepted it anyway, because getReminder looks
+ * up by primary key and only chat_id is checked.
+ *
+ * The outcome was the one he wanted, so the answer is not to refuse it — it
+ * is to stop making the model guess. Re-setting something you just did is an
+ * ordinary thing to want, twice in one day in his case.
+ */
+async function whatJustFiredIsStillInView(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const morning = Date.UTC(2026, 7, 18, 5, 20, 0); // 08:20 local
+
+  await withNow(morning, async () => {
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'ללכת למוסך', schedule_type: 'once', in_minutes: 1 }],
+    });
+    rig.speakQueue.push('קבעתי.');
+    await say(rig, 'ללכת למוסך ב8:20');
+  });
+  await withNow(morning + 90_000, async () => {
+    rig.speakQueue.push('נו? ללכת למוסך.');
+    await runCron(rig);
+  });
+  await withNow(morning + 30 * 60_000, async () => {
+    rig.routerQueue.push({ actions: [{ action: 'complete' }] });
+    rig.speakQueue.push('נסגר.');
+    await say(rig, 'סיימתי');
+  });
+
+  const row = rig.db.prepare('SELECT id, status FROM reminders').get() as any;
+  eq('it is done and out of both context lists', row.status, 'done');
+
+  // Now the message that produced the production bug.
+  rig.geminiCalls.length = 0;
+  await withNow(morning + 37 * 60_000, async () => {
+    rig.routerQueue.push({
+      actions: [{ action: 'reschedule', target_id: row.id, schedule_type: 'once', once_at: '2026-08-18T10:30' }],
+    });
+    rig.speakQueue.push('שיניתי.');
+    await say(rig, 'ללכת למוסך ב10:30');
+  });
+
+  const router = rig.geminiCalls.find((c) => c.kind === 'router');
+  const ctxBlock = router?.system.split('כללי החלטה')[0] ?? '';
+  check(
+    'the row it just closed is in the router\'s view, with its id',
+    // `\\b`, not `\b` — inside a template literal `\b` is the BACKSPACE
+    // escape, so the first draft of this line was searching for "#1<0x08>"
+    // and failing against a prompt that said "#1" perfectly clearly.
+    new RegExp(`#${row.id}\\b`).test(ctxBlock) && ctxBlock.includes('ללכת למוסך'),
+    ctxBlock.slice(-700),
+  );
+  // Asserted on the rendered SHAPE, not on the title alone — the prompt is
+  // full of worked examples and a bare Hebrew substring passes with the whole
+  // block deleted. That is the trap the friends tests hit.
+  check(
+    'and it is labelled as something already done, not as something pending',
+    /כבר קרו|כבר בוצע|נסגרו/.test(ctxBlock),
+    ctxBlock.slice(-700),
+  );
+
+  const after = rig.db.prepare('SELECT status, next_fire_at FROM reminders').get() as any;
+  eq('naming an hour brings it back', after.status, 'scheduled');
+  check('with a real firing time', after.next_fire_at !== null, JSON.stringify(after));
+  rig.restore();
+}
+
 await captureThenAnswer();
 await anOpenQuestionDoesNotEatANewRequest();
 await inboxIsVisibleToTheRouter();
@@ -1047,4 +1126,5 @@ await inventionIsStillCaught();
 await theNagSeesWhichErrandsAreDone();
 await promotingACaptureSplitsItsErrands();
 await recentHistoryIsNotPrunedAway();
+await whatJustFiredIsStillInView();
 done();

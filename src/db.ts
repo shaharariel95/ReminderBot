@@ -303,6 +303,47 @@ export async function addReminder(
 }
 
 /**
+ * Reminders that have already run their course, most recent first.
+ *
+ * `status='done'` — a one-off that fired, or a recurrence that ended. Neither
+ * `listReminders` (which wants 'scheduled') nor `listInbox` shows them, so
+ * until now the router could not see a reminder it had watched fire ten
+ * minutes earlier.
+ *
+ * That gap had a name in production. On 18.08.2026 he typed "ללכת למוסך
+ * ב10:30" about #52, which had fired at 08:20 and been closed at 08:50, and
+ * the router answered `reschedule target_id=52` for a row it had never been
+ * shown — recovering the id from the conversation, which the prompt forbids
+ * outright ("אל תמציא target_id שלא מופיעים ברשימה למעלה"). It happened to be
+ * right, and resolveReminder would have accepted it either way, because
+ * getReminder looks up by primary key and only chat_id is checked. A wrong id
+ * would have silently retimed a closed reminder he cannot see in /list.
+ *
+ * The answer is not to refuse him — re-setting something you just did is an
+ * ordinary thing to want, and he did it twice with the garage in one morning.
+ * It is to stop making the model guess.
+ *
+ * Tightly bounded, because this is prompt space and a D1 read paid on every
+ * turn: a short window and a small cap. Anything older he reaches by asking
+ * for a new reminder, which is what he would have typed anyway.
+ */
+export async function recentlyDone(
+  env: Env,
+  chatId: string,
+  sinceMs: number,
+  limit = 5,
+): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM reminders
+      WHERE chat_id = ? AND status = 'done' AND created_at >= ?
+      ORDER BY id DESC LIMIT ?`,
+  )
+    .bind(chatId, sinceMs, limit)
+    .all<Reminder>();
+  return res.results ?? [];
+}
+
+/**
  * Scheduled reminders for this chat whose next_fire_at lands within
  * `windowMs` of `nearAt` — the candidate pool for duplicate detection.
  * A window rather than exact equality: two quick "עוד 5 דקות" double-sends

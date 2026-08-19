@@ -66,8 +66,16 @@ export default {
 
 // ---------------------------------------------------------------- incoming
 
+/**
+ * How far back the router is shown reminders that already finished.
+ *
+ * Two days covers "I did the garage this morning, put it back for 10:30" —
+ * which he did — without turning the prompt into a diary. See db.recentlyDone.
+ */
+const DONE_SHOWN_MS = 2 * 24 * 3_600_000;
+
 async function buildContext(env: Env, chatId: string): Promise<Context> {
-  const [settings, stats, reminders, goals, open, friends, inbox] = await Promise.all([
+  const [settings, stats, reminders, goals, open, friends, inbox, done] = await Promise.all([
     db.getSettings(env, chatId),
     db.stats(env, chatId),
     db.listReminders(env, chatId),
@@ -83,6 +91,12 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
     // router has no idea the capture it is about to duplicate exists. See
     // Context.inbox — this is the whole of the 16.08.2026 #35/#36/#37 bug.
     db.listInbox(env, chatId).catch(() => []),
+    // Reminders that already fired and closed. Neither list above shows them
+    // — one filters 'scheduled', the other 'inbox' — so on 18.08.2026 the
+    // router named `target_id=52` for a row it had never seen, having pulled
+    // the id out of the conversation. It was right that time. Bounded hard
+    // (two days, five rows) because this is prompt space paid on every turn.
+    db.recentlyDone(env, chatId, Date.now() - DONE_SHOWN_MS).catch(() => []),
   ]);
   // Only when something is actually being chased. A chat with nothing open has
   // no errands to tick off, and this would otherwise be a query per message to
@@ -93,7 +107,7 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
         .catch(() => undefined)
     : undefined;
   return {
-    settings, stats, reminders, goals, open, items, friends, inbox,
+    settings, stats, reminders, goals, open, items, friends, inbox, done,
     nowLabel: formatLocal(Date.now(), settings.tz),
   };
 }
