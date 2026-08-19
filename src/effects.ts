@@ -343,18 +343,32 @@ const PATTERN_COOLDOWN_MS = 14 * 24 * 3_600_000;
  * that already happened and already has its own true sentence; a throw here
  * must never cost him the confirmation of the thing he actually did.
  */
-async function patternFor(
+export async function patternFor(
   env: Env,
   chatId: string,
   ctx: Context,
   reminderId: number,
   title: string,
+  /**
+   * A give-up that is committing in this very turn.
+   *
+   * `behaviourOf` counts rows in `events`, and the `ויתרתי` row for the
+   * current give-up is written by `sendOutcome` — which runs AFTER this
+   * decision is made. Without this the in-flight failure is invisible and
+   * FAILURE_FLOOR silently becomes one higher than patterns.ts says it is.
+   * The instance is already closed by the time this is called, so counting it
+   * is a statement about a write that has happened, not a prediction.
+   */
+  alsoFailed = false,
 ): Promise<Effect[]> {
   try {
     const now = Date.now();
     if (await db.patternOfferedSince(env, chatId, reminderId, now - PATTERN_COOLDOWN_MS)) return [];
 
-    const b = await db.behaviourOf(env, chatId, reminderId, ctx.settings.tz, now - PATTERN_WINDOW_MS);
+    const counted = await db.behaviourOf(env, chatId, reminderId, ctx.settings.tz, now - PATTERN_WINDOW_MS);
+    const b = alsoFailed
+      ? { ...counted, fires: counted.fires + 1, failures: counted.failures + 1 }
+      : counted;
     const p = detectPattern(b);
     if (!p) return [];
 

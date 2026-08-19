@@ -102,6 +102,13 @@ import { buttonsFor, decode, encode } from '../src/buttons';
 import { buildFacts } from '../src/facts';
 import { check, createRig, eq, withNow, type Rig } from './harness';
 
+async function runCron(rig: Rig): Promise<void> {
+  const pending: Promise<unknown>[] = [];
+  const ctx: any = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {} };
+  await worker.scheduled({} as any, rig.env, ctx);
+  await Promise.all(pending);
+}
+
 const HIM = '12345';
 const TZ = 'Asia/Jerusalem';
 
@@ -401,9 +408,139 @@ async function crowdingNamesTheRightDay(): Promise<void> {
   check('the rendered sentence reads as Hebrew', /דברים ביום חמישי בבוקר/.test(line), line);
 }
 
+// --------------------------------------------------------------------------
+section('a reminder that has never worked is noticed when it fails, not only when he pushes it');
+
+/**
+ * `patternFor` had exactly one caller: the `snooze` branch of applyIntent.
+ *
+ * But `failing` requires `dones === 0 && failures >= FAILURE_FLOOR`, and a
+ * reminder that runs the ladder out is one he IGNORED — ignoring never
+ * produces a snooze. So the detector could only ever fire for a reminder he
+ * both ignores and occasionally pushes, which is not the case it was written
+ * for. In production `events` holds no `ויתרתי` rows at all.
+ *
+ * The give-up is where this question belongs: it is the moment the bot has
+ * just spent a whole ladder on something and got nothing back.
+ */
+async function givingUpAsksWhetherItIsWorthKeeping(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const now = Date.UTC(2026, 7, 17, 6, 0, 0);
+  const remId = 1;
+
+  rig.db.prepare(
+    "INSERT INTO reminders (chat_id, title, notes, schedule, tz, requires_proof, proof_type," +
+      " nag_interval_min, max_nags, next_fire_at, event_at, status, active, created_at)" +
+      " VALUES (?, 'לרוץ', NULL, ?, ?, 0, 'any', 20, 3, NULL, NULL, 'scheduled', 1, ?)",
+  ).run(HIM, JSON.stringify({ type: 'daily', time: '08:00' }), TZ, now);
+
+  // Four mornings it rang, two of which ran the ladder out. Never once closed.
+  for (let d = 4; d >= 1; d--) {
+    const day = now - d * 86_400_000;
+    rig.db.prepare("INSERT INTO events (chat_id, reminder_id, at, kind) VALUES (?,?,?,'צלצלה')").run(HIM, remId, day);
+    if (d > 2) {
+      rig.db.prepare("INSERT INTO events (chat_id, reminder_id, at, kind) VALUES (?,?,?,'ויתרתי')").run(HIM, remId, day);
+    }
+  }
+
+  // An instance sitting at the end of its ladder, due for the give-up now.
+  rig.db.prepare(
+    "INSERT INTO instances (reminder_id, chat_id, title, fired_at, next_nag_at, nag_count, status)" +
+      " VALUES (?, ?, 'לרוץ', ?, ?, 3, 'open')",
+  ).run(remId, HIM, now - 3_600_000, now - 60_000);
+
+  await withNow(now, async () => {
+    rig.speakQueue.push('ויתרתי על זה להיום.');
+    await runCron(rig);
+  });
+
+  const inst = rig.db.prepare('SELECT status FROM instances WHERE reminder_id = ?').get(remId) as any;
+  eq('the ladder still runs out as it always did', inst?.status, 'failed');
+
+  // The offer rides on the give-up's own message rather than arriving as a
+  // second ping — same reasoning as raising the push pattern on the snooze.
+  // Asserted through decode(), not on the raw JSON: the payload is encoded
+  // ('rx:1'), so a substring search for 'rdrop' passes nothing and fails
+  // everything.
+  check(
+    'and the give-up carries the offer to delete a reminder that has never worked',
+    offersDrop(rig),
+    JSON.stringify(rig.sent.map((x) => x.markup ?? null)),
+  );
+  rig.restore();
+}
+
+/** Did any keyboard this rig sent carry the 'delete this reminder' tap? */
+function offersDrop(rig: Rig): boolean {
+  return rig.sent.some((s) => {
+    const rows = (s.markup as any)?.inline_keyboard ?? [];
+    return rows.flat().some((btn: any) => decode(String(btn?.callback_data ?? ''))?.t === 'rdrop');
+  });
+}
+
+/**
+ * The other half of the give-up offer: it stays quiet below the floor, and the
+ * in-flight failure is what decides which side of the floor this turn is on.
+ *
+ * FAILURE_FLOOR is 3. With TWO give-ups on the record, this one is the third
+ * and the offer is right. With ONE on the record it is the second, and a bot
+ * that offers to delete a reminder after two bad days is doing the astrology
+ * MIN_SAMPLE exists to prevent.
+ *
+ * Counting the in-flight give-up matters in both directions, which is why this
+ * case is here: sendOutcome writes the `ויתרתי` row AFTER the decision, so
+ * reading `events` alone silently moves the threshold to four.
+ */
+async function givingUpStaysQuietBelowTheFloor(): Promise<void> {
+  const build = async (priorFailures: number): Promise<Rig> => {
+    const rig = createRig({ tz: TZ });
+    const now = Date.UTC(2026, 7, 17, 6, 0, 0);
+    const remId = 1;
+    rig.db.prepare(
+      "INSERT INTO reminders (chat_id, title, notes, schedule, tz, requires_proof, proof_type," +
+        " nag_interval_min, max_nags, next_fire_at, event_at, status, active, created_at)" +
+        " VALUES (?, 'לרוץ', NULL, ?, ?, 0, 'any', 20, 3, NULL, NULL, 'scheduled', 1, ?)",
+    ).run(HIM, JSON.stringify({ type: 'daily', time: '08:00' }), TZ, now);
+    for (let d = 4; d >= 1; d--) {
+      const day = now - d * 86_400_000;
+      rig.db.prepare("INSERT INTO events (chat_id, reminder_id, at, kind) VALUES (?,?,?,'צלצלה')").run(HIM, remId, day);
+      if (d > 4 - priorFailures) {
+        rig.db.prepare("INSERT INTO events (chat_id, reminder_id, at, kind) VALUES (?,?,?,'ויתרתי')").run(HIM, remId, day);
+      }
+    }
+    rig.db.prepare(
+      "INSERT INTO instances (reminder_id, chat_id, title, fired_at, next_nag_at, nag_count, status)" +
+        " VALUES (?, ?, 'לרוץ', ?, ?, 3, 'open')",
+    ).run(remId, HIM, now - 3_600_000, now - 60_000);
+    await withNow(now, async () => {
+      rig.speakQueue.push('ויתרתי על זה להיום.');
+      await runCron(rig);
+    });
+    return rig;
+  };
+
+  const one = await build(1);
+  check(
+    'two failures in total is not yet a pattern — no offer',
+    !offersDrop(one),
+    JSON.stringify(one.sent.map((x) => x.markup ?? null)),
+  );
+  one.restore();
+
+  const two = await build(2);
+  check(
+    'the third is, and the in-flight one is what makes it the third',
+    offersDrop(two),
+    JSON.stringify(two.sent.map((x) => x.markup ?? null)),
+  );
+  two.restore();
+}
+
 await endToEnd();
 await declineAndDrop();
 await crowding();
 await crowdingNamesTheRightDay();
+await givingUpAsksWhetherItIsWorthKeeping();
+await givingUpStaysQuietBelowTheFloor();
 await ladderHonesty();
 done();

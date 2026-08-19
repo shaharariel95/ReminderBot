@@ -1,5 +1,5 @@
 import * as db from './db';
-import { applyIntent } from './effects';
+import { applyIntent, patternFor } from './effects';
 import { handleSlash } from './slash';
 import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
@@ -1443,8 +1443,23 @@ async function tickChat(
     if (inst.nag_count >= maxNags) {
       await db.closeInstance(env, inst.id, 'failed');
       ctx = await buildContext(env, chatId);
+      // The second caller of patternFor, and the one the `failing` pattern was
+      // actually written for. Its only caller used to be the `snooze` branch —
+      // but `failing` needs dones === 0 and failures >= FAILURE_FLOOR, and a
+      // reminder that runs the ladder out is one he IGNORED. Ignoring never
+      // produces a snooze, so the detector could only fire for a reminder he
+      // both ignores AND occasionally pushes. Production `events` holds no
+      // `ויתרתי` rows at all.
+      //
+      // Raised HERE, on the give-up itself, for the same reason the push
+      // pattern is raised on the snooze: this is the moment the bot has spent
+      // a whole ladder and got nothing, so the question makes sense, and it
+      // rides along on a message he was already getting. `true` counts the
+      // give-up committing right now — sendOutcome writes its event after this
+      // line, so without it FAILURE_FLOOR would quietly be one higher.
+      const alsoAsk = await patternFor(env, chatId, ctx, inst.reminder_id, inst.title, true);
       await sendOutcome(env, chatId, ctx,
-        [{ kind: 'gave_up', instanceId: inst.id, title: inst.title, rounds: inst.nag_count }],
+        [{ kind: 'gave_up', instanceId: inst.id, title: inst.title, rounds: inst.nag_count }, ...alsoAsk],
         GIVE_UP);
       continue;
     }
