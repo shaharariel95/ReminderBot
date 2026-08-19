@@ -30,7 +30,7 @@ GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 # hours (see gemini.blockFor) and is named by /diag, so the cost of a stale
 # entry is one round trip a day and a visible line. Unset entirely, the ladder
 # falls back to gemini.DEFAULT_LADDER, which is this same list.
-GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite"
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
 # Past this many model calls in a local day — across the whole ladder, per
 # chat — low-priority messages (unprompted check-ins) stop calling the model
 # and ship voice.ts output directly. Reminders and nags are never throttled.

@@ -234,14 +234,23 @@ const TIER_DOWN = new Set([429, 503, 404]);
  * costs one wasted round trip a day and a visible line, rather than a silent
  * failure. That is the trade this default is chosen under — verify the current
  * free-tier list before editing, because the published names move.
+ *
+ * `gemini-2.5-flash` and `gemini-2.5-flash-lite` were the bottom two rungs
+ * until 19.08.2026 and are gone because production said so: `model_health`
+ * held a 404 against BOTH, six hours at a time, which means the ladder had
+ * been four deep rather than six for as long as anyone had been counting on
+ * it. Self-pruning worked exactly as designed — it just cannot edit this file.
+ *
+ * The moral for whoever adds a rung: it is not enough to believe an id is
+ * real. Deploy it, then read /diag. A dead id costs a round trip a day and
+ * silently shortens the ladder underneath a busy minute, which is precisely
+ * the minute the extra rungs exist for.
  */
 const DEFAULT_LADDER = [
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-3.5-flash',
   'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
 ];
 
 /**
