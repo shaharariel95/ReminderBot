@@ -1,7 +1,7 @@
 ﻿/** Run with `npm run test:validate`. */
 import { validate } from '../src/validate';
 import { buildFacts } from '../src/facts';
-import { renderBaseline } from '../src/voice';
+import { TURN_FAILED, renderBaseline } from '../src/voice';
 import { wallToUtc } from '../src/time';
 import { check, done, section } from './harness';
 import type { Context } from '../src/brain';
@@ -56,6 +56,53 @@ check('"שמתי לב" (I noticed) is not a claim of a write',
   validate('שמתי לב שאתה עייף היום.', facts([NOTHING]), base([NOTHING])).ok);
 check('"סידרתי לך את הבלגן" (ordinary chat) is not a claim of a write',
   validate('סידרתי לך את הבלגן.', facts([NOTHING]), base([NOTHING])).ok);
+
+section('rule 2 — a CLOSE claimed over a MOVE, in the words the persona actually reaches for');
+{
+  /**
+   * Production, 18.08.2026 08:57. He typed "ללכת למוסך ב10:30", the router
+   * returned a reschedule, voice.ts said "שיניתי. #52 ... ב-10:30" — and the
+   * persona shipped **"סגרתי #52 ב-10:30"**. /list twenty seconds later
+   * showed #52 open at 10:30. A move reported as a close, and the validator
+   * passed it, because the `close` group held one verb — "סימנתי" — which is
+   * not how anybody says it.
+   *
+   * The lexicon's own blind spot: voice.ts words instance_done as "נסגר" and
+   * gave_up as "סגרתי", so the bot's most natural close verb was the one
+   * CLAIM could not see.
+   */
+  const RETIMED: Effect = {
+    kind: 'reminder_retimed', id: 52, title: 'ללכת למוסך',
+    at: wallToUtc(2026, 8, 18, 10, 30, TZ),
+  };
+  for (const claim of ['סגרתי #52 ב-10:30', 'סיימתי את #52', 'סימנתי את זה כבוצע']) {
+    check(`"${claim}" is rejected on a turn that only MOVED the reminder`,
+      !validate(claim + '.', facts([RETIMED]), base([RETIMED])).ok);
+  }
+  // The move verbs must still pass on a move — this is the group that works,
+  // and widening `close` must not narrow it.
+  check('"העברתי" still passes on the same move',
+    validate('העברתי את זה ל-10:30.', facts([RETIMED]), base([RETIMED])).ok);
+
+  const DONE: Effect = { kind: 'instance_done', id: 9, title: 'ללכת למוסך', streak: 24 };
+  for (const claim of ['סגרתי', 'סיימתי', 'סימנתי']) {
+    check(`"${claim}" passes when the turn really did close something`,
+      validate(claim + ' את זה.', facts([DONE]), base([DONE])).ok);
+  }
+
+  // "סגרתי" has an ordinary-Hebrew life too, and CLAIM is a lexicon of claims
+  // about the DATABASE. These are the same restraint "שמתי לב" and "סידרתי"
+  // already get above — a rule that eats them costs more than the lie it
+  // prevents.
+  check('"סגרתי איתו" (I arranged it with him) is not a claim about the database',
+    validate('סגרתי איתו שהוא יביא את זה מחר.', facts([NOTHING]), base([NOTHING])).ok);
+  // voice.TURN_FAILED, word for word. A negated claim is the OPPOSITE of a
+  // claim, and this is the one sentence that ships when everything else has
+  // already gone wrong — it must never be the thing the validator eats.
+  check('"ולא סיימתי את זה" — the turn-failed wording is not a close claim',
+    validate(TURN_FAILED, facts([{ kind: 'nothing', why: 'failed', userText: 'סיימתי הכל' }]),
+      base([{ kind: 'nothing', why: 'failed', userText: 'סיימתי הכל' }])).ok);
+}
 
 section('rule 3 — invented tasks are rejected');
 check('quoting a real title passes',

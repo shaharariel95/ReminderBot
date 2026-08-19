@@ -25,7 +25,7 @@ export interface Verdict {
  * check whether that rule's examples still cover it.
  */
 export const CLAIM =
-  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
+  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
 
 /**
  * The same verbs, grouped by WHICH write they assert — and which effects can
@@ -68,9 +68,40 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
   },
   {
     name: 'close',
-    verbs: /סימנתי/,
+    /**
+     * This group held "סימנתי" alone until 19.08.2026, and that is not how
+     * anybody says it. On 18.08 at 08:57 he typed "ללכת למוסך ב10:30", the
+     * router returned a RESCHEDULE, voice.ts said "שיניתי. #52 ... ב-10:30",
+     * and the persona shipped "סגרתי #52 ב-10:30" — a move reported as a
+     * close, straight past this rule. /list twenty seconds later showed #52
+     * open at 10:30.
+     *
+     * The blind spot was self-inflicted: voice.ts's own close wordings are
+     * "נסגר" (instance_done) and "סגרתי" (gave_up), so the verb the persona
+     * was most likely to reach for was the one verb the lexicon could not see.
+     *
+     * Both additions are scoped, for exactly the reason "שמתי לך" is scoped
+     * away from "שמתי לב": this is a lexicon of claims about the DATABASE.
+     *
+     *   "סגרתי איתו שיביא מחר"  — I arranged it with him. Not a write.
+     *   "ולא סיימתי את זה"      — I did NOT finish. The opposite of a claim.
+     *
+     * The second one is not hypothetical: it is voice.TURN_FAILED, word for
+     * word. An unscoped "סיימתי" made the deterministic baseline fail its own
+     * validator, and the every-kind loop in test/validate.test.ts caught it
+     * within a minute of the verb being added — which is what that loop is
+     * for. Missing a lie is the acceptable failure here; killing a true
+     * sentence, and especially killing the one sentence that ships when
+     * everything else has already gone wrong, is not.
+     */
+    verbs: /סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי/,
+    // `gave_up` earns its place here by the CLAIM invariant, not by taste:
+    // voice.ts words it "סגרתי את X ככישלון", so without it the deterministic
+    // baseline would fail its own validator. The every-kind loop in
+    // test/validate.test.ts is what catches that.
     kinds: new Set<Effect['kind']>([
       'instance_done', 'item_done', 'goal_closed', 'photo_accepted', 'instance_skipped',
+      'gave_up',
     ]),
   },
   {
