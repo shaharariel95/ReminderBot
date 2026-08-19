@@ -1592,6 +1592,72 @@ async function main() {
     rig.restore();
   }
 
+// --------------------------------------------------------------------------
+section('a reminder that comes due during a chill is deferred, not consumed');
+
+/**
+ * `if (muted) continue` sat AFTER createInstance, so during a chill:
+ *
+ *  - the instance opened and the schedule advanced
+ *  - no message went out, and sendOutcome never ran, so no צלצלה event either
+ *  - `if (muted) return` then skipped every nag for the duration
+ *
+ * When the chill lifted, next_nag_at was long past and the first thing he
+ * heard about that reminder was `נו? "X" עדיין פתוחה מ-08:00` — a nag for
+ * something he was never sent. A one-off was worse still: computeNext returns
+ * null, setNextFire marks it 'done', and the reminder was simply gone.
+ *
+ * An instance means "he was told, and we are waiting to hear back". If he was
+ * not told there is nothing to wait for and nothing to nag about, so the fire
+ * is deferred instead. Chill is bounded (72h at most), so a deferred row
+ * cannot sit due forever.
+ */
+async function chillDefersRatherThanSwallows(): Promise<void> {
+  const rig = createRig();
+  const fireAt = wallToUtc(2026, 8, 7, 9, 0, TZ);
+  seedSettings(rig);
+  // seedSettings has no muted_until column, so set it directly.
+  rig.db.prepare('UPDATE settings SET muted_until = ? WHERE chat_id = ?').run(fireAt + 2 * 3_600_000, CHAT);
+  seedReminder(rig, 'לרוץ', fireAt);
+
+  // The minute it comes due — mid-chill.
+  await withNow(fireAt + 30_000, async () => {
+    await runCron(rig);
+  });
+
+  eq('nothing was sent during the chill', rig.sent.length, 0);
+  eq(
+    'and no instance was opened for a message he never got',
+    (rig.db.prepare('SELECT count(*) AS n FROM instances').get() as any).n,
+    0,
+  );
+  const still = rig.db.prepare('SELECT status, next_fire_at FROM reminders WHERE id = 1').get() as any;
+  eq('the reminder is still scheduled, not quietly consumed', still.status, 'scheduled');
+  eq('and still due at the same moment', still.next_fire_at, fireAt);
+
+  // The chill lifts.
+  rig.speakQueue.push('נו? לרוץ.');
+  await withNow(fireAt + 3 * 3_600_000, async () => {
+    await runCron(rig);
+  });
+
+  const texts = rig.texts().join('\n');
+  check('once it lifts he gets the REMINDER', texts.includes('לרוץ'), JSON.stringify(rig.texts()));
+  check(
+    'and not a nag about a message he never received',
+    !texts.includes('עדיין פתוחה'),
+    JSON.stringify(rig.texts()),
+  );
+  eq(
+    'now there is an instance, because now he has actually been told',
+    (rig.db.prepare('SELECT count(*) AS n FROM instances').get() as any).n,
+    1,
+  );
+  rig.restore();
+}
+
+  await chillDefersRatherThanSwallows();
+
   section('a used-up minute stops calling the model at all');
   {
     const rig = createRig();

@@ -1319,7 +1319,22 @@ async function tickChat(
   // buttons), because grouping is a presentation decision and must not blur
   // which task he actually closed.
   const fired: Extract<Effect, { kind: 'reminder_fired' }>[] = [];
-  for (const r of due) {
+  // A chill DEFERS a fire, it does not consume one.
+  //
+  // `if (muted) continue` used to sit inside this loop, after createInstance —
+  // so during a chill the schedule advanced and an instance opened for a
+  // message that never went out. sendOutcome never ran, so there was no
+  // `צלצלה` event either, and `if (muted) return` below skipped the nags. When
+  // the chill lifted, next_nag_at was long past and the first thing he heard
+  // about that reminder was `נו? "X" עדיין פתוחה מ-08:00` — a nag for
+  // something he was never sent. A one-off was worse: computeNext returns null
+  // for it, setNextFire marked it 'done', and the reminder was simply gone.
+  //
+  // An instance means "he was told, and we are waiting to hear back". If he
+  // was not told, there is nothing to wait for and nothing to nag about. So
+  // the whole block is skipped and the rows stay due — bounded, because
+  // `chill` clamps to 72 hours, so a deferred row cannot sit here forever.
+  for (const r of muted ? [] : due) {
     // Reschedule first: if the send throws, we still don't fire twice.
     let next: number | null = null;
     try {
@@ -1349,7 +1364,6 @@ async function tickChat(
     await db.resetItems(env, r.id).catch((e) => console.error('resetItems', e));
     const items = await db.listItems(env, r.id).catch(() => []);
 
-    if (muted) continue;
     // Whoever set this, as SHE calls him — read now rather than stored on the
     // row, because she may have renamed him since (see migrations/013). Null
     // when he set it himself, and also when the friendship has since ended:
