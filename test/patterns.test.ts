@@ -216,6 +216,9 @@ async function crowding(): Promise<void> {
     check('and the crowding is mentioned alongside it', !!crowded, `effects: ${last.map((e) => e.kind).join(', ')}`);
     eq('counting the one he just made, as /list would', crowded?.count, 4);
 
+    // These four really are tomorrow, and this is the case that always worked.
+    eq('a busy morning tomorrow is called tomorrow', crowded?.label, 'מחר בבוקר');
+
     const line = renderBaseline(last, TZ);
     check(
       'stated as a number, never as advice',
@@ -340,8 +343,67 @@ async function declineAndDrop(): Promise<void> {
   }
 }
 
+/**
+ * The DAY in a crowding remark has to be true.
+ *
+ * `when` used to be a two-way choice: today, or the literal word "tomorrow"
+ * for everything else. So four things on a Thursday morning next week were
+ * announced as "מחר בבוקר" — a wrong claim about WHEN, inside the one message
+ * whose entire value is that he can check it in two taps.
+ */
+async function crowdingNamesTheRightDay(): Promise<void> {
+  const now = Date.UTC(2026, 7, 17, 5, 0, 0); // Monday 08:00 local
+
+  // day 0 = today, 1 = tomorrow, 3 = a day that needs naming.
+  const cases: [number, string][] = [
+    [0, 'הבוקר'],
+    [1, 'מחר בבוקר'],
+    [3, 'ביום חמישי בבוקר'],
+  ];
+
+  for (const [offset, expected] of cases) {
+    const rig = createRig({ tz: TZ });
+    await withNow(now, async () => {
+      const ctx: any = {
+        settings: await db.getSettings(rig.env, HIM),
+        stats: { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 },
+        reminders: [], goals: [], open: [], friends: [], nowLabel: '',
+      };
+      const { applyIntent } = await import('../src/effects');
+      const day = String(17 + offset).padStart(2, '0');
+      // Four inside ONE part of the day — DAY_PARTS puts morning at [5,12), so
+      // these are half-hours rather than 9..12, which would spill the last one
+      // into צהריים and never reach CROWDED_AT. All ahead of 08:00 so the
+      // same times work for today.
+      const titles = ['לקנות חלב', 'להתקשר לרופא', 'לשלוח מייל', 'לאסוף חבילה'];
+      const times = ['09:00', '09:30', '10:00', '10:30'];
+      let last: any[] = [];
+      for (let i = 0; i < titles.length; i++) {
+        last = await applyIntent(
+          rig.env, HIM, ctx,
+          {
+            action: 'create_reminder', title: titles[i],
+            schedule_type: 'once', once_at: `2026-08-${day}T${times[i]}`,
+          } as any,
+          titles[i],
+        );
+      }
+      const crowded = last.find((e: any) => e.kind === 'window_crowded');
+      eq(`+${offset} days reads as "${expected}"`, crowded?.label, expected);
+    });
+    rig.restore();
+  }
+
+  // And the sentence around it stays grammatical, which is why the label
+  // carries its own preposition rather than having one glued on: "הבוקר" needs
+  // none, "מחר בבוקר" and "ביום חמישי בבוקר" bring their own.
+  const line = renderBaseline([{ kind: 'window_crowded', count: 4, label: 'ביום חמישי בבוקר' }] as any, TZ);
+  check('the rendered sentence reads as Hebrew', /דברים ביום חמישי בבוקר/.test(line), line);
+}
+
 await endToEnd();
 await declineAndDrop();
 await crowding();
+await crowdingNamesTheRightDay();
 await ladderHonesty();
 done();

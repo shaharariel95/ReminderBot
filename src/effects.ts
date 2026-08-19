@@ -271,6 +271,29 @@ const DAY_PARTS: [number, number, string][] = [
 /** Below this a "busy window" is just a day with things in it. */
 const CROWDED_AT = 4;
 
+const WEEKDAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
+/**
+ * "הבוקר" · "מחר בבוקר" · "ביום חמישי בבוקר".
+ *
+ * This used to be a two-way choice — today, or the literal word "מחר" for
+ * everything else — so four things on a Thursday morning next week were
+ * announced as "מחר בבוקר". A wrong claim about WHEN, inside the one message
+ * whose entire value is that he can go and check it in two taps. Being off by
+ * a day about something checkable reads as the bot being broken, which is
+ * exactly what CROWDED_AT's own comment says about being off by one.
+ *
+ * The label carries its own preposition rather than having "ב" glued on by the
+ * caller. "הבוקר" needs none ("זה 4 דברים הבוקר"), and the other two bring
+ * their own — the old version produced "בהבוקר", which is not Hebrew.
+ */
+function dayPartLabel(at: number, part: string, tz: string): string {
+  const today = localDateKey(Date.now(), tz);
+  if (localDateKey(at, tz) === today) return `ה${part}`;
+  if (localDateKey(at, tz) === localDateKey(Date.now() + 86_400_000, tz)) return `מחר ב${part}`;
+  return `ביום ${WEEKDAY_NAMES[wallParts(at, tz).dow]} ב${part}`;
+}
+
 /**
  * Is the part of the day this reminder landed in already full?
  *
@@ -295,8 +318,7 @@ async function crowdingFor(
     // in /list — reporting one fewer reads as the bot being wrong about
     // something he can check in two taps.
     if (rows.length < CROWDED_AT) return [];
-    const when = localDateKey(at, tz) === localDateKey(Date.now(), tz) ? 'ה' : 'מחר ב';
-    return [{ kind: 'window_crowded', count: rows.length, label: `${when}${part[2]}` }];
+    return [{ kind: 'window_crowded', count: rows.length, label: dayPartLabel(at, part[2], tz) }];
   } catch (err) {
     console.error('crowdingFor', err);
     return [];

@@ -118,7 +118,10 @@ function one(e: Effect, tz: string): string {
       // Stated, not argued with. No "are you sure", no advice — he can see the
       // number and decide for himself, and unsolicited opinions about his day
       // are how a useful prompt becomes one he mutes.
-      return `זה ${e.count} דברים ב${e.label}.`;
+      // The label brings its own preposition — "הבוקר", "מחר בבוקר",
+      // "ביום חמישי בבוקר" — because gluing a ב on the front produced
+      // "בהבוקר" for today. See effects.dayPartLabel.
+      return `זה ${e.count} דברים ${e.label}.`;
     case 'reminder_duplicate':
       return `כבר יש לך את זה — #${e.id} "${e.title}" ב-${hhmm(e.at, tz)}.`;
     case 'reminder_scheduled':
