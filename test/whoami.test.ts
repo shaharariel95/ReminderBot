@@ -18,6 +18,7 @@
 import worker from '../src/index';
 import * as db from '../src/db';
 import { buildSystemPrompt } from '../src/persona';
+import { handleSlash } from '../src/slash';
 import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 import type { Settings, Stats } from '../src/types';
 
@@ -102,6 +103,62 @@ section('the name is captured from Telegram and survives into the cron path');
     const ownerPrompt = buildSystemPrompt(
       await db.getSettings(rig.env, OWNER), stats, 'עכשיו', '(אין)', '(אין)', '(אין)');
     check('the owner is still addressed by his name', ownerPrompt.includes('שחר'), ownerPrompt.slice(0, 160));
+  });
+  rig.restore();
+}
+
+// --------------------------------------------------------------------------
+section('a guest is never told about commands he cannot run');
+
+/**
+ * OWNER_ONLY returns null so those commands are "indistinguishable from
+ * commands that do not exist". But /help printed all six of them to everyone,
+ * and the unknown-command reply was ALSO owner-gated — so a guest's null fell
+ * through to the router, came back `chat`, and the persona improvised.
+ *
+ * Production, 09.08.2026, chat B, having read /help:
+ *
+ *   user  /diag
+ *   bot   מה אתה מריץ בדיקות עכשיו?
+ *         הכל עובד. יש לך תזכורת אחת ללכת לאגרוף תאילנדי ב-18:00...
+ *
+ * "הכל עובד" is a health claim nothing checked. It was the last message that
+ * user ever sent.
+ */
+{
+  const rig = createRig({ chatId: OWNER, tz: TZ });
+  await withNow(NOW, async () => {
+    await db.setAllowedChats(rig.env, [GUEST]);
+
+    const ownerHelp = (await handleSlash(rig.env, OWNER, '/help')) ?? '';
+    const guestHelp = (await handleSlash(rig.env, GUEST, '/help')) ?? '';
+
+    check('the owner still sees the whole list', ownerHelp.includes('/diag'), ownerHelp.slice(0, 80));
+    for (const cmd of ['/diag', '/errors', '/pending', '/allow', '/deny', '/allowed']) {
+      check(`a guest is not told about ${cmd}`, !guestHelp.includes(cmd), guestHelp);
+    }
+    check('but he still gets the commands he CAN run', guestHelp.includes('/list'), guestHelp.slice(0, 80));
+
+    // The other half. An owner-only command typed by a guest must answer for
+    // itself rather than reaching the model — and must answer EXACTLY the same
+    // way a command that does not exist does, or the reply is the leak the
+    // null was protecting against.
+    const guestDiag = await handleSlash(rig.env, GUEST, '/diag');
+    const guestNonsense = await handleSlash(rig.env, GUEST, '/xyzzy');
+    check('a guest typing /diag gets an answer instead of the router', guestDiag !== null, String(guestDiag));
+    eq('and it is the same answer a nonexistent command gets', guestDiag, guestNonsense);
+    check('which reveals nothing about the system',
+      !String(guestDiag).includes('GEMINI') && !String(guestDiag).includes('עובד'),
+      String(guestDiag));
+
+    // The refusal keys off the SLASH he typed, not off the normalized command.
+    // ALIASES maps the bare word 'בדיקה' to /diag, and 'בדיקה' is also just a
+    // Hebrew word — answering 'no such command' to it would swallow ordinary
+    // conversation, the exact failure ALIASES is documented as guarding against.
+    eq('a guest saying a bare Hebrew word still reaches the router',
+      await handleSlash(rig.env, GUEST, 'בדיקה'), null);
+    check('while the owner’s bare word still runs the command',
+      ((await handleSlash(rig.env, OWNER, 'בדיקה')) ?? '').includes('גרסה'));
   });
   rig.restore();
 }

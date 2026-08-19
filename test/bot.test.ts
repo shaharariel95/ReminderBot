@@ -654,8 +654,16 @@ async function main() {
     seedSettings(rig);
     await db.setAllowedChats(rig.env, [OTHER]);
 
-    eq('a guest cannot invite anyone', await handleSlash(rig.env, OTHER, `/allow 123`), null);
-    eq('nor read /diag', await handleSlash(rig.env, OTHER, '/diag'), null);
+    // Answered, not ignored — and answered with the SAME sentence a command
+    // that does not exist gets, which is what keeps the two indistinguishable.
+    // Returning null used to mean the message fell through to the router, and
+    // on 09.08.2026 a guest's /diag came back as an improvised "הכל עובד"
+    // health report from the persona. See handleSlash's OWNER_ONLY gate.
+    const unknown = await handleSlash(rig.env, OTHER, '/xyzzy');
+    eq('a guest cannot invite anyone', await handleSlash(rig.env, OTHER, `/allow 123`), unknown);
+    eq('nor read /diag', await handleSlash(rig.env, OTHER, '/diag'), unknown);
+    check('and what he gets back discloses nothing',
+      !String(unknown).includes('GEMINI') && String(unknown).includes('/help'), String(unknown));
     check('the owner can invite',
       ((await handleSlash(rig.env, CHAT, '/allow 123')) ?? '').includes('123'), '');
     check('and the invitation sticks',
@@ -709,7 +717,9 @@ async function main() {
 
     const list = await handleSlash(rig.env, CHAT, '/pending');
     check('/pending shows the name and the id', (list ?? '').includes('דנה') && (list ?? '').includes(OTHER), list ?? '');
-    eq('a guest cannot read it', await handleSlash(rig.env, OTHER, '/pending'), null);
+    eq('a guest cannot read it',
+      await handleSlash(rig.env, OTHER, '/pending'),
+      await handleSlash(rig.env, OTHER, '/xyzzy'));
 
     const ok = await handleSlash(rig.env, CHAT, '/allow דנה');
     check('approving by name works', (ok ?? '').includes('דנה'), ok ?? '');

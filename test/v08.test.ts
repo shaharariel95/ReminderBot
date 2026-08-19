@@ -619,9 +619,20 @@ section('a failure leaves something to read afterwards');
   const out = (await handleSlash(rig.env, CHAT, '/errors')) ?? '';
   check('the failure is on the record', out.includes('route/apply'), `got: ${out}`);
   check('with what he had sent', out.includes('משהו'), `got: ${out}`);
+  // Refused, not ignored — and refused with the SAME sentence a nonexistent
+  // command gets, so the reply cannot be used to probe which commands are
+  // real. Returning null used to mean falling through to the ROUTER, which on
+  // 09.08.2026 answered a guest's /diag with an invented health report.
+  const refusal = await handleSlash(rig.env, '999', '/errors');
   check(
     'a guest cannot read the owner\'s failures',
-    (await handleSlash(rig.env, '999', '/errors')) === null,
+    !String(refusal).includes('route/apply') && !String(refusal).includes('משהו'),
+    String(refusal),
+  );
+  eq(
+    'and the refusal is indistinguishable from a command that does not exist',
+    refusal,
+    await handleSlash(rig.env, '999', '/xyzzy'),
   );
   rig.restore();
 }
@@ -918,10 +929,11 @@ section('an unknown slash command does not burn a model call');
   const rig = createRig();
   const out = await handleSlash(rig.env, CHAT, '/nosuchthing');
   check('the owner is told it does not exist', !!out && out.includes('/help'), `got: ${out}`);
-  // A guest must still fall through silently, or the reply becomes a way to
-  // probe which commands exist.
+  // A guest gets the identical sentence, which is what stops the reply from
+  // being a way to probe which commands exist. It used to return null and fall
+  // through to the ROUTER instead — see handleSlash's OWNER_ONLY gate.
   const guest = await handleSlash(rig.env, '999', '/diag');
-  check('a guest still learns nothing', guest === null);
+  eq('a guest still learns nothing', guest, await handleSlash(rig.env, '999', '/nosuchthing'));
   rig.restore();
 }
 

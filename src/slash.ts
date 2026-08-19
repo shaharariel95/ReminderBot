@@ -68,6 +68,14 @@ function normalizeCommand(text: string): string {
   return text.trim().includes(' ') ? first : ALIASES[first] ?? first;
 }
 
+/**
+ * One sentence for 'you may not run that' and 'that does not exist'.
+ *
+ * Shared on purpose — it is the whole of the OWNER_ONLY gate. Two different
+ * replies would tell a guest which commands are real.
+ */
+const NO_SUCH_COMMAND = 'אין פקודה כזאת. /help לרשימה.';
+
 /** Commands only the owner may run. See the gate in handleSlash for why. */
 const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending', '/errors']);
 
@@ -88,14 +96,42 @@ export async function handleSlash(
 ): Promise<string | null> {
   const cmd = normalizeCommand(text);
 
-  // Owner-only commands. Returning null (rather than a refusal) makes them
-  // indistinguishable from commands that do not exist — a guest learns
-  // nothing about what they are not allowed to do.
-  //
-  // /diag is on this list because it prints the API key length, the shared
-  // Gemini quota, and the last discarded rewrites, which are conversation
-  // content. The rest hand out access.
-  if (OWNER_ONLY.has(cmd) && chatId !== env.OWNER_CHAT_ID) return null;
+  /**
+   * Did he type a SLASH, as opposed to a bare Hebrew word that ALIASES turned
+   * into one?
+   *
+   * This distinction is what lets the two refusals below answer at all.
+   * `normalizeCommand('בדיקה')` is '/diag', and "בדיקה" is also just a Hebrew
+   * word — answering "no such command" to it would swallow ordinary
+   * conversation, which is the exact failure ALIASES is documented as
+   * guarding against. A leading "/" is unambiguous: nobody types it by
+   * accident mid-sentence.
+   */
+  const typedSlash = text.trim().startsWith('/');
+
+  /**
+   * Owner-only commands, answered exactly the way a command that does not
+   * exist is answered.
+   *
+   * This used to `return null`, on the theory that any reply would turn "does
+   * this command exist" into a question anyone could ask by trying it. The
+   * theory was right and the implementation inverted it: null meant the
+   * message fell through to the ROUTER, and on 09.08.2026 chat B
+   * typed /diag — which /help was advertising to him at the time — and the
+   * persona improvised "הכל עובד" plus a health report nothing had checked.
+   * A fabricated diagnostic discloses more than "no such command" does, and
+   * it costs a model call to produce.
+   *
+   * Sharing one sentence with the `default` arm is what makes the gate real:
+   * /diag and /xyzzy are now literally indistinguishable to a guest.
+   *
+   * /diag is on this list because it prints the API key length, the shared
+   * Gemini quota, and the last discarded rewrites, which are conversation
+   * content. The rest hand out access.
+   */
+  if (OWNER_ONLY.has(cmd) && chatId !== env.OWNER_CHAT_ID) {
+    return typedSlash ? NO_SUCH_COMMAND : null;
+  }
 
   switch (cmd) {
     case '/allow':
@@ -183,7 +219,33 @@ export async function handleSlash(
         '',
         'רשימת הפקודות: /help',
       ].join('\n');
-    case '/help':
+    case '/help': {
+      /**
+       * The owner-only block, printed only to the owner.
+       *
+       * OWNER_ONLY above returns null so those commands are indistinguishable
+       * from commands that do not exist — and then this list handed all six of
+       * them to everybody, which made the whole gate ceremonial. Worse, the
+       * `default` arm's "no such command" reply was owner-gated too, so a
+       * guest who read one here and typed it fell through to the ROUTER.
+       *
+       * Production, 09.08.2026, chat B, straight after reading /help:
+       *
+       *   user  /diag
+       *   bot   מה אתה מריץ בדיקות עכשיו?
+       *         הכל עובד. יש לך תזכורת אחת ללכת לאגרוף תאילנדי ב-18:00...
+       *
+       * "הכל עובד" is a claim about system health that nothing checked. It was
+       * also the last message that user ever sent.
+       */
+      const owner = chatId === env.OWNER_CHAT_ID;
+      const ownerOnly = owner
+        ? [
+            '/diag — בדיקת תקינות (מודל, מפתח, חיבורים, קרון)',
+            '/errors — חמש התקלות האחרונות',
+            '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
+          ]
+        : [];
       return [
         'רשימות:',
         '/today — מה יש היום, ומה עוד פתוח',
@@ -201,10 +263,8 @@ export async function handleSlash(
         '/intensity 1|2|3 — כמה עוקצני אני',
         '/quiet [התחלה] [סוף] — שעות שקט, למשל /quiet 23 8',
         '/offlimits [טקסט] — נושאים שאסור לי לגעת בהם. בלי טקסט = מציג. "clear" = מנקה.',
-        '/diag — בדיקת תקינות (מודל, מפתח, חיבורים, קרון)',
-        '/errors — חמש התקלות האחרונות',
         '/why [מספר] — כל מה שקרה לתזכורת אחת',
-        '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
+        ...ownerOnly,
         '',
         'חברים — תזכורות שאתה קובע לאנשים אחרים:',
         '/id — המספר שלך, זה מה שחבר צריך כדי להוסיף אותך',
@@ -225,6 +285,7 @@ export async function handleSlash(
         '"סיימתי" · "תדחה בחצי שעה" · "תבטל את #3"',
         'או פשוט תשלח תמונה כהוכחה.',
       ].join('\n');
+    }
 
     /**
      * The number somebody else needs in order to add you.
@@ -753,12 +814,21 @@ export async function handleSlash(
       // certainly "נו?" back — which is how a typo'd command became
       // indistinguishable from being nagged.
       //
-      // Only for the owner. A guest still gets null, because the OWNER_ONLY
-      // gate above returns null too, and a reply here would turn "does this
-      // command exist" into a question anyone could ask by trying it.
-      if (cmd.startsWith('/') && chatId === env.OWNER_CHAT_ID) {
-        return `אין פקודה כזאת. /help לרשימה.`;
-      }
+      // Answered for EVERYONE, which is the opposite of what this used to do.
+      // It was owner-gated on the theory that replying would turn "does this
+      // command exist" into a question anyone could ask by trying it — but the
+      // OWNER_ONLY gate above also returns null, so both land here and get the
+      // identical sentence. There is nothing to tell apart: /diag and /xyzzy
+      // are the same answer to a guest, which is exactly the indistinguishable
+      // the gate was after.
+      //
+      // Gating it was actively worse than the leak it feared. A guest's null
+      // fell through to the ROUTER, and on 09.08.2026 chat B typed
+      // /diag — advertised to him by /help, which used to print it — and got
+      // "הכל עובד" plus an improvised health report from the persona. A
+      // fabricated diagnostic is a bigger disclosure than "no such command",
+      // and it cost a model call to produce.
+      if (typedSlash) return NO_SUCH_COMMAND;
       return null;
   }
 }
