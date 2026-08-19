@@ -150,13 +150,40 @@ ${profileNotes.map((n) => `- ${n}`).join('\n')}
 export const NAG_BACKOFF_MIN = [30, 120, 360];
 
 /** How long to wait before nag number `sent + 1`. */
+/**
+ * How recently he has to have spoken for a nag to hold off.
+ *
+ * Nagging someone mid-sentence is the behaviour that produced five stacked
+ * messages while he was actively answering. Short on purpose: this defers the
+ * round, it does not cancel it, and the ladder resumes the moment he stops
+ * typing.
+ */
+export const CONVERSATION_WINDOW_MIN = 10;
+
 export function nagDelayMinutes(sent: number): number {
   return NAG_BACKOFF_MIN[sent] ?? NAG_BACKOFF_MIN[NAG_BACKOFF_MIN.length - 1];
 }
 
+/**
+ * The level-1 override for a task that actually HAS parts.
+ *
+ * NAG_LADDER[1] used to say "תציע חצי ממנה" — offer half of it — for every
+ * task alike. But the bot only knows a task's parts when he happened to type
+ * them as a comma list (effects.splitIntoItems); for everything else there is
+ * no substructure at all, so "offer half" is either vague to the point of
+ * uselessness or an INVENTED claim about what the task contains. "תעשה חצי
+ * מלסדר את המוסך" means nothing, and naming a half the bot made up is the same
+ * class of error as naming a motive.
+ *
+ * When the items are real, they are in the prompt already (openSummary), and
+ * asking for exactly one of them is the smallest true request there is.
+ */
+export const NAG_LADDER_ITEMS =
+  'הוא לא ענה. אל תעלה טון — תקטין את המשימה. תבקש ממנו פריט אחד בלבד מהרשימה שלמעלה, בשמו, ותוותר על השאר להפעם.';
+
 export const NAG_LADDER: Record<number, string> = {
   0: 'תזכורת ראשונה. קליל. תזכיר לו מה הוא אמר שיעשה, עוקץ קטן, וסיים בפעולה קונקרטית.',
-  1: 'הוא לא ענה. אל תעלה טון — תקטין את המשימה. תציע חצי ממנה, או את החלק הראשון בלבד. תן לו לראות שזה קטן ממה שהוא חושב.',
+  1: 'הוא לא ענה. אל תעלה טון — תקטין את המשימה. תבקש ממנו רק את הצעד הראשון הגלוי: שיחת טלפון אחת, שורה אחת, חמש דקות. אל תמציא לו חלוקה של המשימה לחלקים שהוא לא נתן — אתה לא יודע ממה היא מורכבת.',
   // "ותנקוב בשם דפוס ההימנעות שלו" used to live at the end of this line, and
   // on 13.08.2026 it produced "הימנעות קלאסית דרך שתיקה." after ninety minutes
   // of silence. He might have been driving. The bot does not know why he went

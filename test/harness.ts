@@ -89,6 +89,13 @@ export interface GeminiCall {
   kind: 'router' | 'speak';
   /** The systemInstruction text — this is where the model's ground truth lives. */
   system: string;
+  /**
+   * The responseSchema actually sent. Captured because a field's ABSENCE from
+   * the schema is a hard guarantee (constrained decoding cannot emit it) while
+   * a prompt asking the model not to use it is only a request — and the
+   * difference is not observable from `system` alone.
+   */
+  schema?: any;
 }
 
 export interface Rig {
@@ -145,6 +152,20 @@ export interface Rig {
   hangModels: Set<string>;
   /** Models that should return 429, by exact id. */
   downModels: Set<string>;
+  /**
+   * Models that should return 404, by exact id — a retired id, or a typo in
+   * wrangler.toml. Separate from `downModels` because the bot treats them
+   * differently on purpose: a quota clears in a minute, a model that does not
+   * exist never does.
+   */
+  notFoundModels: Set<string>;
+  /**
+   * Seconds Google's 429 body asks the caller to wait, or null for a bare
+   * quota error with no advice in it. Real 429s usually carry RetryInfo, and
+   * honouring it is the difference between a one-minute detour and a
+   * five-minute one — so the rig has to be able to produce both.
+   */
+  retryDelaySeconds: number | null;
   /** Every model id that was called, in order. */
   modelsCalled: string[];
   /** Set true to make every Telegram sendMessage fail, simulating an outage. */
@@ -211,6 +232,8 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     geminiHang: false,
     hangModels: new Set<string>(),
     downModels: new Set<string>(),
+    notFoundModels: new Set<string>(),
+    retryDelaySeconds: null,
     modelsCalled: [],
     get dbFailOn() {
       return dbState.dbFailOn;
@@ -259,8 +282,21 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     if (url.includes('generativelanguage.googleapis.com')) {
       const model = /models\/([^:]+):/.exec(url)?.[1] ?? '';
       rig.modelsCalled.push(model);
+      if (rig.notFoundModels.has(model)) {
+        return new Response('{"error":{"code":404,"message":"model not found"}}', { status: 404 });
+      }
       if (rig.geminiDown || rig.downModels.has(model)) {
-        return new Response('{"error":{"code":429,"message":"rate limit"}}', { status: 429 });
+        // Shaped like the real thing: Google puts the wait in a RetryInfo
+        // detail rather than in a header, and reading it out of there is what
+        // lets a one-minute limit cost one minute.
+        const detail =
+          rig.retryDelaySeconds === null
+            ? ''
+            : `,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"${rig.retryDelaySeconds}s"}]`;
+        return new Response(
+          `{"error":{"code":429,"message":"rate limit"${detail}}}`,
+          { status: 429 },
+        );
       }
       // Never settles on its own. Real `fetch` rejects with an AbortError when
       // the signal fires; a caller that passes no signal waits forever, which
@@ -278,6 +314,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
       rig.geminiCalls.push({
         kind: isRouter ? 'router' : 'speak',
         system: body?.systemInstruction?.parts?.[0]?.text ?? '',
+        schema: body?.generationConfig?.responseSchema,
       });
       rig.timeline.push(`gemini:${isRouter ? 'router' : 'speak'}`);
       const queue = isRouter ? rig.routerQueue : rig.speakQueue;

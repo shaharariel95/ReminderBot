@@ -388,5 +388,54 @@ fut('לקנות חלב', null);
 // Already past this week rolls forward rather than offering yesterday.
 fut('בבוקר של יום ראשון', '2026-08-16T09:00');
 
+// ---------------------------------------------------------------------------
+// A reminder addressed to somebody else must never become his own.
+//
+// "תזכיר לאמנון לדבר עם שחר עוד שתי דקות" was filed as HIS reminder on
+// 17.08.2026 — his chat, his hour, the other person's errand as the title.
+//
+// namesSomeoneElse gates on the ADDRESS BOOK, and the book held the friend
+// under his Telegram profile name ("amnon") while the message says "לאמנון".
+// Nothing matched, so the fast path answered it — with no model call, and
+// therefore no chance for the router (which IS shown the friends list, and is
+// told to report a name it does not recognise) to catch it.
+//
+// The gate cannot become a name list: CLAUDE.md is explicit that "לדנה" and
+// "לקנות" cannot be told apart by shape. But "תזכיר ל<X> ל<verb>" is a
+// different claim — an addressee AND an errand, two ל-phrases — and "לי" is
+// excluded outright. Anything matching that bails to the router, which is the
+// rule-2 move: bailing costs one model call, guessing costs a row filed under
+// the wrong person's errand.
+{
+  const N = wallToUtc(2026, 8, 17, 21, 11, TZ);
+
+  // The exact production messages, with the book in the state it was in.
+  assertTrue(
+    'the message that broke it defers to the router',
+    quickParse('תזכיר לאמנון לדבר עם שחר עוד שתי דקות', N, TZ, ['amnon']) === null,
+  );
+  assertTrue(
+    'and the same shape with an explicit hour',
+    quickParse('תזכיר לאמנון להגיד לשחר על הפיצר בשעה 21:07', N, TZ, ['amnon']) === null,
+  );
+  // Somebody not in the book at all. The bot cannot know who אמא is — but it
+  // must not quietly file her errand as his.
+  assertTrue(
+    'an addressee it has never heard of also defers',
+    quickParse('תזכיר לאמא להתקשר לרופא מחר ב-9', N, TZ, []) === null,
+  );
+
+  // ...and the fast path must keep answering the case it exists for.
+  const mine = quickParse('תזכיר לי לקנות חלב מחר ב-8', N, TZ, ['amnon']);
+  assertTrue('his own reminder still costs no model call', mine?.action === 'create_reminder');
+  assertTrue('with just the errand as the title', mine?.title === 'לקנות חלב');
+  // A single ל-phrase is an errand, so the fast path must still answer it.
+  // The title keeps the leading "תזכיר" here — cleanTitle strips "תזכיר לי"
+  // and not a bare "תזכיר", which predates this gate and is why the older
+  // cases above assert minutes without asserting a title.
+  const bare = quickParse('תזכיר לקנות חלב מחר ב-8', N, TZ, []);
+  assertTrue('and a bare infinitive is an errand, not a person', bare?.action === 'create_reminder');
+}
+
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
 if (failures > 0) (globalThis as any).process?.exit?.(1);

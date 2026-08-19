@@ -296,7 +296,7 @@ section('a move that names its hour lands in one turn');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ), event_at: null,
   });
 
   rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
@@ -323,7 +323,7 @@ section('...but it still asks when the hour is genuinely missing');
       schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
       tz: TZ, requires_proof: 0, proof_type: 'any',
       nag_interval_min: 20, max_nags: 3,
-      next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+      next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ), event_at: null,
     });
   const id = await seed();
 
@@ -352,7 +352,7 @@ section('a recurrence is never silently flattened into one fire');
     schedule: JSON.stringify({ type: 'daily', time: '07:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 15, 7, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 15, 7, 0, TZ), event_at: null,
   });
   rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
   rig.speakQueue.push('מתי?');
@@ -434,7 +434,7 @@ section('a failed turn does not capture a message about an existing reminder');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-15T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 15, 10, 0, TZ), event_at: null,
   });
   const before = Number((rig.db.prepare('SELECT COUNT(*) AS n FROM reminders').get() as any).n);
 
@@ -634,7 +634,7 @@ section('/diag can answer "did the cron run?"');
     chat_id: CHAT, title: 'לקנות בשר', notes: null,
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
-    nag_interval_min: 20, max_nags: 3, next_fire_at: now,
+    nag_interval_min: 20, max_nags: 3, next_fire_at: now, event_at: null,
   });
   rig.speakQueue.push('נו? הבשר.');
   await withNow(now, () => runCron(rig));
@@ -657,7 +657,7 @@ section('/why answers what happened to one reminder');
     chat_id: CHAT, title: 'לקנות בשר', notes: null,
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
-    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt,
+    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt, event_at: null,
   });
   rig.speakQueue.push('נו? הבשר.');
   await withNow(fireAt, () => runCron(rig));
@@ -682,7 +682,7 @@ section('a reminder that fired but never reached him is recorded as such');
     chat_id: CHAT, title: 'לקנות בשר', notes: null,
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
-    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt,
+    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt, event_at: null,
   });
   rig.speakQueue.push('נו? הבשר.');
   rig.telegramDown = true;
@@ -708,7 +708,7 @@ section('an answer to the bot\'s own question is understood as one');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ), event_at: null,
   });
 
   // Turn one: the router resolves the reminder but brings back no time.
@@ -749,7 +749,7 @@ section('a stale question does not swallow an unrelated message');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ), event_at: null,
   });
   rig.routerQueue.push({ actions: [{ action: 'reschedule', target_id: id }] });
   rig.speakQueue.push('מתי?');
@@ -783,7 +783,7 @@ section('the nag ladder backs off instead of drumming');
     chat_id: CHAT, title: 'לקנות בשר', notes: null,
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
-    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt,
+    nag_interval_min: 20, max_nags: 3, next_fire_at: fireAt, event_at: null,
   });
 
   rig.speakQueue.push('נו? הבשר.');
@@ -879,7 +879,7 @@ section('the commands work in Hebrew, with and without a slash');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-13T10:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 13, 10, 0, TZ), event_at: null,
   });
 
   const slashed = (await handleSlash(rig.env, CHAT, '/רשימה')) ?? '';
@@ -970,7 +970,7 @@ section('an offer is not made when something is already on the books');
     schedule: JSON.stringify({ type: 'once', at: '2026-08-14T09:00' }),
     tz: TZ, requires_proof: 0, proof_type: 'any',
     nag_interval_min: 20, max_nags: 3,
-    next_fire_at: wallToUtc(2026, 8, 14, 9, 0, TZ),
+    next_fire_at: wallToUtc(2026, 8, 14, 9, 0, TZ), event_at: null,
   });
   rig.routerQueue.push({ actions: [{ action: 'chat' }] });
   rig.speakQueue.push('נו?');

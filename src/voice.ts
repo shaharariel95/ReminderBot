@@ -54,16 +54,66 @@ function one(e: Effect, tz: string): string {
         return `קבעתי לך משהו ל-${when(e.at, tz)}. על מה להזכיר?`;
       }
       return `קבעתי #${e.id}: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
+        // The appointment itself, when he named one. Stated rather than merely
+        // stored: an event hour that lives only in the database is invisible,
+        // and the persona may not mention a time the baseline never said.
+        e.eventAt ? ` האירוע עצמו ב-${when(e.eventAt, tz)}.` : ''
+      }${
         e.requiresProof ? ' דורש תמונה.' : ''
       }${
         e.duplicateOf
           ? ` שים לב, יש לך גם "${e.duplicateOf.title}" ב-${hhmm(e.duplicateOf.at, tz)}.`
           : ''
       }`;
+    case 'friend_reminder_created':
+      // No "#id". The row is in HER account and the number is hers — quoting
+      // it to him would hand him an id that names nothing he can /list, /why
+      // or cancel. What he needs is her name and the hour, and both of those
+      // are true from where he is sitting.
+      return `קבעתי ל${e.friend}: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(
+        e.at,
+        tz,
+      )}.${e.requiresProof ? ' דורש תמונה.' : ''}`;
     case 'reminder_captured':
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
         : `תפסתי #${e.id}: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;
+    // Counts and an offer. No adjectives, no motive — see patterns.ts. The
+    // numbers come straight off the events table and are what makes this
+    // checkable; "אתה נמנע מזה" would not be.
+    case 'pattern_pushed':
+      return e.at
+        ? `דחית את "${e.title}" ${e.snoozes} מתוך ${e.fires} הפעמים האחרונות, ובדרך כלל סוגר את זה ב-${hhmm(
+            e.at,
+            tz,
+          )}. להזיז לשם?`
+        : `דחית את "${e.title}" ${e.snoozes} מתוך ${e.fires} הפעמים האחרונות. השעה הזאת לא עובדת — מתי כן?`;
+    case 'pattern_failing':
+      // Offers to DELETE. A reminder he has never once closed is not evidence
+      // about him, it is a reminder that is wrong, and an accountability bot
+      // that cannot say so is just noise with a streak counter.
+      return `"${e.title}" נגמרה בלי שנסגרה ${e.failures} פעמים, ואף פעם לא נסגרה. לשנות שעה, או למחוק?`;
+    case 'friend_unknown': {
+      // Names BOTH spellings on purpose. The usual cause is a script mismatch
+      // he cannot see — the book holds the Telegram profile name ("amnon"),
+      // he writes Hebrew ("אמנון") — so "I do not know that name" alone is a
+      // dead end. Showing the stored name next to his makes the difference
+      // obvious at a glance, and the command fixes it in one message.
+      // Not "you have no friends": the commonest way to reach this with an
+      // empty list is a request that was sent and not yet answered, and a
+      // pending row is deliberately not consent (see CLAUDE.md). Saying so is
+      // both true and the thing he needs to know.
+      if (!e.known.length) {
+        return `אין לי "${e.asked}" ברשימה. בקשה שנשלחה ועוד לא אושרה לא נחשבת. /friends יראה לך מה יש.`;
+      }
+      const names = e.known.map((n) => `"${n}"`).join(' · ');
+      return `אין לי "${e.asked}" ברשימה. מי שיש: ${names}. אם זה אותו אדם בכתיב אחר — /friend ${e.known[0]} ${e.asked}`;
+    }
+    case 'window_crowded':
+      // Stated, not argued with. No "are you sure", no advice — he can see the
+      // number and decide for himself, and unsolicited opinions about his day
+      // are how a useful prompt becomes one he mutes.
+      return `זה ${e.count} דברים ב${e.label}.`;
     case 'reminder_duplicate':
       return `כבר יש לך את זה — #${e.id} "${e.title}" ב-${hhmm(e.at, tz)}.`;
     case 'reminder_scheduled':
@@ -182,7 +232,18 @@ function one(e: Effect, tz: string): string {
         : e.items?.length
           ? `נו? ${e.items.length} דברים:`
           : `נו? ${e.title}.`;
-      return `${head}${list}${missNote(e.misses)}${proof}`;
+      // Somebody ELSE set this one. Without the name it arrives from nowhere,
+      // about something she never asked for, which reads as a malfunction
+      // rather than as a favour. Her name for him, not his for himself — see
+      // the `from` field in types.ts.
+      const sender = e.from ? `\n— מ${e.from}` : '';
+      // The appointment itself. Stated here rather than left sitting in the
+      // database, because a reminder to PREPARE for something is useless
+      // without the hour it is preparing for — and because the persona may not
+      // name a time the baseline never said. This is the moment the event_at
+      // column exists for.
+      const event = e.eventAt ? `\nהאירוע עצמו: ${when(e.eventAt, tz)}.` : '';
+      return `${head}${list}${event}${sender}${missNote(e.misses)}${proof}`;
     }
     case 'nagged':
       return untitled(e.title)
@@ -245,6 +306,12 @@ function one(e: Effect, tz: string): string {
           return 'לא ברור לי על איזו מטרה מדובר.';
         case 'unknown_note':
           return 'אין לי כזה דבר רשום עליך.';
+        // Covers both halves of db.matchFriend returning null — nobody by that
+        // name, and two people by it. Not worth telling apart: the answer to
+        // both is the same list of names, and a message that guessed between
+        // two friends would land in the wrong person's chat.
+        case 'unknown_friend':
+          return 'לא ברור לי למי מהחברים שלך התכוונת. /friends מראה את השמות שאני מכיר.';
         case 'chat':
           return 'נו?';
         // The two below must NEVER be worded as a bare "נו?". That string is
@@ -289,7 +356,10 @@ function firedTogether(items: Extract<Effect, { kind: 'reminder_fired' }>[]): st
     // consecutive miss does not stop mattering because something else fired
     // in the same minute.
     const run = e.misses && e.misses >= MISS_THRESHOLD ? ` (${e.misses} ברצף שלא)` : '';
-    return `· ${name}${run}${e.requiresProof ? ' (עם תמונה)' : ''}`;
+    // Who set it has to survive the grouping too. Two reminders at 18:00, one
+    // of them somebody else's idea, are not interchangeable lines.
+    const sender = e.from ? ` (מ${e.from})` : '';
+    return `· ${name}${sender}${run}${e.requiresProof ? ' (עם תמונה)' : ''}`;
   });
   return [`נו? ${items.length} דברים עכשיו:`, ...lines].join('\n');
 }
@@ -306,4 +376,69 @@ export function renderBaseline(effects: Effect[], tz: string): string {
 
   const parts = effects.map((e) => one(e, tz)).filter((s) => s.trim().length > 0);
   return parts.join('\n\n');
+}
+
+/**
+ * What she reads the moment somebody sets a reminder in her chat.
+ *
+ * Sent as a plain message rather than through the effects pipeline, for the
+ * same reason a button never calls the model: the wording is fully determined
+ * and there is nothing a rewrite could add. It is also the only message in
+ * this file addressed to somebody who did not just type anything, so it says
+ * who, what, when, and how to be rid of it — in that order.
+ */
+export function friendReminderHeadsUp(
+  from: string,
+  title: string,
+  at: number,
+  tz: string,
+): string {
+  return (
+    `${from} קבע לך תזכורת: "${title}" — ${when(at, tz)}.\n` +
+    'אם זה לא רלוונטי, /list ותגיד לי לבטל אותה.'
+  );
+}
+
+/**
+ * The question an effect's wording ASKS, as the slot that will answer it.
+ *
+ * Lives here, beside the sentences themselves, because the bug this exists to
+ * prevent is the wording and the registration drifting apart. `voice.ts:75`
+ * has said "תגיד לי מתי" since inbox capture was added, while `index.ts`
+ * registered only `needs_time` and `appointment_offer` — so on 16.08.2026 the
+ * bot asked "מתי?" about #35, wrote down nothing, and turned his answer into
+ * #36 and #37. Three rows, one errand.
+ *
+ * Anything that renders a question above MUST have an arm here. That is not
+ * enforceable by the compiler for effects whose wording merely happens to end
+ * in a "?", so the rule is: if you write a question into renderBaseline, you
+ * add it here in the same edit.
+ *
+ * Returns the slot WITHOUT `at` — the caller stamps it, so there is one clock.
+ */
+export function questionAsked(
+  e: Effect,
+): { k: 'time'; r: number } | { k: 'offer'; t: string; w: number } | { k: 'title'; r: number } | null {
+  switch (e.kind) {
+    // "מתי לשים לך את זה?" about a reminder that exists but has no hour.
+    case 'needs_time':
+      return { k: 'time', r: e.id };
+    // "תפסתי #35 … בלי שעה בינתיים — תגיד לי מתי." Same question, different
+    // road to it: this row is an inbox capture rather than a live reminder.
+    // `reschedule` promotes it, which is why the slot kind is identical.
+    case 'reminder_captured':
+      return { k: 'time', r: e.id };
+    // The title and instant ride in the slot rather than in callback_data,
+    // which has 64 bytes and no room for a title. The button just says yes.
+    case 'appointment_offer':
+      return { k: 'offer', t: e.title, w: e.at };
+    // "קבעתי לך משהו ל-09:12. על מה להזכיר?" — the hour is settled, the subject
+    // is not. Only when the title really is the placeholder: a create that
+    // named its subject asks nothing and must not arm a slot, or his next
+    // sentence would silently rename a reminder that was already correct.
+    case 'reminder_created':
+      return untitled(e.title) ? { k: 'title', r: e.id } : null;
+    default:
+      return null;
+  }
 }

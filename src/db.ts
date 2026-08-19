@@ -1,5 +1,5 @@
 import type { Env, Goal, Instance, Reminder, ReminderItem, Settings, Stats } from './types';
-import { localDateKey } from './time';
+import { localDateKey, wallParts } from './time';
 
 const DAY = 86_400_000;
 
@@ -214,13 +214,20 @@ export async function setIntensity(env: Env, chatId: string, level: number): Pro
 
 export async function addReminder(
   env: Env,
-  r: Omit<Reminder, 'id' | 'created_at' | 'status' | 'active'>,
+  /**
+   * `from_chat_id` is optional rather than required so that every existing
+   * caller keeps meaning what it always meant: a reminder he set for himself.
+   * Only the cross-chat path passes it, and it is the only path that may.
+   */
+  r: Omit<Reminder, 'id' | 'created_at' | 'status' | 'active' | 'from_chat_id'> & {
+    from_chat_id?: string | null;
+  },
 ): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO reminders
        (chat_id, title, notes, schedule, tz, requires_proof, proof_type,
-        nag_interval_min, max_nags, next_fire_at, status, active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
+        nag_interval_min, max_nags, next_fire_at, event_at, from_chat_id, status, active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?)`,
   )
     .bind(
       r.chat_id,
@@ -233,6 +240,8 @@ export async function addReminder(
       r.nag_interval_min,
       r.max_nags,
       r.next_fire_at,
+      r.event_at ?? null,
+      r.from_chat_id ?? null,
       Date.now(),
     )
     .run();
@@ -502,6 +511,23 @@ export async function dueNags(env: Env, now: number, chats: string[]): Promise<I
 }
 
 /** Push a nag later without counting it — used to sit out quiet hours. */
+/**
+ * When he last SAID something, or null if never.
+ *
+ * Read only on the path that is about to nag, which is rare — an ordinary
+ * tick with nothing due never pays for it. Deliberately `role='user'`: the
+ * bot's own messages are not evidence that he is present, and counting them
+ * would mean a nag defers itself forever by existing.
+ */
+export async function lastInboundAt(env: Env, chatId: string): Promise<number | null> {
+  const row = await env.DB.prepare(
+    "SELECT created_at FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
+  )
+    .bind(chatId)
+    .first<{ created_at: number }>();
+  return row?.created_at ?? null;
+}
+
 export async function deferNag(env: Env, id: number, nextNagAt: number): Promise<void> {
   await env.DB.prepare('UPDATE instances SET next_nag_at = ? WHERE id = ?')
     .bind(nextNagAt, id)
@@ -828,6 +854,17 @@ const localDay = (env: Env, ts: number) => localDateKey(ts, env.DEFAULT_TZ ?? 'A
  */
 export const UNATTRIBUTED = '-';
 
+/**
+ * The bot's own bookkeeping, parked in the `usage` table because it is a
+ * per-day-per-chat counter and that is exactly what this table is.
+ *
+ * Named here rather than spelled inline in three places: it has to be
+ * EXCLUDED from any sum over models (usageTodayAll), and a counter of the
+ * times the validator caught the model lying is not a model call. Charging
+ * him for those would be billing him for a bug.
+ */
+export const REJECTION_COUNTER = '_rejections';
+
 export async function recordUsage(
   env: Env,
   model: string,
@@ -1100,7 +1137,7 @@ export async function recordRejection(
   // this was a global counter sitting directly above a per-chat listing, so
   // /diag once showed the owner "1" with nothing underneath it — the rejection
   // was a guest's, and there was no way for him to work that out.
-  await recordUsage(env, '_rejections', chatId);
+  await recordUsage(env, REJECTION_COUNTER, chatId);
   await env.DB.prepare(
     'INSERT INTO rejections (chat_id, at, reason, text, effects) VALUES (?, ?, ?, ?, ?)',
   )
@@ -1187,7 +1224,71 @@ const EVENT_OF: Record<string, string> = {
   instance_started: 'בדרך',
   gave_up: 'ויתרתי',
   photo_accepted: 'תמונה התקבלה',
+  // Not a write he made — a question the bot asked about a reminder that is
+  // not working. Recorded so the offer has a COOLDOWN: without a row saying it
+  // was already raised, every subsequent snooze past the threshold would ask
+  // the same question again, which is nagging about the nagging.
+  pattern_offered: 'הצעתי שינוי',
+  // Both raise the same question, and the cooldown is per REMINDER rather than
+  // per pattern kind: he does not want the other version of "this is not
+  // working" a day after declining the first.
+  pattern_pushed: 'הצעתי שינוי',
+  pattern_failing: 'הצעתי שינוי',
 };
+
+/**
+ * The behavioural record for one reminder, counted off `events`.
+ *
+ * Reads the same table `/why` prints, and it is the first thing in this
+ * codebase to ask a QUESTION of that history rather than display it. Scoped by
+ * chat_id as well as reminder_id: `events` is a shared table and a count is
+ * still a leak if it crosses accounts.
+ */
+export async function behaviourOf(
+  env: Env,
+  chatId: string,
+  reminderId: number,
+  tz: string,
+  sinceMs: number,
+): Promise<import('./patterns').Behaviour> {
+  const res = await env.DB.prepare(
+    `SELECT kind, at FROM events
+      WHERE chat_id = ? AND reminder_id = ? AND at >= ?
+      ORDER BY id DESC LIMIT 200`,
+  )
+    .bind(chatId, reminderId, sinceMs)
+    .all<{ kind: string; at: number }>();
+
+  const rows = res.results ?? [];
+  const b = { fires: 0, snoozes: 0, dones: 0, failures: 0, doneHours: [] as number[] };
+  for (const r of rows) {
+    if (r.kind === EVENT_OF.reminder_fired) b.fires++;
+    else if (r.kind === EVENT_OF.instance_snoozed) b.snoozes++;
+    else if (r.kind === EVENT_OF.gave_up) b.failures++;
+    else if (r.kind === EVENT_OF.instance_done) {
+      b.dones++;
+      // The LOCAL hour, because the question is "when in his day", and a
+      // reminder can live in a timezone that is not the chat's.
+      b.doneHours.push(wallParts(r.at, tz).hour);
+    }
+  }
+  return b;
+}
+
+/** Has this reminder's pattern already been raised inside the window? */
+export async function patternOfferedSince(
+  env: Env,
+  chatId: string,
+  reminderId: number,
+  sinceMs: number,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    'SELECT 1 AS hit FROM events WHERE chat_id = ? AND reminder_id = ? AND kind = ? AND at >= ? LIMIT 1',
+  )
+    .bind(chatId, reminderId, EVENT_OF.pattern_offered, sinceMs)
+    .first<{ hit: number }>();
+  return !!row;
+}
 
 /**
  * Effects whose `id` is an INSTANCE id, not a reminder id.
@@ -1420,7 +1521,15 @@ export const AWAITING_TTL_MS = 30 * 60_000;
  */
 export type Awaiting =
   | { k: 'time'; r: number; at: number }
-  | { k: 'offer'; t: string; w: number; at: number };
+  | { k: 'offer'; t: string; w: number; at: number }
+  /**
+   * title — "על מה להזכיר?" was asked about reminder `r`, which exists and has
+   * an hour but no subject. His answer is a RENAME of that row, not a new
+   * reminder. voice.ts has asked this since untitled creates were allowed and
+   * nothing registered it, so on 16.08.2026 "על זה" reached the router with
+   * nothing to bind to and came back "אין לי משימה פתוחה שמתאימה לזה".
+   */
+  | { k: 'title'; r: number; at: number };
 
 export async function setAwaiting(
   env: Env,
@@ -1444,11 +1553,24 @@ export function readAwaiting(raw: string | null, now: number = Date.now()): Awai
   try {
     const a = JSON.parse(raw) as Awaiting;
     if (!a || !Number.isFinite(a.at) || now - a.at > AWAITING_TTL_MS) return null;
-    if (a.k === 'time') return Number.isInteger(a.r) ? a : null;
-    if (a.k === 'offer') {
-      return typeof a.t === 'string' && a.t.length > 0 && Number.isFinite(a.w) ? a : null;
+    // Exhaustive on purpose. This used to be a chain of `if`s ending in a bare
+    // `return null`, which meant a NEW arm added to the union compiled
+    // silently, was written by setAwaiting, and read back as null forever —
+    // the bot asking a question and forgetting it the same instant, which is
+    // the exact bug the awaiting slot exists to prevent. The `never` binding
+    // below turns adding an arm without a validator into a compile error.
+    switch (a.k) {
+      case 'time':
+        return Number.isInteger(a.r) ? a : null;
+      case 'offer':
+        return typeof a.t === 'string' && a.t.length > 0 && Number.isFinite(a.w) ? a : null;
+      case 'title':
+        return Number.isInteger(a.r) ? a : null;
+      default: {
+        const _never: never = a;
+        return _never ?? null;
+      }
     }
-    return null;
   } catch {
     // A row written by a future version, or corrupted. Forgetting it is always
     // safe; acting on half of it is not.
@@ -1554,4 +1676,387 @@ export async function resetItems(env: Env, reminderId: number): Promise<void> {
   )
     .bind(reminderId)
     .run();
+}
+
+// ------------------------------------------------------------------ friends
+
+/**
+ * How many friends one chat may hold, and how long a nickname may be.
+ *
+ * The cap is not about storage. Every accepted friend is somebody who can
+ * write a row into your chat and make your phone buzz at 07:00, so the number
+ * of people who can do that has to be a number you could name from memory.
+ */
+export const FRIEND_MAX = 20;
+export const NICKNAME_MAX = 40;
+
+export interface Friend {
+  chat_id: string;
+  friend_chat_id: string;
+  nickname: string;
+  status: 'pending' | 'accepted' | 'declined';
+  /** The requester's Telegram name, captured when he asked. See acceptFriend. */
+  requester_name: string | null;
+  requested_by: string;
+  created_at: number;
+}
+
+/** One directed edge: what `chatId` calls `friendChatId`, and where it stands. */
+export async function friendEdge(
+  env: Env,
+  chatId: string,
+  friendChatId: string,
+): Promise<Friend | null> {
+  return env.DB.prepare('SELECT * FROM friends WHERE chat_id = ? AND friend_chat_id = ?')
+    .bind(chatId, friendChatId)
+    .first<Friend>();
+}
+
+/**
+ * Everyone who can already set a reminder in this chat, and everyone this chat
+ * can set one for. Accepted only — a pending row is a question, not consent,
+ * and this is the list every cross-chat WRITE is checked against.
+ */
+export async function friendsOf(env: Env, chatId: string): Promise<Friend[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM friends WHERE chat_id = ? AND status = 'accepted' ORDER BY nickname",
+  )
+    .bind(chatId)
+    .all<Friend>();
+  return res.results ?? [];
+}
+
+/** His whole address book, pending rows included — what /friends prints. */
+export async function friendBook(env: Env, chatId: string): Promise<Friend[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM friends WHERE chat_id = ? AND status != 'declined' ORDER BY status, nickname",
+  )
+    .bind(chatId)
+    .all<Friend>();
+  return res.results ?? [];
+}
+
+/**
+ * Requests aimed AT this chat and still unanswered.
+ *
+ * Read off the requester's edge, because while a request is pending that is
+ * the only row there is — the reverse edge is written at acceptance, which is
+ * what makes "pending" and "consented" impossible to confuse.
+ */
+export async function incomingFriendRequests(env: Env, chatId: string): Promise<Friend[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM friends WHERE friend_chat_id = ? AND status = 'pending' ORDER BY created_at",
+  )
+    .bind(chatId)
+    .all<Friend>();
+  return res.results ?? [];
+}
+
+/** What `chatId` calls `friendChatId`, or null when they are nobody to him. */
+export async function friendName(
+  env: Env,
+  chatId: string,
+  friendChatId: string,
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT nickname FROM friends WHERE chat_id = ? AND friend_chat_id = ? AND status = 'accepted'",
+  )
+    .bind(chatId, friendChatId)
+    .first<{ nickname: string }>();
+  return row?.nickname ?? null;
+}
+
+/** Which friend `needle` names, by nickname. Null on no match AND on a tie. */
+export function matchFriend(friends: Friend[], needle: string): Friend | null {
+  const want = needle.trim().toLowerCase();
+  if (!want) return null;
+  const exact = friends.filter((f) => f.nickname.trim().toLowerCase() === want);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+  // A tie is deliberately not broken. Sending "לקנות חלב ב-7" to the wrong
+  // person is not a wrong guess about wording — it is a message in someone
+  // else's chat, and there is no version of that the bot gets to invent.
+  const loose = friends.filter((f) => f.nickname.trim().toLowerCase().includes(want));
+  return loose.length === 1 ? loose[0] : null;
+}
+
+export type FriendAsk =
+  /** The request was written and the other side has been asked. */
+  | { ok: true; kind: 'asked' }
+  /** They had already asked him, so saying it back is the answer to it. */
+  | { ok: true; kind: 'accepted' }
+  /** Same pair, still pending — the nickname was updated, nothing else. */
+  | { ok: true; kind: 'again' }
+  | { ok: false; kind: 'self' | 'already' | 'declined' | 'full' };
+
+/**
+ * Ask someone to be a friend, under the name you will call them by.
+ *
+ * Nothing about this grants anything: the row lands as `pending` and stays
+ * that way until they tap yes. The caller must separately have checked that
+ * the target is a chat the bot may talk to at all — this function is about
+ * consent between two users, not about who is allowed to use the bot.
+ *
+ * The `accepted` branch is the one worth reading twice. If they asked first
+ * and he answers by asking back, that IS a yes — and a better one than the
+ * button, because it arrives with his own name for them instead of the one
+ * derived at acceptance. Refusing it as a duplicate would leave two people
+ * who have each said yes waiting on each other.
+ */
+export async function requestFriend(
+  env: Env,
+  chatId: string,
+  targetId: string,
+  nickname: string,
+  /**
+   * What Telegram calls the person asking. Stored rather than used here: it is
+   * the name the OTHER side will get for him if she says yes, and the accept
+   * arrives as a tap in her chat, which carries her name and not his.
+   */
+  senderName?: string,
+  now: number = Date.now(),
+): Promise<FriendAsk> {
+  if (!targetId || targetId === chatId) return { ok: false, kind: 'self' };
+  const name = nickname.trim().slice(0, NICKNAME_MAX);
+
+  const mine = await friendEdge(env, chatId, targetId);
+  if (mine?.status === 'accepted') return { ok: false, kind: 'already' };
+  // Their refusal, remembered. Re-asking is exactly the nagging this prevents
+  // — the same rule a denied stranger gets in `pending`.
+  if (mine?.status === 'declined') return { ok: false, kind: 'declined' };
+
+  const theirs = await friendEdge(env, targetId, chatId);
+  if (theirs?.status === 'pending' && theirs.requested_by === targetId) {
+    // His own name for her wins over the one acceptance would have derived —
+    // he just typed it.
+    await acceptFriend(env, chatId, targetId, name, now);
+    return { ok: true, kind: 'accepted' };
+  }
+
+  if (!mine) {
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM friends WHERE chat_id = ?')
+      .bind(chatId)
+      .first<{ n: number }>();
+    if ((row?.n ?? 0) >= FRIEND_MAX) return { ok: false, kind: 'full' };
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO friends
+       (chat_id, friend_chat_id, nickname, status, requester_name, requested_by, created_at)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?)
+       ON CONFLICT(chat_id, friend_chat_id) DO UPDATE SET
+         nickname = excluded.nickname,
+         requester_name = excluded.requester_name`,
+  )
+    .bind(chatId, targetId, name, senderName?.trim().slice(0, NICKNAME_MAX) ?? null, chatId, now)
+    .run();
+  return { ok: true, kind: mine ? 'again' : 'asked' };
+}
+
+/**
+ * They said yes.
+ *
+ * `requesterId` is who asked; `chatId` is who is answering. The `status =
+ * 'pending'` clause in the UPDATE is what makes this once-only: a second tap
+ * on the same message changes nothing and returns false, so the requester
+ * cannot be told twice that he was accepted.
+ *
+ * BOTH edges are written. A friendship is mutual by construction — he asked
+ * for one and she agreed to it — and a single edge would deliver her reminder
+ * into his chat from a chat_id he has no name for. Her name for him is
+ * derived rather than asked (`theirName`, normally his Telegram first name),
+ * because a second question at the moment of saying yes is a question most
+ * people simply abandon. She can rename him with /friend whenever she likes.
+ */
+export async function acceptFriend(
+  env: Env,
+  chatId: string,
+  requesterId: string,
+  /**
+   * Her name for him. Omitted by the button — a tap carries her name, not his
+   * — in which case the one captured when he asked is used, and his chat_id
+   * if Telegram never gave one. Ugly beats anonymous: a reminder from a bare
+   * number is one she cannot place, and /friend renames him in one line.
+   */
+  theirName?: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  // Read before the UPDATE, or the row this needs is already the accepted one.
+  const asked = await friendEdge(env, requesterId, chatId);
+  const res = await env.DB.prepare(
+    `UPDATE friends SET status = 'accepted'
+      WHERE chat_id = ? AND friend_chat_id = ? AND status = 'pending'`,
+  )
+    .bind(requesterId, chatId)
+    .run();
+  if ((res.meta.changes ?? 0) === 0) return false;
+
+  await env.DB.prepare(
+    `INSERT INTO friends (chat_id, friend_chat_id, nickname, status, requested_by, created_at)
+       VALUES (?, ?, ?, 'accepted', ?, ?)
+       ON CONFLICT(chat_id, friend_chat_id) DO UPDATE SET status = 'accepted'`,
+  )
+    .bind(
+      chatId,
+      requesterId,
+      (theirName ?? asked?.requester_name ?? '').trim().slice(0, NICKNAME_MAX) || requesterId,
+      requesterId,
+      now,
+    )
+    .run();
+  return true;
+}
+
+/** They said no. The row is kept — see migrations/013 for why. */
+export async function declineFriend(
+  env: Env,
+  chatId: string,
+  requesterId: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `UPDATE friends SET status = 'declined'
+      WHERE chat_id = ? AND friend_chat_id = ? AND status = 'pending'`,
+  )
+    .bind(requesterId, chatId)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/**
+ * End it, from either side, in both directions.
+ *
+ * Deleted rather than marked declined, and both edges rather than one: this
+ * is the one case where the pair genuinely should be able to start over, and
+ * leaving the other edge in place would leave someone still able to write
+ * reminders into a chat that has just removed them.
+ */
+export async function removeFriend(
+  env: Env,
+  chatId: string,
+  friendChatId: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    'DELETE FROM friends WHERE (chat_id = ? AND friend_chat_id = ?) OR (chat_id = ? AND friend_chat_id = ?)',
+  )
+    .bind(chatId, friendChatId, friendChatId, chatId)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+// ------------------------------------------------------------- model health
+
+export interface ModelHealth {
+  model: string;
+  blocked_until: number;
+  strikes: number;
+  reason: string | null;
+}
+
+/**
+ * Every model currently written off, by id.
+ *
+ * Read once per generate() — one query against a table with as many rows as
+ * there are models, which is cheaper than the single wasted round trip it
+ * saves. Expired rows come back too, on purpose: the caller needs the strike
+ * count to decide how long the NEXT block should be, and an expired row is
+ * exactly the model it is about to probe.
+ */
+export async function modelHealth(env: Env): Promise<Map<string, ModelHealth>> {
+  const out = new Map<string, ModelHealth>();
+  try {
+    const res = await env.DB.prepare('SELECT * FROM model_health').all<ModelHealth>();
+    for (const row of res.results ?? []) out.set(row.model, row);
+  } catch (err) {
+    // Fails OPEN, like every other piece of bookkeeping around the model: an
+    // unreadable health table must cost a wasted round trip, never a reply.
+    console.error('modelHealth', err);
+  }
+  return out;
+}
+
+/** Write a model off until `until`. `strikes` is the new consecutive count. */
+export async function blockModel(
+  env: Env,
+  model: string,
+  until: number,
+  strikes: number,
+  reason: string,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO model_health (model, blocked_until, strikes, reason, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(model) DO UPDATE SET
+         blocked_until = excluded.blocked_until,
+         strikes = excluded.strikes,
+         reason = excluded.reason,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(model, until, strikes, reason.slice(0, 40), Date.now())
+    .run();
+}
+
+/**
+ * It answered. Forget everything.
+ *
+ * The strike count goes with the row, which is what makes the backoff recover
+ * in one step rather than decay: a model that was down for an hour and is
+ * working again starts its next bad minute at one strike, not at five.
+ */
+export async function clearModelBlock(env: Env, model: string): Promise<void> {
+  await env.DB.prepare('DELETE FROM model_health WHERE model = ?').bind(model).run();
+}
+
+/**
+ * Everything this chat spent today, across every model.
+ *
+ * The soft limit used to be measured against ONE model's counter, which was
+ * right while there were two models and one of them took nearly every call.
+ * With a ladder several models deep the same day's work is spread across all
+ * of them, so a single-model number understates it by as much as the ladder
+ * is long — and the budget it gates would never bind again.
+ *
+ * `_rejections` is excluded because it is not a model. It shares this table
+ * (see recordRejection) and counting it would charge him for the times the
+ * validator caught the model lying.
+ */
+export async function usageTodayAll(env: Env, chatId?: string): Promise<number> {
+  // Omit the chat and it is the whole key's spend for the day — two questions,
+  // the same shape, and the same exclusion of `_rejections` either way.
+  // `model != ?` rather than a LIKE on the underscore prefix: a LIKE needs an
+  // ESCAPE clause to stop `_` meaning "any character", and in a template
+  // literal the backslashes that clause needs are eaten before SQLite ever
+  // sees them — which produced `ESCAPE ''` and a bare "SQL logic error".
+  const where = chatId ? 'AND chat_id = ?' : '';
+  const stmt = env.DB.prepare(
+    `SELECT SUM(calls) AS calls FROM usage
+      WHERE day = ? ${where} AND model != ?`,
+  );
+  const bound = chatId
+    ? stmt.bind(localDay(env, Date.now()), chatId, REJECTION_COUNTER)
+    : stmt.bind(localDay(env, Date.now()), REJECTION_COUNTER);
+  const row = await bound.first<{ calls: number | null }>();
+  return Number(row?.calls ?? 0);
+}
+
+/**
+ * Change what one side calls the other. One edge only — his name for her is
+ * his business, and hers for him is hers.
+ *
+ * This exists because the reverse edge is NAMED rather than asked for (see
+ * acceptFriend): whoever says yes gets the requester's Telegram first name,
+ * or his chat_id when Telegram did not give one, and both of those are
+ * things a person should be able to fix.
+ */
+export async function renameFriend(
+  env: Env,
+  chatId: string,
+  friendChatId: string,
+  nickname: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    "UPDATE friends SET nickname = ? WHERE chat_id = ? AND friend_chat_id = ? AND status = 'accepted'",
+  )
+    .bind(nickname.trim().slice(0, NICKNAME_MAX), chatId, friendChatId)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
 }

@@ -35,11 +35,42 @@ export type Callback =
   | { t: 'offer' }
   /** Tick one errand off a multi-item reminder. The whole task stays open
    *  until the last one goes — see db.completeItem. */
-  | { t: 'item'; item: number };
+  | { t: 'item'; item: number }
+  /**
+   * Answer a friend request. `from` is the chat_id of whoever asked — the
+   * only thing that needs carrying, because the person answering is already
+   * known from the callback itself, and the pair plus the row's own status is
+   * what authorises the write (see db.acceptFriend).
+   *
+   * A chat_id rather than a row id on purpose: there is no row id to carry
+   * (the primary key is the pair), and a payload that names both ends cannot
+   * be replayed against a different friendship.
+   */
+  /**
+   * Delete a reminder outright, offered when its own history says it has never
+   * worked (pattern_failing). There was no delete button before this: every
+   * other path narrows or defers a task, and the one honest answer to "this has
+   * never once happened" is to stop asking.
+   */
+  | { t: 'rdrop'; reminder: number }
+  /**
+   * "Leave it as it is." Writes NOTHING — it exists so that declining an
+   * unsolicited question costs one tap instead of silence.
+   *
+   * The first version of the pattern keyboard reused `plan` with slot 'none'
+   * for this, which does not mean "leave it": it means "no time", and it would
+   * have UNSCHEDULED the reminder he had just said was fine. A decline button
+   * that changes something is worse than no decline button.
+   */
+  | { t: 'keep' }
+  | { t: 'facc'; from: string }
+  | { t: 'frej'; from: string };
 
 const SLOTS: PlanSlot[] = ['eve', 'tm', 'hr', 'none'];
 
 const isNat = (s: string) => /^\d{1,9}$/.test(s);
+/** A Telegram chat_id: digits, but never parsed into a number. See decode. */
+const isChatId = (s: string) => /^\d{1,20}$/.test(s);
 
 export function encode(c: Callback): string {
   switch (c.t) {
@@ -53,6 +84,15 @@ export function encode(c: Callback): string {
       return `r:${c.reminder}:${String(c.hour).padStart(2, '0')}:${String(c.minute).padStart(2, '0')}`;
     case 'plan':
       return `p:${c.reminder}:${c.slot}`;
+    // NOT `x:` — that is `skip`, and the first version of this collided with
+    // it silently: encode({t:'rdrop',reminder:9}) round-tripped to
+    // {t:'skip',instance:9}, so the button offering to DELETE a reminder that
+    // has never worked would instead have skipped instance 9 in whatever state
+    // it happened to be in. Strict decode is why the test saw it.
+    case 'rdrop':
+      return `rx:${c.reminder}`;
+    case 'keep':
+      return 'k';
     case 'tomorrow':
       return `m:${c.instance}`;
     case 'followup':
@@ -65,6 +105,10 @@ export function encode(c: Callback): string {
       return 'o';
     case 'item':
       return `i:${c.item}`;
+    case 'facc':
+      return `facc:${c.from}`;
+    case 'frej':
+      return `frej:${c.from}`;
   }
 }
 
@@ -94,10 +138,22 @@ export function decode(s: string): Callback | null {
       return parts.length === 3 && isNat(parts[1]) && SLOTS.includes(parts[2] as PlanSlot)
         ? { t: 'plan', reminder: +parts[1], slot: parts[2] as PlanSlot }
         : null;
+    case 'rx':
+      return parts.length === 2 && isNat(parts[1]) ? { t: 'rdrop', reminder: +parts[1] } : null;
+    case 'k':
+      return parts.length === 1 ? { t: 'keep' } : null;
     case 'o':
       return parts.length === 1 ? { t: 'offer' } : null;
     case 'i':
       return parts.length === 2 && isNat(parts[1]) ? { t: 'item', item: +parts[1] } : null;
+    // Kept as a STRING, unlike every other payload here: a Telegram chat_id is
+    // an identifier that happens to be written in digits, and putting a 64-bit
+    // one through Number() is how it comes back off by one. `isChatId` is the
+    // same "digits only" strictness the numeric ids get, minus the conversion.
+    case 'facc':
+      return parts.length === 2 && isChatId(parts[1]) ? { t: 'facc', from: parts[1] } : null;
+    case 'frej':
+      return parts.length === 2 && isChatId(parts[1]) ? { t: 'frej', from: parts[1] } : null;
     default:
       return null;
   }
@@ -277,6 +333,50 @@ export function buttonsFor(
   // the 0.7 transcript: "להגיד לאישתי משהו יפה" was raised five times across
   // four days, and the only way to stop it was to keep not answering — which
   // is precisely the input that made it keep asking.
+  // A reminder whose own history says it is not working. The offer has to be
+  // finishable in one tap or it is just another thing to ignore — which is
+  // precisely what happened to the goal check-in below before it got buttons.
+  const pushed = effects.find((e) => e.kind === 'pattern_pushed');
+  if (pushed) {
+    const reminder = positiveId(pushed.id);
+    if (reminder !== null) {
+      const at = typeof pushed.at === 'number' ? pushed.at : null;
+      const rows: Button[][] = [];
+      if (at !== null) {
+        // The hour comes off the effect, so the LABEL and the WRITE cannot
+        // disagree — the same reason the followup button re-derives its
+        // instant instead of carrying one.
+        const hhmm = formatLocal(at, tz).match(/(\d{2}):(\d{2})/);
+        if (hhmm) {
+          rows.push([
+            {
+              text: `כן, תזיז ל-${hhmm[1]}:${hhmm[2]}`,
+              data: { t: 'retime', reminder, hour: +hhmm[1], minute: +hhmm[2] },
+            },
+          ]);
+        }
+      }
+      // Always present, including when no hour was suggested: "leave it" has to
+      // be one tap too, or the only way to decline is silence, and silence is
+      // what this whole feature is trying to stop reading as avoidance.
+      rows.push([{ text: 'תשאיר', data: { t: 'keep' } }]);
+      if (rows.length) return rows;
+    }
+  }
+
+  const failing = effects.find((e) => e.kind === 'pattern_failing');
+  if (failing) {
+    const reminder = positiveId(failing.id);
+    if (reminder !== null) {
+      return [
+        [
+          { text: 'תמחק את זה', data: { t: 'rdrop', reminder } },
+          { text: 'תשאיר', data: { t: 'keep' } },
+        ],
+      ];
+    }
+  }
+
   const checkin = effects.find((e) => e.kind === 'checkin_goal');
   if (checkin) {
     const goal = positiveId(checkin.id);

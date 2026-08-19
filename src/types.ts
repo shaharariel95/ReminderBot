@@ -6,6 +6,16 @@ export interface Env {
   OWNER_CHAT_ID: string;
   GEMINI_MODEL?: string;
   GEMINI_MODEL_FALLBACK?: string;
+  /**
+   * The rest of the ladder under those two, comma-separated, best first.
+   *
+   * Each free-tier model carries its own per-minute quota against the same
+   * key, so this is capacity rather than redundancy: two rungs deep, a busy
+   * minute ran out of models while four others sat unasked. See
+   * gemini.modelLadder for how the three variables combine, and
+   * gemini.DEFAULT_LADDER for what happens when this is unset.
+   */
+  GEMINI_MODELS?: string;
   /** Calls per DAY before the bot stops consulting the model at all. */
   GEMINI_SOFT_LIMIT?: string;
   /**
@@ -53,8 +63,22 @@ export interface Reminder {
   nag_interval_min: number;
   max_nags: number;
   next_fire_at: number | null;
+  /**
+   * When the thing this is ABOUT happens, as an instant — null unless he said
+   * so. Distinct from next_fire_at, which is when to ring. See migration 015.
+   */
+  event_at: number | null;
   status: ReminderStatus;
   active: number;
+  /**
+   * Who set it, when it was not the person it fires for. NULL on every
+   * reminder somebody set for himself, which is nearly all of them.
+   *
+   * The sender's chat_id and not their name: the recipient may rename them
+   * before this ever fires, and the message that goes out has to say what he
+   * calls them then. Resolved through db.friendName at fire time.
+   */
+  from_chat_id: string | null;
   created_at: number;
 }
 
@@ -175,6 +199,11 @@ export interface Intent {
   days?: number[];
   interval_minutes?: number;
   once_at?: string;
+  /**
+   * When the thing happens, "YYYY-MM-DDTHH:MM" — NOT when to ring. Only when he
+   * said both. See migration 015.
+   */
+  event_at?: string;
   /** "in N minutes/hours" — TypeScript does the arithmetic, not the model. */
   in_minutes?: number;
   requires_proof?: boolean;
@@ -198,6 +227,15 @@ export interface Intent {
    * reading. Value is the other reading's hour, offered as a one-tap correction.
    */
   ambiguous_hour?: number;
+  /**
+   * "תזכיר לדנה לקנות חלב" — the reminder is for somebody else.
+   *
+   * A NICKNAME, not a chat_id: the model is shown the names in his address
+   * book and nothing else, so the worst it can produce is a name that matches
+   * nobody. Resolving it is effects.ts's job, and it refuses on a tie — see
+   * db.matchFriend. The model is never given an id it could aim at a stranger.
+   */
+  for_friend?: string;
 }
 
 /**
@@ -207,7 +245,7 @@ export interface Intent {
  */
 export type Effect =
   | {
-      kind: 'reminder_created'; id: number; title: string; at: number; schedule: Schedule;
+      kind: 'reminder_created'; id: number; title: string; at: number; eventAt?: number | null; schedule: Schedule;
       requiresProof: boolean; altHour?: number;
       /**
        * A similar reminder that already exists — either within seconds of this
@@ -222,6 +260,31 @@ export type Effect =
        * or a truthful mention gets discarded by validate.ts.
        */
       duplicateOf?: { id: number; title: string; at: number };
+    }
+  /**
+   * The same write, in somebody else's chat.
+   *
+   * A separate kind rather than a flag on `reminder_created`, because the
+   * claim is different in the one way this codebase cares about: "קבעתי לך"
+   * and "קבעתי לדנה" are statements about two different rows in two different
+   * accounts, and he cannot open her /list to check the second one. Keeping
+   * them apart means voice.ts cannot word one as the other and validate.ts
+   * cannot let a rewrite swap them.
+   *
+   * `friend` is the nickname HE uses, because he is the one reading this
+   * sentence. What she will see it called is resolved separately, from her own
+   * address book, when it fires.
+   */
+  | {
+      kind: 'friend_reminder_created'; id: number; title: string; at: number;
+      schedule: Schedule; requiresProof: boolean; friend: string;
+      /**
+       * Her chat_id. Never rendered anywhere — it is here so index.ts can tell
+       * her a row just appeared in her account without re-resolving the name
+       * through a second lookup that could resolve differently. voice.ts must
+       * keep ignoring it: a chat_id is not something either of them said.
+       */
+      to: string;
     }
   | { kind: 'reminder_captured'; id: number; title: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
@@ -243,6 +306,48 @@ export type Effect =
   | { kind: 'instance_done'; id: number; title: string; streak: number }
   | { kind: 'instance_skipped'; id: number; title: string }
   | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }
+  /**
+   * This reminder is not working, said as a COUNT and an OFFER.
+   *
+   * Never a diagnosis: see the rule at the top of patterns.ts. "דחית 6 מתוך 7"
+   * is checkable against rows; "אתה נמנע מזה" is a claim about him that
+   * nothing in the database supports, and he cannot open a list to check it.
+   *
+   * `at` carries the hour he usually closes it at, as an INSTANT, so the
+   * existing facts.ts sweep of `at` allow-lists it for the persona — and null
+   * when his completions do not cluster, in which case the honest offer is to
+   * ask rather than to name an hour he has never used.
+   */
+  | { kind: 'pattern_pushed'; id: number; title: string; snoozes: number; fires: number; at?: number }
+  | { kind: 'pattern_failing'; id: number; title: string; failures: number; fires: number }
+  /**
+   * The new reminder landed in a part of a day that is already busy.
+   *
+   * An observation, never a refusal: he is allowed a crowded morning, and a
+   * bot that argued with him about it would be doing the thing `chill` exists
+   * to stop. It rides ALONGSIDE the confirmation of the write rather than
+   * replacing it, so the reminder is still set and still reported.
+   *
+   * `count` includes the one just made, because that is what he will count if
+   * he opens /list — an off-by-one here reads as the bot being wrong about
+   * something he can check in two taps.
+   */
+  | { kind: 'window_crowded'; count: number; label: string }
+  /**
+   * He aimed a reminder at somebody the address book cannot resolve.
+   *
+   * Carries BOTH the name he used and the names actually on file, because the
+   * commonest cause is not a typo — it is a script mismatch he has no way to
+   * see. The reverse edge created at acceptance is named from the requester's
+   * Telegram profile ("amnon"), and he types Hebrew ("אמנון"). matchFriend
+   * cannot bridge scripts and must not try: guessing would put a message in a
+   * stranger's chat.
+   *
+   * Replaces `nothing: 'unknown_friend'`, which said only "I am not sure which
+   * friend you meant, /friends shows the names" — a second action, and one
+   * that never told him WHY the name he used was wrong.
+   */
+  | { kind: 'friend_unknown'; asked: string; known: string[] }
   /**
    * complete/snooze couldn't resolve which open instance the user meant AND
    * there was more than one candidate — asking is correct here; claiming
@@ -322,7 +427,15 @@ export type Effect =
    * without being done. Carried so the wording can name the pattern instead of
    * repeating the identical ping for the fifth time as though it were the first.
    */
-  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number; items?: ReminderItem[] }
+  /**
+   * `from` is set only when somebody ELSE set this reminder, and it is the
+   * name the RECIPIENT has for them — read out of her address book at fire
+   * time rather than stored on the row, because she may have renamed him in
+   * the week since he wrote it. Without it, "נו? לקנות חלב." arrives from
+   * nobody, about something she never asked for, which reads as a bug rather
+   * than as a favour.
+   */
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number; items?: ReminderItem[]; from?: string; eventAt?: number | null }
   | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
   | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
@@ -358,6 +471,14 @@ export type Effect =
       why:
         | 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder'
         | 'unknown_goal' | 'unknown_note' | 'chat'
+        /**
+         * He named somebody the address book cannot resolve — nobody by that
+         * name, or two people by it. Deliberately NOT downgraded to a
+         * reminder for himself: he asked for something to happen to another
+         * person, and a row in his own chat is a different thing that he
+         * would then have to notice and delete.
+         */
+        | 'unknown_friend'
         /** Something threw mid-turn. Must neither confirm nor deny the write. */
         | 'failed'
         /** The router came back with nothing usable — not the same as small talk. */
@@ -376,7 +497,8 @@ export const UNTITLED_TITLE = 'תזכורת';
 
 /** True when this effect wrote something the bot is allowed to confirm. */
 export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
-  'reminder_created', 'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
+  'reminder_created', 'friend_reminder_created',
+  'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
   'instance_started', 'reminder_annotated',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',

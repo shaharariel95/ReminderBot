@@ -48,8 +48,8 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
     name: 'create',
     verbs: /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי/,
     kinds: new Set<Effect['kind']>([
-      'reminder_created', 'reminder_captured', 'reminder_scheduled',
-      'reminder_annotated', 'goal_created', 'profile_noted',
+      'reminder_created', 'friend_reminder_created', 'reminder_captured',
+      'reminder_scheduled', 'reminder_annotated', 'goal_created', 'profile_noted',
     ]),
   },
   {

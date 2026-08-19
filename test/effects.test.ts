@@ -730,7 +730,18 @@ async function main() {
         { action: 'reschedule', target_id: id, schedule_type: 'once', in_minutes: 60 },
         'תזכיר לי את זה עוד שעה',
       );
-      eq('the capture is retimed', result[0].kind, 'reminder_retimed');
+      // Was `reminder_retimed` until 17.08.2026, which this section's own name
+      // ("becomes scheduled") already disagreed with. voice.ts words that kind
+      // as "שיניתי" — I CHANGED it — about a row that never had a time to
+      // change, and the kind sits in the `move` CLAIM_GROUP alone, so the
+      // persona could legally escalate the baseline to "הזזתי".
+      //
+      // reminder_scheduled is in BOTH groups on purpose (validate.ts): giving
+      // an inbox item its first hour is as fairly called a create as a move.
+      // It is also what the `plan` button has always emitted for this exact
+      // user-visible action — two roads to one outcome must not produce two
+      // different sentences.
+      eq('the capture is scheduled, not "changed"', result[0].kind, 'reminder_scheduled');
       eq('and is now scheduled rather than sitting in the inbox', rowById(rig, id).status, 'scheduled');
     });
     rig.restore();

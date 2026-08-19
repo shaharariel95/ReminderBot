@@ -4,7 +4,7 @@ import { handleSlash } from './slash';
 import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
 import { validate } from './validate';
-import { CHECKIN_GOAL, GIVE_UP, NAG_LADDER, nagDelayMinutes } from './persona';
+import { CHECKIN_GOAL, CONVERSATION_WINDOW_MIN, GIVE_UP, NAG_LADDER, NAG_LADDER_ITEMS, nagDelayMinutes } from './persona';
 import { asksForNewReminder, findFutureInstant, parseAnswerTime, quickParse } from './quickparse';
 import {
   answerCallback,
@@ -29,7 +29,7 @@ import {
   wallString,
   wallToUtc,
 } from './time';
-import { TURN_FAILED, renderBaseline } from './voice';
+import { TURN_FAILED, friendReminderHeadsUp, questionAsked, renderBaseline } from './voice';
 import { VERSION } from './version';
 import type { Effect, Env, Facts, Intent, Schedule } from './types';
 
@@ -67,12 +67,22 @@ export default {
 // ---------------------------------------------------------------- incoming
 
 async function buildContext(env: Env, chatId: string): Promise<Context> {
-  const [settings, stats, reminders, goals, open] = await Promise.all([
+  const [settings, stats, reminders, goals, open, friends, inbox] = await Promise.all([
     db.getSettings(env, chatId),
     db.stats(env, chatId),
     db.listReminders(env, chatId),
     db.listGoals(env, chatId),
     db.openInstances(env, chatId),
+    // One more read per turn, on a table with single digits of rows. It buys
+    // the router the only thing that can tell "תזכיר לדנה" from a reminder
+    // about somebody called דנה — the list of people he is actually allowed
+    // to write to. Without it here, quickparse cannot bail on the difference
+    // either, and the fast path would happily file it as his own.
+    db.friendsOf(env, chatId).catch(() => []),
+    // listReminders filters status='scheduled', so without this read the
+    // router has no idea the capture it is about to duplicate exists. See
+    // Context.inbox — this is the whole of the 16.08.2026 #35/#36/#37 bug.
+    db.listInbox(env, chatId).catch(() => []),
   ]);
   // Only when something is actually being chased. A chat with nothing open has
   // no errands to tick off, and this would otherwise be a query per message to
@@ -83,7 +93,7 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
         .catch(() => undefined)
     : undefined;
   return {
-    settings, stats, reminders, goals, open, items,
+    settings, stats, reminders, goals, open, items, friends, inbox,
     nowLabel: formatLocal(Date.now(), settings.tz),
   };
 }
@@ -120,7 +130,11 @@ async function handleUpdate(update: any, env: Env): Promise<void> {
   // they are answered before the router is reached. handleSlash returns null
   // for anything it does not recognise, so ordinary messages fall through
   // exactly as before.
-  const reply = await handleSlash(env, chatId, text);
+  // The sender's Telegram name rides along for exactly one command: /friend
+  // needs it so that when the other side says yes, her address book gets a
+  // name for him rather than a bare chat_id. Read here because this is the
+  // only place the raw Telegram message exists.
+  const reply = await handleSlash(env, chatId, text, msg.from?.first_name);
   if (reply) {
     await sendMessage(env, chatId, reply);
     return;
@@ -270,7 +284,46 @@ async function respondToOwner(
       awaiting?.k === 'time' ? parseAnswerTime(text, Date.now(), ctx.settings.tz) : null;
 
     // Common reminder phrasings never touch the router — see quickparse.ts.
-    const fast = image ? null : quickParse(text, Date.now(), ctx.settings.tz);
+    // The friends' names go in so this can REFUSE. Every parse in that file
+    // assumes the reminder is his own, so "תזכיר לדנה" has to reach the router
+    // — the only thing that knows who דנה is. A chat with no friends passes an
+    // empty list and behaves exactly as it always did.
+    // The subject of a reminder whose hour is already settled — the answer to
+    // "על מה להזכיר?".
+    //
+    // Gated on asksForNewReminder, which is the SAME gate quickparse and the
+    // router-failure capture use, for the same reason: if he opened a new
+    // request instead of answering ("תזכיר לי מחר לקנות חלב"), that is a new
+    // reminder and renaming the old one with it would lose both. Anything that
+    // is not a fresh request is taken as the answer, because that is what it
+    // almost always is — and a rename is reversible in a way a lost reminder
+    // is not.
+    // Carries its target rather than reaching back for `awaiting.r` later: the
+    // narrowing is done here, where the `k === 'title'` check is, so no
+    // non-null assertion is needed at the use site to convince the compiler.
+    const answeredTitle =
+      awaiting?.k === 'title' && text && !asksForNewReminder(text)
+        ? { target: awaiting.r, title: text.slice(0, 120) }
+        : null;
+
+    // Common reminder phrasings never touch the router — see quickparse.ts.
+    // The friends' names go in so this can REFUSE. Every parse in that file
+    // assumes the reminder is his own, so "תזכיר לדנה" has to reach the router
+    // — the only thing that knows who דנה is. A chat with no friends passes an
+    // empty list and behaves exactly as it always did.
+    //
+    // The last argument is the one thing quickparse cannot see for itself: a
+    // reminder is ringing right now, so "תזכיר לי עוד שעה" is probably a snooze
+    // and a titleless create must defer to the router rather than guess.
+    const fast = image
+      ? null
+      : quickParse(
+          text,
+          Date.now(),
+          ctx.settings.tz,
+          (ctx.friends ?? []).map((f) => f.nickname),
+          ctx.open.length > 0,
+        );
     const intents: Intent[] =
       awaiting?.k === 'time' && answeredAt !== null
         ? [
@@ -281,7 +334,9 @@ async function respondToOwner(
               once_at: wallString(answeredAt, ctx.settings.tz),
             },
           ]
-        : fast
+        : answeredTitle !== null
+          ? [{ action: 'rename', target_id: answeredTitle.target, title: answeredTitle.title }]
+          : fast
           ? [fast]
           : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
     // Visible in `wrangler tail`. When the bot claims it did something it
@@ -373,27 +428,60 @@ async function respondToOwner(
   // Clearing on ANY other turn matters as much as setting: the TTL is a
   // backstop, not the rule. If he asked something new in between, the old
   // "מתי?" is no longer what a bare hour would be answering.
-  const asking = effects.find(
-    (e): e is Extract<Effect, { kind: 'needs_time' }> => e.kind === 'needs_time',
-  );
-  const offered = effects.find(
-    (e): e is Extract<Effect, { kind: 'appointment_offer' }> => e.kind === 'appointment_offer',
-  );
-  if (asking) {
+  // Asked of the EFFECTS rather than pattern-matched here. This used to be two
+  // hard-coded `find`s for `needs_time` and `appointment_offer`, which is why
+  // `reminder_captured` — whose wording has always ended "תגיד לי מתי" —
+  // registered nothing at all, and his answer became a second and third row.
+  // Now the wording and the slot live together in voice.ts, so an effect that
+  // asks and forgets is visible in one file instead of two.
+  const question = effects.map(questionAsked).find((q) => q !== null) ?? null;
+  if (question) {
     await db
-      .setAwaiting(env, chatId, { k: 'time', r: asking.id, at: Date.now() })
-      .catch((e) => console.error('setAwaiting', e));
-  } else if (offered) {
-    // The title and instant ride here rather than in callback_data, which has
-    // 64 bytes and no room for a title. The button just says yes.
-    await db
-      .setAwaiting(env, chatId, { k: 'offer', t: offered.title, w: offered.at, at: Date.now() })
+      .setAwaiting(env, chatId, { ...question, at: Date.now() })
       .catch((e) => console.error('setAwaiting', e));
   } else if (awaiting) {
     await db.setAwaiting(env, chatId, null).catch((e) => console.error('setAwaiting', e));
   }
 
-  await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history);
+  // Somebody else's chat just gained a row. She hears about it now rather than
+  // at 07:00, because a reminder she never set, arriving with no warning, is
+  // indistinguishable from a bug — and because now is when she can say she
+  // does not want it.
+  await tellFriends(env, chatId, effects);
+
+  await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history, 'replying');
+}
+
+/**
+ * Tell the other side that a reminder was just set for them.
+ *
+ * Plain sendMessage, no model, no validator: the wording is fully determined
+ * (voice.friendReminderHeadsUp) and this is the bot reporting a write rather
+ * than talking to her — the same reason a button never calls the model.
+ *
+ * Best-effort, and deliberately AFTER the write. The row is hers either way;
+ * a failed heads-up costs one message and the reminder still fires with his
+ * name on it. The reverse — announcing before writing — would be the one
+ * thing this codebase forbids.
+ *
+ * Note what is NOT claimed to him: his own confirmation says the reminder was
+ * set, never that she was told. If this throws, nothing he was told stops
+ * being true.
+ */
+async function tellFriends(env: Env, chatId: string, effects: Effect[]): Promise<void> {
+  for (const e of effects) {
+    if (e.kind !== 'friend_reminder_created') continue;
+    try {
+      // His name in HER address book, not the one he used for her: she is the
+      // one reading it. Falls back to his chat_id rather than to silence — a
+      // number she can look up beats a reminder from nobody.
+      const mine = (await db.friendName(env, e.to, chatId)) ?? chatId;
+      const theirs = await db.getSettings(env, e.to);
+      await sendMessage(env, e.to, friendReminderHeadsUp(mine, e.title, e.at, theirs.tz));
+    } catch (err) {
+      console.error('tellFriends', err);
+    }
+  }
 }
 
 /** Snooze minutes taken straight off a button, unlike applyIntent's model-derived
@@ -432,6 +520,16 @@ async function handleCallback(update: any, env: Env): Promise<void> {
 
   const cb = decode(String(q.data ?? ''));
   const effects: Effect[] = [];
+  /**
+   * A plain sentence this tap produced, outside the effects pipeline.
+   *
+   * The friend taps are administrative — like /allow, they change who may
+   * talk to whom rather than what is on anybody's list. There is no reminder
+   * to describe, nothing for voice.ts to word, and nothing a model rewrite
+   * could add. They still count as "something happened", which is why the
+   * tick below is driven by this as well as by `effects`.
+   */
+  let note: string | null = null;
 
   // An undecodable payload still needs its keyboard settled — it isn't
   // exempt from "always settle," it's just the one case with nothing to do.
@@ -488,6 +586,9 @@ async function handleCallback(update: any, env: Env): Promise<void> {
             nag_interval_min: 20,
             max_nags: 3,
             next_fire_at: at,
+            // A tap carries one instant and one title by construction; there
+            // is no second time in a button for an event hour to come from.
+            event_at: null,
           });
           effects.push({ kind: 'reminder_created', id, title: inst.title, at, schedule, requiresProof: false });
         }
@@ -575,6 +676,28 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       // "כן" to a reminder offered for something he only mentioned. The title
       // and instant come from the awaiting slot rather than from the payload —
       // callback_data has 64 bytes and a Hebrew title does not fit.
+      // "Leave it as it is." Writes nothing on purpose — its whole job is to
+      // let him decline an unsolicited question in one tap instead of by
+      // silence, which this bot is otherwise inclined to read as avoidance.
+      // The cooldown was already recorded when the question was asked.
+      case 'keep': {
+        await sendOutcome(env, chatId, await buildContext(env, chatId),
+          [{ kind: 'nothing', why: 'chat', userText: '' }], undefined, 'none', undefined, 'replying');
+        break;
+      }
+
+      // Delete a reminder its own history says has never once worked. Goes
+      // through the same chat-scoped delete every other path uses, so a
+      // replayed or forged payload cannot reach another chat's row.
+      case 'rdrop': {
+        const ctx2 = await buildContext(env, chatId);
+        const effects = await applyIntent(
+          env, chatId, ctx2, { action: 'delete', target_id: cb.reminder }, '',
+        );
+        await sendOutcome(env, chatId, ctx2, effects, undefined, 'none', undefined, 'replying');
+        break;
+      }
+
       case 'offer': {
         const settings = await db.getSettings(env, chatId);
         const pending = db.readAwaiting(settings.awaiting);
@@ -591,6 +714,8 @@ async function handleCallback(update: any, env: Env): Promise<void> {
             nag_interval_min: 20,
             max_nags: 3,
             next_fire_at: pending.w,
+            // As above: the offer slot holds a title and an instant, nothing more.
+            event_at: null,
           });
           // Consumed, so a second tap on the same message cannot write it twice.
           await db.setAwaiting(env, chatId, null).catch(() => {});
@@ -627,6 +752,36 @@ async function handleCallback(update: any, env: Env): Promise<void> {
         }
         break;
       }
+      // Yes or no to a friend request. The pair plus the row's own status is
+      // the whole authorisation: db.acceptFriend only touches a row that is
+      // `pending` AND aimed at the chat that tapped, so a replayed or guessed
+      // payload changes nothing — and a second tap on the same message
+      // reports nothing, so the requester cannot be told twice.
+      case 'facc': {
+        if (await db.acceptFriend(env, chatId, cb.from)) {
+          const mine = await db.friendName(env, chatId, cb.from);
+          note = `${mine ?? cb.from} בפנים. עכשיו אפשר "תזכיר ל${mine ?? cb.from}...".`;
+          // Best-effort: the person who has been waiting has to hear it, but a
+          // blocked bot on his side must not undo her acceptance.
+          const theirs = await db.friendName(env, cb.from, chatId);
+          await sendMessage(
+            env,
+            cb.from,
+            `${theirs ?? chatId} אישר. אפשר לקבוע לו תזכורות — "תזכיר ל${theirs ?? chatId}...".`,
+          ).catch((err) => console.error('friend accepted notice', err));
+        }
+        break;
+      }
+      case 'frej': {
+        // Nothing is sent to the requester. He asked, she said no, and a
+        // message telling him so is a second thing she did not agree to; his
+        // side simply stays pending forever, which is what "no answer" looks
+        // like everywhere else in this bot.
+        if (await db.declineFriend(env, chatId, cb.from)) {
+          note = 'לא נורא. לא אשאל אותך על זה שוב.';
+        }
+        break;
+      }
       case 'gdone':
       case 'gdrop': {
         const status = cb.t === 'gdone' ? 'done' : 'dropped';
@@ -660,8 +815,9 @@ async function handleCallback(update: any, env: Env): Promise<void> {
   await settleButtons(
     env, chatId, Number(q.message.message_id),
     String(q.message.text ?? ''),
-    effects.length ? '✓' : '—',
+    effects.length || note ? '✓' : '—',
   );
+  if (note) await sendMessage(env, chatId, note).catch((e) => console.error('callback note', e));
   if (effects.length) {
     // Context is only built now, after the writes: building it up front (as a
     // no-effect tap used to) wasted four D1 reads on the common case, and
@@ -672,7 +828,8 @@ async function handleCallback(update: any, env: Env): Promise<void> {
     // never touches the model. This is what keeps a tap free of both latency
     // and quota.
     const ctx = await buildContext(env, chatId);
-    await sendOutcome(env, chatId, ctx, effects, undefined, 'none');
+    // A button tap is him acting, not him ignoring.
+    await sendOutcome(env, chatId, ctx, effects, undefined, 'none', undefined, 'replying');
   }
 }
 
@@ -803,6 +960,20 @@ async function sendOutcome(
    * taps) leave it out and it is read on demand.
    */
   history?: { role: 'user' | 'bot'; text: string }[],
+  /**
+   * Is this turn CHASING him or ANSWERING him?
+   *
+   * The only thing it changes is whether speak() is shown the elapsed-minutes
+   * block. That block exists so a nag can state a true number instead of
+   * inventing one; handed to a turn where he has just replied it becomes an
+   * invitation to editorialise about how long he took, and on 16.08.2026 it
+   * produced "למה לקח לך 69 דקות להבין מתי זה?" — aimed at a cooperative answer
+   * to the bot's own question.
+   *
+   * Defaults to 'chasing' so every cron path keeps behaving exactly as it did;
+   * the reply paths opt out explicitly.
+   */
+  stance: 'chasing' | 'replying' = 'chasing',
 ): Promise<boolean> {
   // The reminder's own history, written here because this is the single point
   // every path converges on — webhook, button tap and cron alike — and it runs
@@ -848,7 +1019,7 @@ async function sendOutcome(
         quotable: [...facts.quotable, ...notes.map((n) => n.note)],
       };
       const dressed = await withTyping(env, chatId, () =>
-        speak(env, spoken, recent, baseline, toneNote),
+        speak(env, spoken, recent, baseline, toneNote, stance),
       );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
@@ -913,7 +1084,12 @@ async function modelAllowed(
   // Fail open: if the usage query throws, a check-in still gets the model
   // rather than being silently suppressed forever by a broken read.
   try {
-    const used = await db.usageTodayFor(env, env.GEMINI_MODEL ?? 'gemini-3.5-flash', chatId);
+    // Every model, not one of them. The ladder spreads a day's work across
+    // several rungs (see gemini.modelLadder), so a single-model counter reads
+    // a fraction of what he actually spent — and this budget, which is the
+    // only thing that ever throttles unprompted check-ins, would stop binding
+    // altogether the day the ladder got longer.
+    const used = await db.usageTodayAll(env, chatId);
     return used < limit;
   } catch (err) {
     console.error('modelAllowed: usage read failed, allowing', err);
@@ -1116,11 +1292,29 @@ async function tickChat(
     const items = await db.listItems(env, r.id).catch(() => []);
 
     if (muted) continue;
+    // Whoever set this, as SHE calls him — read now rather than stored on the
+    // row, because she may have renamed him since (see migrations/013). Null
+    // when he set it himself, and also when the friendship has since ended:
+    // in that case the reminder still fires, unattributed, because it is her
+    // row and deleting it behind her back would be the bigger surprise.
+    const from = r.from_chat_id
+      ? await db.friendName(env, chatId, r.from_chat_id).catch(() => null)
+      : null;
     fired.push({
       kind: 'reminder_fired', id: r.id, title: r.title, instanceId,
       requiresProof: r.requires_proof === 1,
+      // The appointment this reminder is ABOUT, when it is a different time
+      // from the ring. This is the moment the field earns its keep: a reminder
+      // that goes off on Monday evening saying "להתכונן לטיפול" and does not
+      // say the appointment is 08:30 has told him to prepare for an hour he
+      // then has to go and look up.
+      //
+      // Dropped once it is in the past, so a daily reminder whose appointment
+      // has been and gone stops announcing it.
+      ...(r.event_at && r.event_at > now ? { eventAt: r.event_at } : {}),
       ...(misses > 0 ? { misses } : {}),
       ...(items.length ? { items } : {}),
+      ...(from ? { from } : {}),
     });
   }
 
@@ -1142,8 +1336,37 @@ async function tickChat(
 
   if (muted) return;
 
+  // He is mid-conversation. Hold the round rather than talking over him.
+  //
+  // On 16.08.2026 five messages stacked up while he was actively answering,
+  // one of them asking why he had taken 69 minutes — at the moment he was
+  // cooperating. A bot that interrupts is not being persistent, it is being
+  // noise, and noise is how a good prompt gets muted.
+  //
+  // Read once for the whole loop, and only when something is actually due to
+  // nag: an ordinary tick with nothing pending never pays for this query.
+  const spokeAt = nags.length ? await db.lastInboundAt(env, chatId).catch(() => null) : null;
+  const talking =
+    spokeAt !== null && now - spokeAt < CONVERSATION_WINDOW_MIN * 60_000;
+
   for (const inst of nags) {
     if (inst.chat_id !== chatId) continue;
+
+    // deferNag, NOT bumpNag — the same "defer without burning a round" the
+    // quiet-hours branch below uses. nag_count drives the ladder and gave_up,
+    // so burning a round here would let a chatty hour exhaust his patience
+    // budget without a single nag having been delivered.
+    //
+    // And bounded: it defers to the END of the window, not by a fresh interval
+    // each time. The moment he stops typing the ladder resumes on its own.
+    // Pushing next_nag_at forward on every inbound message instead would leave
+    // the instance open forever, nag_count frozen and gave_up unreachable —
+    // a reminder that has quietly stopped being one.
+    if (talking) {
+      await db.deferNag(env, inst.id, spokeAt! + CONVERSATION_WINDOW_MIN * 60_000);
+      continue;
+    }
+
     const reminder = await db.getReminder(env, inst.reminder_id);
     const maxNags = reminder?.max_nags ?? 3;
     const interval = reminder?.nag_interval_min ?? 20;
@@ -1173,9 +1396,16 @@ async function tickChat(
     // NAG_LADDER), so the escalation lands as patience rather than as volume.
     await db.bumpNag(env, inst.id, now + nagDelayMinutes(inst.nag_count + 1) * 60_000);
     ctx = await buildContext(env, chatId);
+    // Level 1 asks the bot to shrink the task. It can only name a PART when a
+    // part actually exists — otherwise it would be inventing a decomposition,
+    // which is the same unverifiable claim as naming a motive. Items are
+    // already in the prompt (openSummary) when there are any.
+    const hasItems = (ctx.items?.get(inst.reminder_id)?.length ?? 0) > 0;
+    const tone =
+      level === 1 && hasItems ? NAG_LADDER_ITEMS : (NAG_LADDER[level] ?? NAG_LADDER[3]);
     await sendOutcome(env, chatId, ctx,
       [{ kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at, round: level }],
-      NAG_LADDER[level] ?? NAG_LADDER[3]);
+      tone);
   }
 
   if (briefDue) await sendMorningBrief(env, chatId, now, settings.tz);

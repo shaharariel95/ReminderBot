@@ -16,14 +16,24 @@ database_id = "94c7c9d0-b8b5-4305-8c0f-7588c1c6a140"
 [vars]
 DEFAULT_TZ = "Asia/Jerusalem"
 # Primary is the stronger free-tier model; the fallback catches its tighter
-# rate limit — it's the model this project ran successfully before this
-# change, so it's a known-good floor. Verify the current free-tier
-# requests/day for both before changing these — the published numbers move.
+# rate limit — it's the model this project ran successfully before any of the
+# laddering, so it's a known-good floor.
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
-# Past this many primary-model calls in a UTC day, low-priority messages
-# (unprompted check-ins) stop calling the model and ship voice.ts output
-# directly. Reminders and nags are never throttled.
+# ...and everything under them, best first. The free tier meters requests per
+# minute PER MODEL against one key, so each extra rung is extra capacity, not
+# just redundancy: two rungs deep, a busy minute ran out of models while
+# others sat unasked.
+#
+# Verify these ids before editing — the published free-tier list moves. A name
+# that no longer exists is not a silent failure: it 404s, writes itself off for
+# hours (see gemini.blockFor) and is named by /diag, so the cost of a stale
+# entry is one round trip a day and a visible line. Unset entirely, the ladder
+# falls back to gemini.DEFAULT_LADDER, which is this same list.
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite"
+# Past this many model calls in a local day — across the whole ladder, per
+# chat — low-priority messages (unprompted check-ins) stop calling the model
+# and ship voice.ts output directly. Reminders and nags are never throttled.
 GEMINI_SOFT_LIMIT = "200"
 # The axis the free tier actually enforces: requests per MINUTE, per model.
 # Real ceiling is 20; 18 leaves room for the retry a 429 would otherwise cost.

@@ -17,7 +17,11 @@
     "test:buttons": "npx tsx test/buttons.test.ts",
     "test:effects": "npx tsx test/effects.test.ts",
     "test:v08": "npx tsx test/v08.test.ts",
-    "test": "npm run test:time && npm run test:parse && npm run test:voice && npm run test:validate && npm run test:buttons && npm run test:bot && npm run test:facts && npm run test:effects && npm run test:v08"
+    "test:friends": "npx tsx test/friends.test.ts",
+    "test:models": "npx tsx test/models.test.ts",
+    "test:comprehension": "npx tsx test/comprehension.test.ts",
+    "test:patterns": "npx tsx test/patterns.test.ts",
+    "test": "npm run test:time && npm run test:parse && npm run test:voice && npm run test:validate && npm run test:buttons && npm run test:bot && npm run test:facts && npm run test:effects && npm run test:v08 && npm run test:friends && npm run test:models && npm run test:comprehension && npm run test:patterns"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",

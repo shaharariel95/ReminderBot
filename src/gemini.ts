@@ -221,22 +221,112 @@ const RETRYABLE = new Set(['RECITATION', 'MAX_TOKENS', 'OTHER']);
  */
 const TIER_DOWN = new Set([429, 503, 404]);
 
-function tiers(env: Env): string[] {
-  const primary = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
-  const fallback = env.GEMINI_MODEL_FALLBACK ?? 'gemini-3.5-flash-lite';
-  return primary === fallback ? [primary] : [primary, fallback];
+/**
+ * The free-tier models, best first.
+ *
+ * Every one of these has its own per-minute quota against the same API key, so
+ * a ladder is not redundancy — it is capacity. Two rungs deep, a busy minute
+ * ran out of models and the turn fell back to the deterministic baseline while
+ * four other free models sat there unasked.
+ *
+ * Ids that do not exist are self-pruning: a 404 writes the model off for the
+ * best part of a day (see blockFor) and /diag names it, so a rename upstream
+ * costs one wasted round trip a day and a visible line, rather than a silent
+ * failure. That is the trade this default is chosen under — verify the current
+ * free-tier list before editing, because the published names move.
+ */
+const DEFAULT_LADDER = [
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+];
+
+/**
+ * The ladder this deployment will actually walk, in order, without repeats.
+ *
+ * GEMINI_MODEL and GEMINI_MODEL_FALLBACK still mean what they always meant and
+ * still come first — they are what /diag calls "the model", what the soft
+ * limit was written against, and what somebody debugging at 02:00 will change.
+ * GEMINI_MODELS is the rest of the ladder under them.
+ */
+export function modelLadder(env: Env): string[] {
+  const listed = (env.GEMINI_MODELS ?? '')
+    .split(',')
+    .map((m) => m.trim())
+    .filter(Boolean);
+  const ladder = [
+    env.GEMINI_MODEL,
+    env.GEMINI_MODEL_FALLBACK,
+    ...(listed.length ? listed : DEFAULT_LADDER),
+  ].filter((m): m is string => !!m);
+  return [...new Set(ladder)];
+}
+
+/**
+ * How long a model that just refused is left alone.
+ *
+ * 429 is the only one Google tells us about, and it tells us precisely — the
+ * body carries a RetryInfo with the wait in it, and honouring that is the
+ * difference between a one-minute detour and a five-minute one. Absent that,
+ * five minutes is the guess.
+ *
+ * 404 is not a rate limit at all: the id is retired, or misspelled in
+ * wrangler.toml. Nothing about it changes in five minutes, so it goes away for
+ * hours — which is only safe because /diag prints it.
+ *
+ * `strikes` doubles the wait each consecutive time, which is what separates
+ * the two shapes of 429 the free tier produces. A model merely over its
+ * per-minute limit answers again on the first probe and the row is deleted; a
+ * model whose DAILY quota is gone refuses every probe, and ends up asked twice
+ * an hour instead of twice a minute.
+ */
+function blockFor(status: number, retryMs: number | null, strikes: number): number {
+  const n = Math.min(Math.max(strikes, 1), 4);
+  if (status === 404) return Math.min(24 * 3_600_000, 6 * 3_600_000 * n);
+  const base = status === 503 ? 60_000 : (retryMs ?? 5 * 60_000);
+  return Math.min(30 * 60_000, Math.max(30_000, base * 2 ** (n - 1)));
+}
+
+/**
+ * The wait Google asked for, in ms, out of a 429 body — or null.
+ *
+ * Parsed with a regex rather than by walking the JSON: this runs on an error
+ * path, the shape of `error.details` has changed before, and a parse failure
+ * here must degrade to the default guess rather than throw inside a catch.
+ */
+function retryDelayMs(body: string): number | null {
+  const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  if (!m) return null;
+  const seconds = Number(m[1]);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null;
 }
 
 export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
   let lastDetail = '';
   const { perCall, total } = budgets(env);
+
+  // One read of the health table per generate(), against a table with as many
+  // rows as there are models. It buys back a wasted round trip per blocked
+  // model per turn, which with a ladder this long is the difference between a
+  // 429 costing a moment and a 429 costing the whole budget.
+  const health = await db.modelHealth(env);
+  const ladder = modelLadder(env);
+  const usable = ladder.filter((m) => (health.get(m)?.blocked_until ?? 0) <= Date.now());
+  // Everything written off at once — a whole minute of 429s, or a health table
+  // left stale by something worse. The blocks are an optimisation, and an
+  // optimisation is never a good enough reason for silence: ask anyway.
+  const tiers = usable.length ? usable : ladder;
+  if (!usable.length) console.warn('gemini: every model is blocked, ignoring the health table');
   // One deadline for the whole ladder. Checked before each attempt rather than
   // relied on to fire mid-request, so an exhausted budget costs no round trip
   // at all — and so the error names the budget instead of surfacing as an
   // opaque AbortError from somewhere inside the retry loop.
   const deadline = Date.now() + total;
 
-  for (const model of tiers(env)) {
+  for (const model of tiers) {
     if (Date.now() >= deadline) break;
     for (let attempt = 0; attempt < 3; attempt++) {
       const left = deadline - Date.now();
@@ -285,7 +375,21 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
 
       if (TIER_DOWN.has(res.status)) {
         lastDetail = `${model} returned ${res.status}`;
-        console.warn(`gemini: ${lastDetail}, dropping a tier`);
+        // Written down as well as stepped over. Without this the same 429 is
+        // rediscovered on the next message, and the one after that — one
+        // wasted round trip per blocked model per turn, out of a budget that
+        // has to leave room for an answer. See migrations/014: the expiry IS
+        // the probe, and a success wipes the record.
+        const strikes = (health.get(model)?.strikes ?? 0) + 1;
+        const wait = blockFor(
+          res.status,
+          res.status === 429 ? retryDelayMs(await res.text().catch(() => '')) : null,
+          strikes,
+        );
+        await db
+          .blockModel(env, model, Date.now() + wait, strikes, String(res.status))
+          .catch((err) => console.error('blockModel', err));
+        console.warn(`gemini: ${lastDetail}, dropping a tier and resting it ${Math.round(wait / 1000)}s`);
         break; // next model, not next attempt — retrying a quota error is pointless
       }
       if (!res.ok) {
@@ -301,6 +405,12 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
       if (text) {
         // Best-effort: a usage-tracking failure must never break a working reply.
         await db.recordUsage(env, model, opts.chatId).catch(() => {});
+        // It answered, so whatever was held against it is over. Only written
+        // when there was actually a row — otherwise every successful call
+        // would cost a DELETE against a table that is empty on a good day.
+        if (health.has(model)) {
+          await db.clearModelBlock(env, model).catch((err) => console.error('clearModelBlock', err));
+        }
         return text;
       }
 
@@ -333,6 +443,10 @@ export async function generateJson<T>(env: Env, opts: GenerateOpts): Promise<T> 
     // Very occasionally the model fences the JSON despite responseMimeType.
     const m = /\{[\s\S]*\}/.exec(raw);
     if (m) return JSON.parse(m[0]) as T;
-    throw new Error(`gemini returned non-JSON: ${raw.slice(0, 200)}`);
+    // 200 chars was not enough to diagnose the 15-17.08.2026 truncations: the
+    // response was cut off mid-string and the error was ALSO cut off, so
+    // whether the model or the slice had truncated it could not be told apart
+    // from /errors alone. The whole point of this row is being readable later.
+    throw new Error(`gemini returned non-JSON (${raw.length} chars): ${raw.slice(0, 800)}`);
   }
 }

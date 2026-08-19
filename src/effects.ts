@@ -2,8 +2,9 @@ import * as db from './db';
 import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
-import { computeNext, localDayBounds, wallString } from './time';
+import { computeNext, localDateKey, localDayBounds, wallParts, wallString, wallToUtc } from './time';
 import { findFutureInstant, findNamedTime, parseDuration } from './quickparse';
+import { detectPattern } from './patterns';
 
 /**
  * How long the nag ladder holds off after he says he is on it. Long enough to
@@ -88,6 +89,35 @@ export function splitIntoItems(title: string): string[] {
   return verbs >= 2 ? parts : [];
 }
 
+/**
+ * A title the model returned, with anything he never typed taken back out.
+ *
+ * On 17.08.2026 the router answered "תזכיר לאמנון לדבר עם שחר עוד שתי דקות"
+ * with the title "לדבר עם שחרy", and the next attempt with "לדבר עם שחרyil" —
+ * stray Latin letters (hex 79 69 6C) appended to an otherwise correct Hebrew
+ * title. His message contained no Latin at all. Nothing downstream could
+ * notice: the title is whatever the model says it is, and every check in
+ * validate.ts compares the REPLY against the effect, so a corrupted title is
+ * simply reported faithfully.
+ *
+ * The rule is narrow and is about honesty rather than tidiness: the router may
+ * re-word him — dropping "תזכיר לאמנון" from the front is exactly its job —
+ * but it may not introduce a SCRIPT he never used. A title is quoted back to
+ * him, filed under his name, and read out when it fires; letters he did not
+ * type are the bot putting words in his mouth.
+ *
+ * Deliberately not a general character filter. "תזכיר לי לשלוח email" keeps
+ * its email, because the Latin is his. Only a script absent from the source
+ * is removed, and if that empties the title the caller's own fallback applies.
+ */
+export function titleFromHisWords(title: string, userText: string): string {
+  // Nothing to compare against: button and cron paths have no message.
+  if (!userText.trim()) return title;
+  if (/[A-Za-z]/.test(userText)) return title;
+  if (!/[A-Za-z]/.test(title)) return title;
+  return title.replace(/[A-Za-z]+/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
   // Relative times are resolved here rather than by the model. Asking an LLM to
   // add 5 minutes to a wall clock and cross midnight/month/year boundaries
@@ -162,6 +192,106 @@ async function suggestFollowup(
   const nearby = await db.findNearbyReminders(env, chatId, at, FOLLOWUP_QUIET_WINDOW_MS);
   if (nearby.length) return [];
   return [{ kind: 'followup_suggested', instanceId, title, at }];
+}
+
+/**
+ * Parts of a day, for the crowding check. Deliberately coarse: he does not
+ * think in 90-minute buckets, he thinks "tomorrow morning".
+ */
+const DAY_PARTS: [number, number, string][] = [
+  [5, 12, 'בוקר'],
+  [12, 17, 'צהריים'],
+  [17, 22, 'ערב'],
+];
+
+/** Below this a "busy window" is just a day with things in it. */
+const CROWDED_AT = 4;
+
+/**
+ * Is the part of the day this reminder landed in already full?
+ *
+ * An observation attached to a write that already succeeded, so every failure
+ * path here is silent — he asked for a reminder, he got one, and a throw while
+ * counting his morning must never turn that into an error.
+ */
+async function crowdingFor(
+  env: Env,
+  chatId: string,
+  tz: string,
+  at: number,
+): Promise<Effect[]> {
+  try {
+    const p = wallParts(at, tz);
+    const part = DAY_PARTS.find(([lo, hi]) => p.hour >= lo && p.hour < hi);
+    if (!part) return [];
+    const from = wallToUtc(p.year, p.month, p.day, part[0], 0, tz);
+    const to = wallToUtc(p.year, p.month, p.day, part[1], 0, tz);
+    const rows = await db.remindersBetween(env, chatId, from, to);
+    // The row just written is already in this count, which is what he will see
+    // in /list — reporting one fewer reads as the bot being wrong about
+    // something he can check in two taps.
+    if (rows.length < CROWDED_AT) return [];
+    const when = localDateKey(at, tz) === localDateKey(Date.now(), tz) ? 'ה' : 'מחר ב';
+    return [{ kind: 'window_crowded', count: rows.length, label: `${when}${part[2]}` }];
+  } catch (err) {
+    console.error('crowdingFor', err);
+    return [];
+  }
+}
+
+/** How far back the behavioural record is read. */
+const PATTERN_WINDOW_MS = 45 * 24 * 3_600_000;
+
+/**
+ * Once a fortnight per reminder, at most. The cooldown is the difference
+ * between an observation and a nag about the nagging: without it, every push
+ * past the threshold re-asks the identical question, and the feature that was
+ * supposed to notice he is being over-reminded becomes another reminder.
+ */
+const PATTERN_COOLDOWN_MS = 14 * 24 * 3_600_000;
+
+/**
+ * The one thing this reminder's own history says, or nothing at all.
+ *
+ * Silent on every failure path by design. This is decoration on top of a write
+ * that already happened and already has its own true sentence; a throw here
+ * must never cost him the confirmation of the thing he actually did.
+ */
+async function patternFor(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  reminderId: number,
+  title: string,
+): Promise<Effect[]> {
+  try {
+    const now = Date.now();
+    if (await db.patternOfferedSince(env, chatId, reminderId, now - PATTERN_COOLDOWN_MS)) return [];
+
+    const b = await db.behaviourOf(env, chatId, reminderId, ctx.settings.tz, now - PATTERN_WINDOW_MS);
+    const p = detectPattern(b);
+    if (!p) return [];
+
+    if (p.kind === 'failing') {
+      return [{ kind: 'pattern_failing', id: reminderId, title, failures: p.failures, fires: p.fires }];
+    }
+    // The suggested hour as an INSTANT — its next occurrence — so facts.ts
+    // sweeps it through the existing `at` rule and validate.ts allows the
+    // persona to repeat it. An hour carried as a bare number would be a clock
+    // time the allow-list has never seen, and the whole rewrite would be
+    // discarded for saying it.
+    const at =
+      p.hour === null
+        ? undefined
+        : (computeNext({ type: 'daily', time: `${String(p.hour).padStart(2, '0')}:00` }, ctx.settings.tz, now) ??
+          undefined);
+    return [
+      { kind: 'pattern_pushed', id: reminderId, title, snoozes: p.snoozes, fires: p.fires, at },
+    ];
+  } catch (err) {
+    console.error('patternFor', err);
+    return [];
+  }
 }
 
 /** Anything scheduled within this of the appointment counts as "already handled". */
@@ -261,6 +391,105 @@ async function finishItem(
   return effects;
 }
 
+/**
+ * A reminder for somebody else.
+ *
+ * Three refusals, and all three are the same refusal: this function writes
+ * into an account its caller cannot see, so anything it is not certain of it
+ * declines rather than approximates.
+ *
+ *  - A name that matches nobody, or two people, is `unknown_friend`. It is
+ *    NOT downgraded to a reminder for himself: he asked for something to
+ *    happen to another person, and a row in his own chat is a different thing
+ *    he would then have to notice and delete.
+ *  - No time is `no_time`, not an inbox capture. An inbox item belongs to
+ *    whoever can schedule it, and the /inbox buttons are on HIS side — hers
+ *    would be a line she never wrote, in a list she never asked for, with
+ *    nothing able to give it an hour.
+ *  - The consent check is db.friendsOf, which is accepted edges only. A
+ *    pending request is a question.
+ *
+ * The hour is read in HER timezone, not his. "תזכיר לדנה ב-8" means eight
+ * o'clock where Dana is, because she is the one it has to be useful to.
+ */
+async function friendReminder(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  intent: Intent,
+  title: string,
+  userText: string,
+): Promise<Effect[]> {
+  const friend = db.matchFriend(ctx.friends ?? [], intent.for_friend ?? '');
+  if (!friend) {
+    return [
+      {
+        kind: 'friend_unknown',
+        asked: (intent.for_friend ?? '').slice(0, 40),
+        known: (ctx.friends ?? []).map((f) => f.nickname),
+      },
+    ];
+  }
+
+  const theirs = await db.getSettings(env, friend.friend_chat_id);
+  const schedule = scheduleFromIntent(intent, theirs.tz);
+  if (!schedule) return [{ kind: 'nothing', why: 'no_time', userText }];
+
+  let next: number | null;
+  try {
+    next = computeNext(schedule, theirs.tz, Date.now());
+  } catch {
+    return [{ kind: 'nothing', why: 'bad_time', userText }];
+  }
+  if (next === null) return [{ kind: 'nothing', why: 'past_time', userText }];
+
+  const id = await db.addReminder(env, {
+    chat_id: friend.friend_chat_id,
+    title,
+    notes: null,
+    schedule: JSON.stringify(schedule),
+    tz: theirs.tz,
+    requires_proof: intent.requires_proof ? 1 : 0,
+    proof_type: intent.proof_type ?? 'any',
+    nag_interval_min: 20,
+    max_nags: 3,
+    next_fire_at: next,
+    // Deliberately null, not forwarded from the intent. friendReminder refuses
+    // everything it cannot be certain of, because it writes into an account its
+    // caller cannot see — and an event hour is the kind of extra that would be
+    // stated aloud in HER chat, through the heads-up path that has no validator
+    // on it at all.
+    event_at: null,
+    // What makes her fired message able to say who this came from — see
+    // migrations/013. Stored as the id, resolved to a name at fire time.
+    from_chat_id: chatId,
+  });
+
+  // Errands split the same way they do for his own reminders, and under HER
+  // chat_id: the ticks are hers to make, and db.completeItem checks the row
+  // belongs to whoever tapped.
+  const itemTitles = splitIntoItems(title);
+  if (itemTitles.length) await db.addItems(env, id, friend.friend_chat_id, itemTitles);
+
+  // No duplicate check, deliberately. The two that exist for his own
+  // reminders both answer "did he already ask for this", by reading his own
+  // rows — and the honest wording for a hit ("כבר יש לך את זה") is a sentence
+  // about a list he cannot open. He sees a confirmation naming her and the
+  // hour for every one of these, so a repeat is visible where it matters.
+  return [
+    {
+      kind: 'friend_reminder_created',
+      id,
+      title,
+      at: next,
+      schedule,
+      requiresProof: !!intent.requires_proof,
+      friend: friend.nickname,
+      to: friend.friend_chat_id,
+    },
+  ];
+}
+
 export async function applyIntent(
   env: Env,
   chatId: string,
@@ -272,8 +501,53 @@ export async function applyIntent(
 
   switch (intent.action) {
     case 'create_reminder': {
-      const title = intent.title?.trim() || UNTITLED_TITLE;
-      const schedule = scheduleFromIntent(intent, tz);
+      const title = titleFromHisWords(intent.title?.trim() ?? '', userText) || UNTITLED_TITLE;
+
+      // "תזכיר לדנה..." — a row in somebody else's account. Handled before
+      // anything else in this branch, because almost nothing below it applies:
+      // the duplicate check, the inbox capture and the item split are all
+      // about HIS chat, and running them against hers would be answering a
+      // question nobody asked.
+      if (intent.for_friend) return friendReminder(env, chatId, ctx, intent, title, userText);
+
+      // The same second look `reschedule` has taken since 14.08.2026
+      // (see its branch below). The router returns a create with the time
+      // field empty even when he said the hour in the same breath — which is
+      // how "תזכיר לי לקבוע טיפול וטסט מחר ב-15:00" became an inbox capture
+      // and a question about an hour sitting in the sentence being answered.
+      //
+      // This asymmetry is the shape CLAUDE.md records being burned by twice
+      // with asksForNewReminder: one question, two implementations, and only
+      // one of them fixed. findNamedTime refuses rather than guesses on a
+      // repeat rule, two times in one sentence, and an hour already past, so
+      // every refusal still falls through to the capture below.
+      const named = findNamedTime(userText, Date.now(), tz);
+      // Third look, and the last one: a pinned DAY plus a named part of it,
+      // with no digits anywhere. "תזכיר לי מחר בערב להתכונן" parsed to nothing
+      // at all before 17.08.2026 — not to the wrong hour, to no hour — so the
+      // commonest vague phrasing in the language cost a model call and came
+      // back as a capture and a question about a time he had already roughly
+      // given.
+      //
+      // findFutureInstant + PERIOD_HOUR already did this for the
+      // appointment-offer path; it was simply never asked on the path where he
+      // requests the reminder himself.
+      //
+      // It is a convention, not a reading — ערב is 20:00 because it has to be
+      // something. That is honest here for one reason: voice.ts ALWAYS states
+      // the hour it set, so he reads "20:00" back and can move it. No hedge is
+      // added, deliberately: a hedge would sit inside the rewrite, and speak()
+      // is licensed to rephrase, so it could vanish without the validator
+      // noticing — validate.ts checks for facts INVENTED, never for words
+      // dropped. An hour that is always spoken cannot be quietly lost.
+      //
+      // Bounded by the day: findFutureInstant returns null without one, so a
+      // bare "בערב" — tonight? tomorrow? — still falls through to the capture.
+      const vague = named === null ? findFutureInstant(userText, Date.now(), tz) : null;
+      const guessed = named ?? (vague !== null && vague > Date.now() ? vague : null);
+      const schedule =
+        scheduleFromIntent(intent, tz) ??
+        (guessed === null ? null : ({ type: 'once', at: wallString(guessed, tz) } as Schedule));
 
       // No time is not a failure any more. Capture first, schedule later.
       if (!schedule) {
@@ -320,6 +594,24 @@ export async function applyIntent(
 
       const near = similar(nearby);
 
+      // The appointment itself. Parsed through the same wall-clock->instant
+      // path as any other time, then STORED AS AN INSTANT — a wall string
+      // would be read back under whichever timezone the row lives in, and a
+      // cross-chat reminder lives under hers.
+      //
+      // Refused rather than approximated when it is unparseable or already
+      // gone: an event time is decoration on top of a working reminder, and a
+      // wrong one is worse than none, since the bot would state it aloud.
+      let eventAt: number | null = null;
+      if (intent.event_at) {
+        try {
+          const t = computeNext({ type: 'once', at: intent.event_at }, tz, Date.now() - 60_000);
+          eventAt = t;
+        } catch {
+          eventAt = null;
+        }
+      }
+
       const id = await db.addReminder(env, {
         chat_id: chatId,
         title,
@@ -331,6 +623,7 @@ export async function applyIntent(
         nag_interval_min: 20,
         max_nags: 3,
         next_fire_at: next,
+        event_at: eventAt,
       });
 
       // Three errands in one sentence become three things to tick off, under
@@ -352,13 +645,19 @@ export async function applyIntent(
 
       return [
         {
-          kind: 'reminder_created', id, title, at: next, schedule,
+          kind: 'reminder_created', id, title, at: next, eventAt, schedule,
           requiresProof: !!intent.requires_proof,
           ...(intent.ambiguous_hour === undefined ? {} : { altHour: intent.ambiguous_hour }),
           ...(twin
             ? { duplicateOf: { id: twin.id, title: twin.title, at: twin.next_fire_at ?? next } }
             : {}),
         },
+        // Alongside the confirmation, never instead of it. He asked for a
+        // reminder and he has one; how full his morning is, is an observation
+        // he can act on or ignore. Suppressed when a duplicate warning is
+        // already riding along — two unsolicited remarks on one confirmation
+        // is a lecture.
+        ...(twin ? [] : await crowdingFor(env, chatId, tz, next)),
       ];
     }
 
@@ -470,7 +769,7 @@ export async function applyIntent(
         Math.max(5, intent.snooze_minutes ?? parseDuration(userText) ?? 30),
       );
       await db.snoozeInstance(env, inst.id, minutes);
-      return [
+      const snoozed: Effect[] = [
         {
           kind: 'instance_snoozed',
           id: inst.id,
@@ -479,6 +778,13 @@ export async function applyIntent(
           minutes,
         },
       ];
+      // Raised HERE, on the push itself, rather than as its own message later.
+      // The moment he defers it for the sixth time is the moment the question
+      // makes sense, and appending to a reply he was already getting costs no
+      // extra notification. An unsolicited message about a reminder he was not
+      // thinking about is exactly the noise this is meant to reduce.
+      snoozed.push(...(await patternFor(env, chatId, ctx, inst.reminder_id, inst.title)));
+      return snoozed;
     }
 
     case 'list':
@@ -533,8 +839,25 @@ export async function applyIntent(
       }
       if (next === null) return [{ kind: 'nothing', why: 'past_time', userText }];
 
+      // Captured BEFORE the write, which flips the row to 'scheduled'.
+      const wasInbox = rem.status === 'inbox';
+
       if (!(await db.retimeReminder(env, rem.id, next, JSON.stringify(schedule)))) {
         return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+
+      // Giving an inbox capture its FIRST hour is not a move, and saying
+      // "שיניתי" about it (voice.ts, reminder_retimed) is a claim about a
+      // previous time the row never had. reminder_scheduled is deliberately in
+      // BOTH claim groups in validate.ts — giving an inbox item its first time
+      // is as fairly described as a create as it is as a move — whereas
+      // reminder_retimed is in `move` alone, which would let the persona
+      // legally escalate it to "הזזתי".
+      //
+      // The `plan` button already takes this path via scheduleInboxItem. Two
+      // routes to one user-visible action have to produce one sentence.
+      if (wasInbox) {
+        return [{ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at: next }];
       }
       return [{ kind: 'reminder_retimed', id: rem.id, title: rem.title, at: next }];
     }
@@ -588,8 +911,13 @@ export async function applyIntent(
 
     case 'create_goal': {
       if (!intent.title) return [{ kind: 'nothing', why: 'unknown_goal', userText }];
-      const id = await db.addGoal(env, chatId, intent.title, intent.why ?? null);
-      return [{ kind: 'goal_created', id, title: intent.title, why: intent.why ?? null }];
+      // `note` now, because `why` was removed from the router schema — see the
+      // long note there. `intent.why` is still read as a fallback so a response
+      // already in flight during the deploy keeps its reason rather than
+      // silently losing it; nothing new can produce one.
+      const reason = intent.note?.trim() || intent.why?.trim() || null;
+      const id = await db.addGoal(env, chatId, intent.title, reason);
+      return [{ kind: 'goal_created', id, title: intent.title, why: reason }];
     }
 
     case 'goal_progress': {

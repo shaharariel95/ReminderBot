@@ -14,6 +14,7 @@ import type { Settings, Stats } from '../src/types';
 import * as db from '../src/db';
 import { applyIntent } from '../src/effects';
 import { handleSlash } from '../src/slash';
+import { modelLadder } from '../src/gemini';
 import { VERSION } from '../src/version';
 import type { Context } from '../src/brain';
 
@@ -1488,9 +1489,18 @@ async function main() {
     // pins.
     const frozen = wallToUtc(2026, 8, 7, 12, 0, TZ);
     rig.env.GEMINI_RPM = '10';
-    rig.db
-      .prepare('INSERT INTO rate_window (bucket, calls) VALUES (?, 7)')
-      .run(`${new Date(frozen).toISOString().slice(0, 16)}|${rig.env.GEMINI_MODEL}`);
+    // Every rung, not just the primary. The window is per MODEL, so with a
+    // ladder underneath it a decorative call refused at the top simply drops a
+    // tier and gets its wording from the next model down — which is correct,
+    // and is the whole point of the ladder. What this section pins is the
+    // DISCOUNT: with the same 7 spent everywhere, routing (ceiling 10) still
+    // fits and wording (ceiling 7) does not. Seeding one model would pin the
+    // ladder's length instead, and pass for the wrong reason.
+    for (const m of modelLadder(rig.env)) {
+      rig.db
+        .prepare('INSERT INTO rate_window (bucket, calls) VALUES (?, 7)')
+        .run(`${new Date(frozen).toISOString().slice(0, 16)}|${m}`);
+    }
 
     rig.routerQueue.push({
       actions: [{ action: 'create_reminder', title: 'לרוץ', schedule_type: 'daily', time: '07:00' }],

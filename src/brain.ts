@@ -2,6 +2,7 @@ import { generate, generateJson, type Part, type Turn } from './gemini';
 import { buildSystemPrompt } from './persona';
 import type { Env, Facts, Goal, Instance, Intent, Reminder, ReminderItem, Settings, Stats } from './types';
 import { describeSchedule, formatLocal, wallString } from './time';
+import type { Friend } from './db';
 
 /**
  * Two-stage brain, on purpose:
@@ -42,7 +43,26 @@ const ACTION_SCHEMA = {
     },
     title: { type: 'STRING' },
     note: { type: 'STRING' },
-    why: { type: 'STRING' },
+    /*
+     * `why` USED TO BE HERE, and removing it is the fix, not an omission.
+     *
+     * It was read by exactly one action (create_goal, effects.ts) and offered
+     * to all twenty, unbounded. Every route/apply failure between 15 and
+     * 17.08.2026 carried a long one — including two plain reschedules with no
+     * friend in them — and the worst of them was the model writing
+     * "for_friend=אמנון. in_minutes=2. schedule_type=once. for_friend=אמנון."
+     * as PROSE inside it, repeating until the response truncated mid-string
+     * and JSON.parse threw. The turn died and the catch-block filed the raw
+     * message as an inbox item.
+     *
+     * It was first "fixed" by asking the model in the prompt to leave it
+     * alone. That is a request. responseSchema drives constrained decoding, so
+     * a property that is not here CANNOT be emitted — which is a guarantee.
+     * This codebase already records prompt-only rules failing to hold (the
+     * "#28" instruction below has nothing behind it), so the guarantee is the
+     * one to take. A goal's reason now travels in `note`, which was already in
+     * this schema and which create_goal did not use.
+     */
     goal_id: { type: 'INTEGER' },
     checkins_enabled: { type: 'BOOLEAN' },
     checkin_per_day: { type: 'INTEGER' },
@@ -51,11 +71,15 @@ const ACTION_SCHEMA = {
     days: { type: 'ARRAY', items: { type: 'INTEGER' } },
     interval_minutes: { type: 'INTEGER' },
     once_at: { type: 'STRING' },
+    /** When the THING happens — never when to ring. See the rule below. */
+    event_at: { type: 'STRING' },
     in_minutes: { type: 'INTEGER' },
     requires_proof: { type: 'BOOLEAN' },
     proof_type: { type: 'STRING', enum: ['text', 'photo', 'any'] },
     target_id: { type: 'INTEGER' },
     item_id: { type: 'INTEGER' },
+    /** A nickname off the friends list above — never a chat_id. See the rule. */
+    for_friend: { type: 'STRING' },
     snooze_minutes: { type: 'INTEGER' },
     chill_hours: { type: 'INTEGER' },
     intensity: { type: 'INTEGER' },
@@ -91,8 +115,38 @@ export interface Context {
    * nothing to tick off, and this would be a query per turn for an empty map.
    */
   items?: Map<number, ReminderItem[]>;
+  /**
+   * People he may set a reminder FOR. Accepted edges only (db.friendsOf) — a
+   * pending request is a question, not consent, and this list is what both the
+   * router prompt and effects.ts resolve a name against.
+   *
+   * Optional so that a bare Context built for a pure test keeps compiling;
+   * absent means "he has no friends", which is the state nearly every chat is
+   * in and the state this file behaved as before any of it existed.
+   */
+  friends?: Friend[];
+  /**
+   * Captures with no hour yet (`status='inbox'`). Absent from `reminders`,
+   * which filters `status='scheduled'` (db.listReminders) — which is why the
+   * router had never once been shown one.
+   *
+   * On 16.08.2026 he asked for a reminder with no time, it was captured as
+   * #35, he answered "מתי?" — and got #36 and #37. Not a comprehension
+   * failure: the model cannot reschedule a row it cannot see, so creating
+   * another was the only move available to it.
+   */
+  inbox?: Reminder[];
   nowLabel: string;
 }
+
+/**
+ * Inbox rows have no `next_fire_at` to age out on, so this list only ever
+ * grows — unlike every other block in the prompt, which is bounded by the
+ * passage of time. Capped rather than trimmed by date, and the remainder is
+ * COUNTED rather than dropped silently: a router told it has seen everything
+ * when it has not is back to inventing duplicates.
+ */
+const INBOX_SHOWN = 12;
 
 /**
  * These three renderers are shared between the router and the persona on
@@ -114,7 +168,13 @@ export function remindersSummary(ctx: Context): string {
       // The note is the detail that makes a nag land — what it is for, what to
       // bring. It lives on the row precisely so it is still here after the
       // conversation that produced it has been pruned away.
-      return `  #${r.id} "${r.title}" — ${sched} — הבא: ${next}${
+      // The appointment itself, when it is a different time from the ring.
+      // Rendered here because this block is shared with the persona
+      // (see the note above): if it is absent the persona must never mention
+      // the event hour, and if it is present facts.ts has to sweep it or a
+      // truthful rewrite gets discarded by validate rule 1.
+      const event = r.event_at ? ` — האירוע עצמו: ${formatLocal(r.event_at, r.tz)}` : '';
+      return `  #${r.id} "${r.title}" — ${sched} — הבא: ${next}${event}${
         r.requires_proof ? ' — דורש הוכחה' : ''
       }${r.notes ? ` — הערה: ${r.notes}` : ''}`;
     })
@@ -143,6 +203,40 @@ export function openSummary(ctx: Context): string {
     .join('\n');
 }
 
+/**
+ * The names he may aim a reminder at, and nothing else about them.
+ *
+ * No chat_ids: the model never needs one and must never be in a position to
+ * produce one, because an id it invented would be a row written into a
+ * stranger's chat. It returns a NAME, effects.ts resolves that name against
+ * this same list, and a name matching nobody — or two people — is refused.
+ */
+export function friendsSummary(ctx: Context): string {
+  if (!ctx.friends?.length) return '  (אין)';
+  return ctx.friends.map((f) => `  "${f.nickname}"`).join('\n');
+}
+
+/**
+ * Captures still waiting for an hour.
+ *
+ * Rendered with ids because the ids are the entire point: `reschedule` is what
+ * promotes one of these into a scheduled reminder, and it needs a target_id it
+ * has actually been shown. Without this block the only action available to the
+ * model when he finally names an hour is `create_reminder`, which is exactly
+ * what produced #35, #36 and #37 for one errand.
+ */
+export function inboxSummary(ctx: Context): string {
+  const rows = ctx.inbox ?? [];
+  if (!rows.length) return '  (אין)';
+  const shown = rows.slice(-INBOX_SHOWN);
+  const hidden = rows.length - shown.length;
+  const lines = shown.map((r) => `  #${r.id} "${r.title}" — בלי שעה`);
+  // Stated rather than silently truncated: a model that believes it has seen
+  // the whole list will create a duplicate of a row that was trimmed off it.
+  if (hidden > 0) lines.push(`  (ועוד ${hidden} בלי שעה, לא מוצגות)`);
+  return lines.join('\n');
+}
+
 export function goalsSummary(ctx: Context): string {
   if (!ctx.goals.length) return '  (אין)';
   return ctx.goals
@@ -159,7 +253,11 @@ export function goalsSummary(ctx: Context): string {
 }
 
 function contextBlock(ctx: Context): string {
-  return `תזכורות פעילות (מתוזמנות לשעה):\n${remindersSummary(
+  return `חברים שאפשר לקבוע להם תזכורות (רק השמות האלה):\n${friendsSummary(
+    ctx,
+  )}\n\nתזכורות פעילות (מתוזמנות לשעה):\n${remindersSummary(
+    ctx,
+  )}\n\nנתפסו אבל עדיין בלי שעה — אם הוא נוקב עכשיו בשעה לאחת מהן, זה reschedule עם ה-target_id שלה, לא תזכורת חדשה:\n${inboxSummary(
     ctx,
   )}\n\nמטרות מתמשכות (בלי שעה — אתה מעלה אותן ביוזמתך):\n${goalsSummary(
     ctx,
@@ -196,6 +294,7 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
   אם הוא דיווח על כמה פריטים בהודעה אחת — החזר איבר complete_item נפרד לכל אחד.
   אם אין פריטים ברשימה למעלה, זה לא הפעולה הזאת.
 - "create_reminder" — הוא מבקש תזכורת/משימה חדשה. חלץ title קצר בלשון המשתמש.
+  ה-title חייב להיות מהמילים שלו בלבד. אל תוסיף אותיות, סימנים או מילים שלא מופיעים בהודעה שלו — אם הוא כתב בעברית, ה-title כולו בעברית.
   אם אין לו כותרת ברורה (למשל "תזכיר לי עוד 5 דקות" בלי לומר על מה) — תן title כללי כמו "תזכורת" ותמשיך. אל תחזיר "chat" רק בגלל שחסרה כותרת.
 
   איך לבחור schedule_type:
@@ -207,7 +306,18 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
   * "כל X דקות שוב ושוב" (חזרתי!) → "interval" + interval_minutes.
     שים לב: "עוד 20 דקות" זה once עם in_minutes=20, ולא interval. interval זה רק כשהוא רוצה שזה יחזור על עצמו בלי סוף.
 
+  **מתי הדבר קורה מול מתי לצלצל**: לפעמים הוא אומר שני זמנים שונים — מתי האירוע עצמו, ומתי הוא רוצה שתזכיר לו עליו.
+  "קבעתי טיפול ליום שלישי ב-8:30, תזכיר לי בשני בערב" → once_at הוא **שני בערב** (מתי לצלצל), ו-**event_at="2026-08-18T08:30"** (מתי הטיפול).
+  אל תמזג אותם ואל תבחר אחד. אם הוא אמר רק זמן אחד — זה once_at, ו-event_at לא קיים בכלל.
+  event_at לבד, בלי שעת צלצול, זה לא שימושי — אם הוא נקב רק בשעת האירוע, שים אותה ב-once_at.
+
   requires_proof=true אם הוא ביקש שתדרוש הוכחה או אם זו משימה פיזית שקל לשקר לגביה.
+  **תזכורת לחבר**: אם הוא מבקש להזכיר למישהו אחר — "תזכיר לאמנון לדבר עם שחר", "תזכיר לדנה לקנות חלב" — תמיד תוסיף **for_friend**.
+  **מה לשים ב-for_friend: בדיוק את השם שהוא כתב, כמו שהוא כתב אותו.** לא שם מהרשימה, לא תיקון, לא תרגום. אם הוא כתב "אמנון" — for_friend="אמנון", גם אם ברשימה כתוב "amnon" וגם אם הרשימה ריקה לגמרי.
+  זה לא מסוכן: אתה לא בוחר למי לשלוח. אתה רק מדווח את מי הוא ציין. אני מחפש את השם ברשימה בעצמי, ואם הוא לא מתאים בדיוק לאחד מהם אני לא כותב כלום ואומר לו את השמות שיש. אין שום מצב שמשהו נכתב אצל אדם אחר בגלל השם שתחזיר.
+  לכן אסור לך להשמיט for_friend רק כי השם לא ברשימה. אם תשמיט אותו, התזכורת תיפול עליו במקום על החבר, והוא יקבל אישור על משהו שהוא לא ביקש. זה הכי גרוע.
+  chat_id לעולם לא — לא ברשימה ולא בתשובה.
+  בלי for_friend התזכורת היא שלו. "תזכיר לי" זה תמיד שלו.
 - "snooze" — דחייה של משימה שכבר צלצלה ומחכה לדיווח. target_id = instance id, snooze_minutes.
 - "on_my_way" — הוא בדרך, יצא, התחיל, עושה את זה עכשיו ("נוסע", "בדרך", "יוצא עכשיו", "על זה", תמונה של הדרך). target_id = instance id.
   זה לא complete — הוא לא סיים, והוא עוד יצטרך לדווח. זה גם לא snooze — snooze זה "לא עכשיו", וזה בדיוק ההפך.
@@ -226,7 +336,7 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 
 הבחנה חשובה בין תזכורת למטרה:
 - **תזכורת** = משהו עם שעה. "תזכיר לי ב-7 לרוץ". → create_reminder.
-- **מטרה** = שאיפה מתמשכת בלי שעה. "אני רוצה לפתוח תיק מסחר", "אני לומד בבא בתרא", "אני רוצה לחזור לחדר כושר". → create_goal (+why אם הוא אמר למה זה חשוב לו).
+- **מטרה** = שאיפה מתמשכת בלי שעה. "אני רוצה לפתוח תיק מסחר", "אני לומד בבא בתרא", "אני רוצה לחזור לחדר כושר". → create_goal (+note עם הסיבה, אם הוא אמר למה זה חשוב לו — משפט אחד קצר).
   אם הוא מתאר שאיפה בלי זמן — זו מטרה, לא תזכורת. אל תמציא לו שעה.
 - "goal_progress" — הוא מספר משהו על מטרה קיימת (התקדם, נתקע, שינה כיוון). goal_id + reason = מה שהוא אמר, בקצרה.
 - "complete_goal" / "drop_goal" — הוא סיים או ויתר על מטרה. goal_id.
@@ -237,6 +347,8 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 - "chat" — כל השאר.
 - distress=true אם הוא נשמע באמת במצוקה, שחוק, חולה, אבל, או מתאר משהו כבד. זה גובר על הכל.
 - אל תמציא target_id או goal_id שלא מופיעים ברשימה למעלה. target_id מתייחס ל-instance או reminder; goal_id רק למטרות.
+
+אל תכתוב ערכים של שדות כטקסט חופשי בשום שדה — שדה זה שדה. אם רצית for_friend, תמלא for_friend.
 
 פורמט הפלט: תמיד אובייקט עם המפתח "actions" שהוא **מערך**.
 הודעה אחת יכולה לבקש כמה דברים. כל בקשה נפרדת = איבר נפרד במערך, לפי הסדר שבו הוא אמר אותן.
@@ -335,6 +447,8 @@ export async function speak(
   history: { role: 'user' | 'bot'; text: string }[],
   baseline: string,
   toneNote?: string,
+  /** See sendOutcome. 'replying' withholds the elapsed-minutes block. */
+  stance: 'chasing' | 'replying' = 'chasing',
 ): Promise<string> {
   const ctx: Context = {
     settings: facts.settings, stats: facts.stats, reminders: facts.reminders,
@@ -353,10 +467,21 @@ export async function speak(
     // catches that, but catching it costs the whole rewrite — this is what
     // stops it being written. Omitted entirely when nothing is open: an empty
     // heading is an invitation to fill it.
+    //
+    // The number STAYS on a reply turn. Withholding it was tried on 17.08.2026
+    // and is worse: openSummary still carries fired_at, so the model can still
+    // do the subtraction — it just does it badly, which is the bug directly
+    // above, and every catch costs the whole rewrite. What changes is
+    // permission to WEAPONISE it. On 16.08.2026 this block produced "למה לקח לך
+    // 69 דקות להבין מתי זה?" aimed at a cooperative answer to the bot's own
+    // question. He is here and talking; the span is background, not a charge.
     (facts.elapsed.length
       ? `\n\n## כמה זמן זה כבר פתוח — המספר הזה ולא אחר\n${facts.elapsed
           .map((m) => `${m} דקות`)
-          .join(' · ')}`
+          .join(' · ')}` +
+        (stance === 'replying'
+          ? '\nהוא ענה לך עכשיו — המספר הזה הוא רקע בלבד. אל תשאל אותו למה זה לקח כל כך הרבה, ואל תנקר לו בזה. אם הוא לא רלוונטי לתשובה, אל תזכיר אותו בכלל.'
+          : '')
       : '') +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
     `\n\nכתוב מחדש את מה שכתוב ב"מה שקרה עכשיו" בקול שלך.

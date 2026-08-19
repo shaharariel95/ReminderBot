@@ -17,6 +17,7 @@ section('every effect renders something shippable');
 
 const samples: Effect[] = [
   { kind: 'reminder_created', id: 1, title: 'לרוץ', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false },
+  { kind: 'friend_reminder_created', id: 1, title: 'לקנות חלב', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false, friend: 'דנה', to: '999' },
   { kind: 'reminder_captured', id: 2, title: 'לקנות חלב' },
   { kind: 'reminder_scheduled', id: 2, title: 'לקנות חלב', at: AT },
   { kind: 'reminder_retimed', id: 1, title: 'לרוץ', at: AT },
@@ -56,6 +57,7 @@ const samples: Effect[] = [
   { kind: 'nothing', why: 'unknown_reminder', userText: 'תבטל' },
   { kind: 'nothing', why: 'unknown_goal', userText: 'סיימתי מטרה' },
   { kind: 'nothing', why: 'chat', userText: 'מה קורה' },
+  { kind: 'nothing', why: 'unknown_friend', userText: 'תזכיר לדנה' },
   { kind: 'needs_time', id: 1, title: 'לרוץ' },
   { kind: 'nothing', why: 'failed', userText: 'סיימתי הכל' },
   { kind: 'nothing', why: 'not_understood', userText: 'תעשה משהו' },
@@ -206,7 +208,8 @@ section('the daily messages describe the day without claiming to have changed it
   const reminder = (id: number, title: string, at: number) => ({
     id, chat_id: '1', title, notes: null, schedule: '{"type":"once","at":"x"}',
     tz: TZ, requires_proof: 0, proof_type: 'any' as const, nag_interval_min: 20,
-    max_nags: 3, next_fire_at: at, status: 'scheduled' as const, active: 1, created_at: 0,
+    max_nags: 3, next_fire_at: at, event_at: null, status: 'scheduled' as const, active: 1,
+    from_chat_id: null, created_at: 0,
   });
   const brief = renderBaseline([{
     kind: 'morning_brief',

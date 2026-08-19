@@ -190,36 +190,93 @@ From here on, every message from any other chat id is silently dropped.
 
 ## Model configuration
 
-`wrangler.toml` sets three vars under `[vars]`:
+`wrangler.toml` sets these under `[vars]`:
 
 ```toml
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite"
 GEMINI_SOFT_LIMIT = "200"
+GEMINI_RPM = "18"
 ```
 
-**`gemini-3.5-flash` has not been verified to exist on any particular key** —
-it's a forward-looking pin, not a confirmed-available model id. If it turns out
-not to exist (or is dropped, or renamed), every call to it returns a 404, which
-the bot treats the same as a rate limit: it drops a tier and retries on
-`GEMINI_MODEL_FALLBACK` for that call. Nothing breaks — you just silently run
-on the fallback model until you notice. `/diag` tells you which one actually
-answered and how many calls each has taken today, so it's the first thing to
-check if replies feel off. Verify current model names and free-tier limits at
-[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)
-before relying on either id.
+The free tier meters requests **per minute, per model**, against one key — so
+a ladder of models is capacity, not just redundancy. `GEMINI_MODEL` and
+`GEMINI_MODEL_FALLBACK` are the top two rungs; `GEMINI_MODELS` is everything
+under them. A call walks down until one answers.
 
-The same 429/503/404 cascade applies to both the router (`route()`) and the
-persona rewrite (`speak()`) — a reminder or nag always gets a real attempt on
-both tiers before it degrades to the deterministic baseline text.
+**None of these ids has been verified against any particular key** — they're
+forward-looking pins. That is survivable by design: an id that doesn't exist
+returns 404, and the bot treats 404, 429 (quota) and 503 (overloaded) the same
+way — step down a rung, and *write the model off* so the next message skips it
+without paying for a round trip:
 
-`GEMINI_SOFT_LIMIT` only throttles unprompted check-ins, and only after the
-primary model has been called that many times today (UTC day, tracked in the
-`usage` table): past the limit, a check-in skips the model and sends
-`voice.ts`'s deterministic Hebrew directly instead of paying for a rewrite.
-Reminders, nags, and give-ups are never throttled — the budget priority is
-check-ins first, because a blunt check-in is no worse than none, but a blunt
-reminder would be a regression.
+| Answer | Rest | Why |
+|---|---|---|
+| 429 | whatever Google's `retryDelay` says, else 5 min | a per-minute limit clears in a minute; taking Google's number back means not sitting out four of them for nothing |
+| 503 | 1 min | transient overload |
+| 404 | 6 h | a retired or misspelled id isn't coming back before lunch |
+
+Each *consecutive* block doubles the wait (capped at 30 minutes; a day for a
+404). Nothing else clears a block: **the expiry is the probe.** The next
+message after it lapses tries the model again, because whether a quota has
+reset is not knowable without asking. One success deletes the record outright,
+so a model that was out for an hour starts its next bad minute at one strike
+rather than five.
+
+If every model is blocked at once, the blocks are **ignored** and the ladder is
+walked anyway. They are an optimisation, and an optimisation is never a good
+enough reason for the bot to say nothing.
+
+`/diag` prints the ladder and exactly which rungs are out, with the reason and
+the time they come back — so "the bot feels dumb today" becomes a fact you can
+read. Verify current model names and free-tier limits at
+[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models).
+
+`GEMINI_SOFT_LIMIT` only throttles unprompted check-ins, and it counts a chat's
+calls **across the whole ladder** for the local day (the `usage` table): past
+the limit, a check-in skips the model and sends `voice.ts`'s deterministic
+Hebrew directly instead of paying for a rewrite. Reminders, nags, and give-ups
+are never throttled — the budget priority is check-ins first, because a blunt
+check-in is no worse than none, but a blunt reminder would be a regression.
+
+---
+
+## Friends — reminders you set for someone else
+
+Both people have to be allowed to use the bot (`/allow`), and then:
+
+```
+/id                       your chat_id — this is what you hand a friend
+/friend 12345 דנה         ask 12345 to be a friend, called "דנה" on your side
+/friends                  who's in, who hasn't answered, who's waiting on you
+/unfriend דנה             end it, both directions
+```
+
+`/friend` **asks**. It writes a pending row and sends her a message with two
+buttons; nothing can be written into her chat until she taps yes. Saying yes
+makes it mutual — she can set reminders for you too, named after your Telegram
+name, which she can change with `/friend` at any time. Saying no is remembered,
+and asking again won't ask her again.
+
+Once she's in, it's ordinary language:
+
+```
+תזכיר לדנה מחר ב-8 לקחת את הרכב לטסט
+```
+
+The reminder is written **into her account**, at her timezone's 08:00, and she
+gets told immediately that it exists and how to cancel it. When it fires, it
+says who it's from — using her name for you, read at fire time, so renaming
+works retroactively.
+
+Guessing is refused rather than approximated throughout. A name that matches
+nobody — or two people — gets a question, not a message in the wrong person's
+chat. A reminder for a friend with no time in it is refused too: an inbox item
+belongs to whoever can schedule it, and those buttons are on your side.
+
+One limitation worth knowing: a reminder you set for her is **hers**. It shows
+in her `/list` with her id, and only she can cancel it.
 
 ---
 
@@ -386,7 +443,7 @@ on `validate.test.ts` to catch it indirectly.
 | `src/slash.ts` | Slash commands (`/list`, `/diag`, `/inbox`, ...), handled without an LLM call |
 | `src/time.ts` | Timezone, recurrence, quiet hours, check-in jitter |
 | `src/db.ts` | D1 queries |
-| `src/gemini.ts` | Gemini REST wrapper: two-tier model cascade, thinking-config fallback, usage tracking |
+| `src/gemini.ts` | Gemini REST wrapper: the model ladder, per-model blocking and probing, thinking-config fallback, usage tracking |
 | `src/telegram.ts` | Bot API + message bursting |
 | `schema.sql` | Tables |
 | `migrations/` | Incremental changes for a live database |

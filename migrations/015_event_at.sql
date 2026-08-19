@@ -1,0 +1,18 @@
+-- When the THING happens, as distinct from when to ring about it.
+--
+-- "קבעתי טיפול ליום שלישי ב-8:30, תזכיר לי בשני בערב" carries two times doing
+-- two different jobs. Intent had once_at, in_minutes and time — three ways to
+-- say when to RING — and nothing at all for when the appointment IS, so the
+-- appointment was dropped every time, in every phrasing. It is the one thing
+-- in the 16.08.2026 transcript that no amount of prompt work could have saved,
+-- because there was nowhere to put it.
+--
+-- An INSTANT (epoch ms), not a wall string like schedule.once.at. A reminder
+-- can be written into somebody else's chat under THEIR timezone, and the
+-- heads-up that announces it ships through plain sendMessage with no validator
+-- at all — so a wall string would state an event hour shifted by the tz delta,
+-- outside the safety chain entirely.
+--
+-- Nullable, and null on nearly every row: most reminders are not about an
+-- appointment, they ARE the appointment.
+ALTER TABLE reminders ADD COLUMN event_at INTEGER;

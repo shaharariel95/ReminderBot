@@ -68,7 +68,7 @@ check('quoting a title from the standing reminder list passes', (() => {
       id: 7, chat_id: '1', title: 'להתקשר לרואה חשבון', notes: null,
       schedule: '{"type":"daily","time":"09:00"}', tz: TZ, requires_proof: 0,
       proof_type: 'any' as const, nag_interval_min: 20, max_nags: 3,
-      next_fire_at: null, status: 'scheduled' as const, active: 1, created_at: 0,
+      next_fire_at: null, event_at: null, status: 'scheduled' as const, active: 1, from_chat_id: null, created_at: 0,
     }],
   };
   return validate('"להתקשר לרואה חשבון" מחכה לך.', facts([NOTHING], ctx), base([NOTHING])).ok;
@@ -125,7 +125,7 @@ check('the recurring time is in facts.times directly, independent of validate()\
     id: 21, chat_id: '1', title: 'לשתות מים', notes: null,
     schedule: '{"type":"daily","time":"16:45"}', tz: TZ, requires_proof: 0,
     proof_type: 'any', nag_interval_min: 20, max_nags: 3,
-    next_fire_at: null, status: 'scheduled', active: 1, created_at: 0,
+    next_fire_at: null, event_at: null, status: 'scheduled', active: 1, from_chat_id: null, created_at: 0,
   };
   // next_fire_at is null on purpose: the only way "16:45" reaches facts.times is
   // through the schedule JSON on the effect's own row, not the reminder's next fire.
@@ -148,11 +148,12 @@ section(
     id: 11, chat_id: '1', title: 'להוציא זבל', notes: null,
     schedule: '{"type":"daily","time":"09:00"}', tz: TZ, requires_proof: 0,
     proof_type: 'any', nag_interval_min: 20, max_nags: 3,
-    next_fire_at: AT, status: 'scheduled', active: 1, created_at: 0,
+    next_fire_at: AT, event_at: null, status: 'scheduled', active: 1, from_chat_id: null, created_at: 0,
   };
 
   const samples: Effect[] = [
     { kind: 'reminder_created', id: 1, title: 'לרוץ', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false },
+    { kind: 'friend_reminder_created', id: 1, title: 'לקנות חלב', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false, friend: 'דנה', to: '999' },
     { kind: 'reminder_captured', id: 2, title: 'לקנות חלב' },
     { kind: 'reminder_scheduled', id: 2, title: 'לקנות חלב', at: AT },
     { kind: 'reminder_retimed', id: 1, title: 'לרוץ', at: AT },
@@ -277,7 +278,7 @@ section(
       id: 31, chat_id: '1', title: 'להוציא זבל בחצר האחורית', notes: null,
       schedule: '{"type":"daily","time":"09:30"}', tz: TZ, requires_proof: 0,
       proof_type: 'any', nag_interval_min: 20, max_nags: 3,
-      next_fire_at: null, status: 'scheduled', active: 1, created_at: 0,
+      next_fire_at: null, event_at: null, status: 'scheduled', active: 1, from_chat_id: null, created_at: 0,
     };
     const f = facts([{ kind: 'listed_reminders', rows: [row], openCount: 0 }]);
     check('facts.times sweeps the row\'s recurring schedule time',

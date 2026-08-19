@@ -829,14 +829,135 @@ export function findFutureInstant(text: string, nowMs: number, tz: string): numb
   );
 }
 
-/** Returns a create_reminder Intent, or null to let the LLM router handle it. */
-export function quickParse(text: string, nowMs: number, tz: string): Intent | null {
+/**
+ * Is this reminder AIMED at somebody, rather than being his own errand?
+ *
+ * Distinct from namesSomeoneElse, which asks the ADDRESS BOOK. This asks the
+ * grammar, and it exists because the address book was the wrong question on
+ * 17.08.2026: the book held the friend under his Telegram profile name
+ * ("amnon") while the message said "לאמנון", nothing matched, and
+ * "תזכיר לאמנון לדבר עם שחר עוד שתי דקות" was filed as HIS reminder — his
+ * chat, his hour, somebody else's errand as the title. No model call happened,
+ * so the router never got the chance to notice.
+ *
+ * CLAUDE.md is right that "לדנה" and "לקנות" cannot be told apart by shape,
+ * and this does not try. It matches a stronger claim: **two** ל-phrases in a
+ * row after "תזכיר" — an addressee AND an errand ("תזכיר לאמנון לדבר"). One
+ * ל-phrase is just an errand ("תזכיר לקנות חלב") and is left alone.
+ *
+ * "לי" is excluded outright, because "תזכיר לי" is always his — the same fact
+ * the router prompt states. Note that the exclusion is anchored: "לילדים"
+ * begins with those letters and IS a third party, so it must still bail.
+ *
+ * Over-refusing is the intended direction. A bail costs one model call and the
+ * router is shown the friends list; a wrong pass costs a row filed under
+ * somebody else's errand, in his name, at his hour.
+ */
+const ADDRESSED_TO_SOMEONE = new RegExp(
+  String.raw`(?:תזכיר|תזכירי|הזכר)\s+ל(?!י(?:\s|$))[א-ת]{2,}\s+ל[א-ת]`,
+);
+
+export function addressesSomeoneElse(text: string): boolean {
+  return ADDRESSED_TO_SOMEONE.test(text);
+}
+
+/**
+ * Does this message name somebody other than himself?
+ *
+ * Matched against the address book rather than against grammar, and that is
+ * the whole design. There is no way to tell "לדנה" from "לקנות" by shape —
+ * both are a ל followed by Hebrew letters, and the only difference is whether
+ * the rest of it is a person. So the question asked here is the exact one
+ * that can be answered: is this one of the handful of names he has actually
+ * agreed to write reminders for?
+ *
+ * Anything else keeps the old behaviour exactly. A chat with no friends can
+ * never reach this, and "תזכיר לי ללכת לדואר" is untouched by it — which
+ * matters, because sending every ל through the router would cost a model call
+ * on the commonest phrasing there is.
+ *
+ * The ל prefix is required, but only as a cheap filter — it is not a claim
+ * that the name is the ADDRESSEE. "תזכיר לי לקנות מתנה לדנה" trips this too,
+ * and that is deliberate: bailing costs one model call, and the router is
+ * told outright that "תזכיר לי" is always his. Guessing the other way costs
+ * an errand filed in her chat, which nobody is watching for.
+ */
+function namesSomeoneElse(t: string, friends: string[]): boolean {
+  return friends.some((name) => {
+    const n = name.trim();
+    if (n.length < 2) return false;
+    // Built by concatenation, not as a template literal. In a template literal
+    // an unrecognised escape loses its backslash — `\s` reads as a plain "s" —
+    // so the first version of this line compiled to a regex that required a
+    // literal letter s before the name and matched nothing at all.
+    const re = new RegExp('(?:^|\\s)ל' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![א-ת])');
+    return re.test(t);
+  });
+}
+
+/**
+ * Returns a create_reminder Intent, or null to let the LLM router handle it.
+ *
+ * The wrapper exists for one refusal that the parse itself cannot make, because
+ * it depends on state this file is deliberately not given: whether a reminder
+ * is currently RINGING and waiting for a report.
+ *
+ * "תזכיר לי עוד שעה", typed a minute after a reminder fired, is a snooze of the
+ * thing being chased — not a brand-new reminder about nothing. This file cannot
+ * tell those apart, and on 16.08.2026 it did not: it filed an empty reminder
+ * called "תזכורת" and the open task kept nagging. So it does what rule 2 says
+ * and BAILS. The router is shown open instances and can choose; a model call is
+ * the correct price for a genuine ambiguity.
+ *
+ * Narrow on purpose. Only a create with NO SUBJECT defers — "תזכיר לי עוד שעה
+ * לקנות חלב" says what it is about and is unaffected, open task or not.
+ */
+export function quickParse(
+  text: string,
+  nowMs: number,
+  tz: string,
+  friends: string[] = [],
+  /** Is a fired reminder currently waiting for a report in this chat? */
+  hasOpenTask = false,
+): Intent | null {
+  const intent = quickParseOwn(text, nowMs, tz, friends);
+  if (!intent) return null;
+  if (hasOpenTask && intent.action === 'create_reminder' && intent.title === UNTITLED_TITLE) {
+    return null;
+  }
+  return intent;
+}
+
+function quickParseOwn(
+  text: string,
+  nowMs: number,
+  tz: string,
+  /**
+   * The nicknames of people he may set reminders for. Present so this file can
+   * REFUSE, never so it can route: resolving which friend, and writing into
+   * their chat, is the router's and effects.ts's job. Empty (the default) is
+   * every chat that has no friends, and behaves exactly as this file always
+   * did.
+   */
+  friends: string[] = [],
+): Intent | null {
   const t = text.trim();
   if (!t) return null;
   // Rule 1: this path only ever answers an explicit request for a NEW reminder.
   // A definite "התזכורת" is a reference to one he already has, and no verb list
   // is consulted to work that out — see asksForNewReminder.
   if (!asksForNewReminder(t)) return null;
+  // Rule 1b: and only ever a reminder for HIM. Every parse below assumes the
+  // reminder is his own — cleanTitle strips "תזכיר לי" and nothing else — so a
+  // message aimed at somebody in his address book would be filed as his, at
+  // his hour, in his chat, with her name left sitting in the title. The router
+  // is the only thing that knows who she is.
+  if (namesSomeoneElse(t, friends)) return null;
+  // Rule 1c: and only when it is HIS errand. See addressesSomeoneElse — the
+  // address book cannot answer this when the book spells the name differently
+  // from the way he types it, which is the normal case for a nickname taken
+  // from a Telegram profile.
+  if (addressesSomeoneElse(t)) return null;
   // Two times in one message means two reminders. One Intent cannot hold both,
   // and guessing which one he meant is how a reminder goes missing.
   if (countTimeAnchors(t) > 1) return null;

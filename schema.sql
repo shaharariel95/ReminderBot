@@ -9,6 +9,8 @@ DROP TABLE IF EXISTS profile;
 DROP TABLE IF EXISTS rejections;
 DROP TABLE IF EXISTS meta;
 DROP TABLE IF EXISTS pending;
+DROP TABLE IF EXISTS friends;
+DROP TABLE IF EXISTS model_health;
 
 CREATE TABLE reminders (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,10 +24,15 @@ CREATE TABLE reminders (
   nag_interval_min INTEGER NOT NULL DEFAULT 20,
   max_nags         INTEGER NOT NULL DEFAULT 3,
   next_fire_at     INTEGER,                        -- epoch ms; NULL = never again
+  event_at         INTEGER,                        -- when the THING happens (migration 015)
   -- scheduled | inbox | done | cancelled. `active` is derived and kept only so a
   -- half-migrated database still reads; status is the source of truth.
   status           TEXT    NOT NULL DEFAULT 'scheduled',
   active           INTEGER NOT NULL DEFAULT 1,
+  -- Who set it, when it was not the person it fires for — see migrations/013.
+  -- NULL = he set it himself. The sender's chat_id and not their name: the
+  -- recipient may rename them before this ever fires.
+  from_chat_id     TEXT,
   created_at       INTEGER NOT NULL
 );
 CREATE INDEX idx_reminders_due ON reminders(status, next_fire_at);
@@ -205,3 +212,33 @@ CREATE TABLE errors (
   user_text TEXT
 );
 CREATE INDEX idx_errors_chat ON errors(chat_id, id DESC);
+
+-- Two people who agreed to set reminders for each other — see migrations/013.
+-- One row per DIRECTED edge; `status` on the requester's edge is the consent
+-- record, and db.friendsOf reads nothing else.
+CREATE TABLE friends (
+  chat_id        TEXT    NOT NULL,
+  friend_chat_id TEXT    NOT NULL,
+  nickname       TEXT    NOT NULL,
+  status         TEXT    NOT NULL DEFAULT 'pending', -- pending | accepted | declined
+  -- The requester's Telegram name, captured when he asks: it is the default
+  -- nickname the other side gets for him, and the accept (a tap in HER chat)
+  -- is too late to learn it. See migrations/013.
+  requester_name TEXT,
+  requested_by   TEXT    NOT NULL,
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, friend_chat_id)
+);
+CREATE INDEX idx_friends_chat ON friends(chat_id, status);
+
+-- Which models are worth calling right now — see migrations/014 and
+-- src/gemini.ts. A model that answered 429 is skipped without a round trip
+-- until `blocked_until` passes; the expiry is the probe, and `strikes` is what
+-- keeps the probe from becoming a nuisance.
+CREATE TABLE model_health (
+  model         TEXT    PRIMARY KEY,
+  blocked_until INTEGER NOT NULL,
+  strikes       INTEGER NOT NULL DEFAULT 1,
+  reason        TEXT,
+  updated_at    INTEGER NOT NULL
+);

@@ -21,7 +21,7 @@ const daily: Reminder = {
   id: 7, chat_id: '1', title: 'להתקשר לרואה חשבון', notes: null,
   schedule: '{"type":"daily","time":"09:00"}', tz: TZ, requires_proof: 0,
   proof_type: 'any', nag_interval_min: 20, max_nags: 3,
-  next_fire_at: AT, status: 'scheduled', active: 1, created_at: 0,
+  next_fire_at: AT, event_at: null, status: 'scheduled', active: 1, from_chat_id: null, created_at: 0,
 };
 
 function ctx(over: Partial<Context> = {}): Context {

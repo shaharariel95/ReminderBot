@@ -3,6 +3,8 @@ import { describeSchedule, formatLocal, localDayBounds } from './time';
 import type { Env, ReminderItem, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
+import { keyboard } from './buttons';
+import { modelLadder } from './gemini';
 
 /**
  * The same commands, in the language the bot actually speaks.
@@ -39,6 +41,12 @@ const ALIASES: Record<string, string> = {
   תקלות: '/errors',
   שגיאות: '/errors',
   מחכים: '/pending',
+  חברים: '/friends',
+  // Deliberately only the LISTING. "/friend" needs a chat_id — digits, which
+  // means the keyboard has already been switched — so the Hebrew alias would
+  // save nothing, and a bare "חבר" is a word that can start a real sentence.
+  // A false positive in this map silently swallows a request to the router.
+  מזהה: '/id',
   // Deliberately NOT here: שקט → /chill. Every other alias answers a question;
   // that one takes an action — four hours of silence — off a single bare word
   // that could easily be part of something else. "תשתוק" reaches the router's
@@ -68,6 +76,15 @@ export async function handleSlash(
   env: Env,
   chatId: string,
   text: string,
+  /**
+   * What Telegram says this sender is called. Used for exactly one thing: the
+   * name the OTHER side gets for him when a friend request is accepted, so
+   * that her reminders do not arrive from a bare chat_id. Optional, because
+   * every other command works without knowing who is typing, and because
+   * Telegram does not promise it — the chat_id is the fallback, and it is
+   * ugly rather than wrong.
+   */
+  senderName?: string,
 ): Promise<string | null> {
   const cmd = normalizeCommand(text);
 
@@ -189,6 +206,13 @@ export async function handleSlash(
         '/why [מספר] — כל מה שקרה לתזכורת אחת',
         '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
         '',
+        'חברים — תזכורות שאתה קובע לאנשים אחרים:',
+        '/id — המספר שלך, זה מה שחבר צריך כדי להוסיף אותך',
+        '/friend [chat_id] [כינוי] — מבקש להוסיף מישהו. הוא צריך לאשר.',
+        '/friends — מי ברשימה, ומי מחכה לתשובה שלך',
+        '/unfriend [כינוי] — מוריד, לשני הכיוונים',
+        'ואז פשוט: "תזכיר לדנה מחר ב-8 לקחת את הרכב לטסט"',
+        '',
         'הכל עובד גם בעברית, עם או בלי לוכסן:',
         'רשימה · היום · מטרות · עזרה · אינבוקס · תקלות',
         '',
@@ -202,43 +226,199 @@ export async function handleSlash(
         'או פשוט תשלח תמונה כהוכחה.',
       ].join('\n');
 
+    /**
+     * The number somebody else needs in order to add you.
+     *
+     * Not owner-only: the only id it will ever print is the id of the chat it
+     * was typed in, so a guest reading his own tells him nothing he could not
+     * already see in any Telegram client — and without it there is no way to
+     * become somebody's friend at all.
+     */
+    case '/id':
+      return [
+        `ה-chat_id שלך: ${chatId}`,
+        '',
+        'זה מה שחבר צריך כדי להוסיף אותך:',
+        `/friend ${chatId} [כינוי]`,
+      ].join('\n');
+
+    /**
+     * Ask somebody to be a friend, or rename one you already have.
+     *
+     * Nothing here grants anything. The row lands as `pending` and the other
+     * side has to tap yes — see migrations/013 — because what a friendship
+     * grants is the right to write a row into your chat and make your phone
+     * go off at 07:00, and that is not a thing anyone gets to hand out on
+     * somebody else's behalf.
+     */
+    case '/friend': {
+      const rest = text.trim().slice(cmd.length).trim();
+      const [first, ...tail] = rest.split(/\s+/);
+      const nickname = tail.join(' ').trim();
+      if (!first) return 'מי? /friend [chat_id] [כינוי]. את ה-chat_id שלו הוא מקבל מ-/id.';
+
+      // A name rather than an id means he is renaming somebody already in the
+      // book. Kept in the same command on purpose: the reverse edge created at
+      // acceptance is named after his Telegram name (see db.acceptFriend), and
+      // this is the only way to fix that.
+      if (!/^\d{1,20}$/.test(first)) {
+        const existing = db.matchFriend(await db.friendsOf(env, chatId), first);
+        if (!existing) return `אין לי "${first}" ברשימה. /friends יראה לך את מי שיש.`;
+        if (!nickname) return `${existing.nickname} כבר קיים. /friend ${first} [כינוי חדש] כדי לשנות לו את השם.`;
+        await db.renameFriend(env, chatId, existing.friend_chat_id, nickname);
+        return `מעכשיו הוא "${nickname}" אצלי.`;
+      }
+      if (!nickname) return 'וגם כינוי — איך תקרא לו. /friend [chat_id] [כינוי].';
+
+      // The guest list is what bounds who can be MADE to receive a message on
+      // somebody else's say-so. Everyone else gets exactly the silence
+      // greetStranger gives them, and a friend request must not be a way
+      // around it.
+      if (!(await db.allowedChats(env)).has(first)) {
+        return 'אני לא מכיר את המספר הזה. הוא צריך לדבר איתי קודם ולקבל אישור.';
+      }
+
+      const ask = await db.requestFriend(env, chatId, first, nickname, senderName);
+      if (!ask.ok) {
+        switch (ask.kind) {
+          case 'self':
+            return 'זה אתה.';
+          case 'already':
+            return `${nickname} כבר חבר שלך. /friends יראה לך את כולם.`;
+          // Said no once. Asking again is the nagging this prevents — the same
+          // rule a denied stranger gets in `pending`.
+          case 'declined':
+            return 'הוא כבר ענה על זה, ולא. לא אשאל אותו שוב.';
+          case 'full':
+            return `יש לך כבר ${db.FRIEND_MAX} חברים. תוריד אחד עם /unfriend.`;
+        }
+      }
+      if (ask.kind === 'accepted') {
+        // He was answering a request of hers, not opening one of his own.
+        await sendMessage(env, first, `${senderName ?? chatId} אישר אותך. אתם חברים.`).catch((err) =>
+          console.error('friend accept notice', err),
+        );
+        return `${nickname} כבר ביקש את זה ממך — אז זהו, אתם חברים. עכשיו אפשר "תזכיר ל${nickname}...".`;
+      }
+
+      // Best-effort, like the /allow welcome: a blocked bot must not turn his
+      // confirmation into an error. He is told what was written either way,
+      // and what was written is a pending row and nothing else.
+      await sendMessage(
+        env,
+        first,
+        [
+          `${senderName ?? chatId} (${chatId}) רוצה להוסיף אותך כחבר.`,
+          'אם תאשר, הוא יוכל לקבוע לך תזכורות — ואתה לו.',
+        ].join('\n'),
+        keyboard([
+          [
+            { text: 'מאשר', data: { t: 'facc', from: chatId } },
+            { text: 'לא', data: { t: 'frej', from: chatId } },
+          ],
+        ]),
+      ).catch((err) => console.error('friend request', err));
+
+      return ask.kind === 'again'
+        ? `שלחתי לו את זה שוב, בתור "${nickname}". עד שהוא יאשר אני לא כותב לו כלום.`
+        : `שאלתי אותו. אצלי הוא "${nickname}" — אבל עד שהוא יאשר אני לא כותב לו כלום.`;
+    }
+
+    case '/friends': {
+      const book = await db.friendBook(env, chatId);
+      const incoming = await db.incomingFriendRequests(env, chatId);
+      const lines: string[] = [];
+
+      const mine = book.filter((f) => f.status === 'accepted');
+      if (mine.length) {
+        lines.push('החברים שלך:', ...mine.map((f) => `· ${f.nickname} — ${f.friend_chat_id}`));
+      }
+      const waiting = book.filter((f) => f.status === 'pending');
+      if (waiting.length) {
+        lines.push('', 'ביקשת, עוד לא ענו:', ...waiting.map((f) => `· ${f.nickname} — ${f.friend_chat_id}`));
+      }
+      if (incoming.length) {
+        // Answerable from here, not only from the button on a message that may
+        // be a hundred messages back: naming him is the same "yes" the button
+        // sends, and it arrives with his own name for the person instead of
+        // the one derived at acceptance. See db.requestFriend.
+        lines.push(
+          '',
+          'מחכים לתשובה שלך:',
+          ...incoming.map((f) => `· ${f.chat_id}`),
+          'לאשר: /friend [chat_id] [כינוי]',
+        );
+      }
+      if (!lines.length) return `אין לך חברים אצלי. /id ייתן לך את המספר שלך, /friend [chat_id] [כינוי] מוסיף.`;
+      return lines.join('\n');
+    }
+
+    case '/unfriend': {
+      const target = text.trim().slice(cmd.length).trim();
+      if (!target) return 'את מי? /unfriend [כינוי].';
+      const friends = await db.friendsOf(env, chatId);
+      const hit = /^\d{1,20}$/.test(target)
+        ? friends.find((f) => f.friend_chat_id === target) ?? null
+        : db.matchFriend(friends, target);
+      if (!hit) return `אין לי "${target}" ברשימה. /friends יראה לך את מי שיש.`;
+      // Both directions. Leaving his edge behind leaves him still able to
+      // write reminders into a chat that has just removed him.
+      await db.removeFriend(env, chatId, hit.friend_chat_id);
+      return `${hit.nickname} ירד. אף אחד מכם לא יכול לקבוע לשני יותר.`;
+    }
+
     case '/diag': {
-      const model = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
+      const ladder = modelLadder(env);
+      const model = ladder[0] ?? 'gemini-3.5-flash';
+      // One settings read for everything below, not one per block: /diag is
+      // the command you run when something is already wrong, and it should
+      // not be the command that costs the most queries.
+      const tz = await db
+        .getSettings(env, chatId)
+        .then((s) => s.tz)
+        .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
       const lines = [
         // First line, because "am I even running the code I think I am"
         // precedes every other question this command answers.
         `גרסה: ${VERSION}`,
-        `model: ${model}`,
+        `מודלים: ${ladder.join(' · ')}`,
         `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} תווים)` : 'חסר!'}`,
         `OWNER_CHAT_ID: ${env.OWNER_CHAT_ID || 'חסר!'}`,
       ];
-      const primary = env.GEMINI_MODEL ?? 'gemini-3.5-flash';
-      const fallback = env.GEMINI_MODEL_FALLBACK ?? 'gemini-3.5-flash-lite';
+      const primary = ladder[0] ?? model;
+      // Which models are out, and until when.
+      //
+      // This is the line that turns "the bot feels stupid today" into a fact
+      // with a time on it. A blocked model is invisible from the outside — the
+      // reply still arrives, just from further down the ladder — and a 404
+      // from a typo in wrangler.toml looks exactly the same as a quota. It is
+      // also the safety valve on the ladder's self-pruning: a model that
+      // writes itself off for six hours has to be sayable somewhere.
+      const health = await db.modelHealth(env).catch(() => new Map());
+      const blocked = [...health.values()]
+        .filter((h) => h.blocked_until > Date.now())
+        .map((h) => `${h.model} (${h.reason ?? '?'}) עד ${formatLocal(h.blocked_until, tz)}`);
+      lines.push(blocked.length ? `חסומים כרגע: ${blocked.join(' · ')}` : 'חסומים כרגע: אין');
+
       // Two numbers, because they answer two questions. His own is the one
       // that reconciles with the rejection list printed below and the one his
       // check-in budget is measured against; the total is what protects the
       // shared API key. Showing only the total is what put "נפסלו היום: 1"
       // above an empty list on 11.08.2026 — the rejection was a guest's.
+      //
+      // Summed across the ladder rather than shown per model: with six rungs,
+      // a per-model line is six lines of ones and twos that answer nothing,
+      // and the budget they are measured against is now the sum too.
       lines.push(
-        `שימוש היום — ${primary}: שלך ${await db.usageTodayFor(env, primary, chatId)} · ` +
-          `בסך הכל ${await db.usageToday(env, primary)}`,
-        `${fallback}: שלך ${await db.usageTodayFor(env, fallback, chatId)} · ` +
-          `בסך הכל ${await db.usageToday(env, fallback)}`,
-        `תשובות שנפסלו היום: ${await db.usageTodayFor(env, '_rejections', chatId)}`,
+        `שימוש היום — שלך ${await db.usageTodayAll(env, chatId)} · ` +
+          `בסך הכל ${await db.usageTodayAll(env)}`,
+        `תשובות שנפסלו היום: ${await db.usageTodayFor(env, db.REJECTION_COUNTER, chatId)}`,
         // The daily counters above are the axis that never binds. This is the
         // one that does, and seeing it live is the whole reason /diag exists.
-        `תקרת דקה: ${env.GEMINI_RPM ?? 18} לכל מודל · בדקה הזאת: ${await db
+        `תקרת דקה: ${env.GEMINI_RPM ?? 18} לכל מודל · בדקה הזאת (${primary}): ${await db
           .rateWindowNow(env, primary)
           .catch(() => '?')}`,
       );
-      // One settings read for everything below, not one per block: /diag is
-      // the command you run when something is already wrong, and it should not
-      // be the command that costs the most queries.
-      const tz = await db
-        .getSettings(env, chatId)
-        .then((s) => s.tz)
-        .catch(() => env.DEFAULT_TZ ?? 'Asia/Jerusalem');
-
       // The cron. This is the subsystem that actually failed in August 2026 —
       // a reminder on the 13th and another on the 14th simply never fired —
       // and it was the one thing /diag could say nothing whatsoever about. The

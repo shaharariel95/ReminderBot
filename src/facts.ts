@@ -85,6 +85,12 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       titles.add(e.from);
       titles.add(e.to);
     }
+    // A person's name, not a task title — so it goes in `quotable`, which is
+    // matched one-directionally. As a title, a short name like "דנה" would be
+    // a wildcard: rule 3 accepts a quote that CONTAINS an allowed title, and
+    // every invented task with her name in it would sail through.
+    if (e.kind === 'friend_reminder_created') addQuotable(e.friend);
+    if (e.kind === 'reminder_fired' && e.from) addQuotable(e.from);
     if (e.kind === 'needs_item_choice') for (const i of e.open) titles.add(i.title);
     if (e.kind === 'reminder_fired' && e.items) for (const i of e.items) titles.add(i.title);
     if (e.kind === 'needs_reminder_choice') {
@@ -94,6 +100,13 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       }
     }
     if ('at' in e) addTime(e.at);
+    // The event hour is none of the sources this list is otherwise built from
+    // — not next_fire_at, not schedule.time, not fired_at, not `at`. Without
+    // this line validate.ts rule 1 finds it outside the allow-list and throws
+    // away the WHOLE rewrite for repeating something the baseline itself said.
+    // That failure is silent: it surfaces as a rejection count in /diag, never
+    // as an error.
+    if ('eventAt' in e && e.eventAt) addTime(e.eventAt);
     if ('until' in e) addTime(e.until);
     if ('since' in e) {
       addTime(e.since);
