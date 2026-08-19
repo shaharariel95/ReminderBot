@@ -56,8 +56,27 @@ async function withinRateWindow(env: Env, model: string, decorative: boolean): P
   // Decorative calls yield at 70% so there is always headroom left for routing.
   const ceiling = decorative ? Math.floor(limit * 0.7) : limit;
   try {
-    const used = await db.bumpRateWindow(env, minuteBucket(Date.now()), model);
-    return used <= ceiling;
+    const minute = minuteBucket(Date.now());
+    const used = await db.bumpRateWindow(env, minute, model);
+    if (used <= ceiling) return true;
+    // Refused — so give the slot back. The bump is a RESERVATION (atomic, and
+    // that is why it comes first), but a reservation nobody uses has to be
+    // released or it is just a leak.
+    //
+    // Without this, a decorative call turned away at the 70% ceiling had still
+    // consumed a slot against the FULL limit. With a ladder underneath, one
+    // speak() attempt walks every rung and burns one slot per model without
+    // making a single HTTP request — and those slots come straight out of the
+    // budget route() is measured against, which is the call that must never be
+    // dropped. The cheap message was costing the expensive one its headroom.
+    //
+    // Best-effort, and deliberately not awaited into the decision: failing to
+    // release costs one slot for one minute, while failing the whole call
+    // costs the turn.
+    await db.releaseRateWindow(env, minute, model).catch((err) =>
+      console.error('releaseRateWindow', err),
+    );
+    return false;
   } catch (err) {
     console.error('rate window bookkeeping failed, allowing the call', err);
     return true;

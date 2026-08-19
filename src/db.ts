@@ -971,9 +971,34 @@ export async function bumpRateWindow(env: Env, minute: string, model: string): P
   return calls;
 }
 
+/**
+ * Hand back a slot `bumpRateWindow` reserved for a call that never happened.
+ *
+ * The bump has to come first — it is the atomic reservation, and reading then
+ * writing would let two concurrent turns both believe they had the last slot.
+ * But a reservation nobody uses is a leak, and it was leaking into the ONE
+ * budget that matters: a decorative call refused at the 70% ceiling still
+ * counted against the full limit that routing is measured against.
+ *
+ * Floored at zero. A release without a matching bump should not be able to
+ * hand the minute free capacity it never had.
+ */
+export async function releaseRateWindow(env: Env, minute: string, model: string): Promise<void> {
+  await env.DB.prepare(
+    'UPDATE rate_window SET calls = MAX(0, calls - 1) WHERE bucket = ?',
+  )
+    .bind(`${minute}|${model}`)
+    .run();
+}
+
 /** Calls already spent in the current minute for `model` — read-only, for /diag. */
 export async function rateWindowNow(env: Env, model: string): Promise<number> {
-  const minute = new Date().toISOString().slice(0, 16);
+  // Date.now(), not `new Date()`. They agree in production, but only the
+  // former is the clock gemini.minuteBucket uses to WRITE these rows — and
+  // `new Date()` reads the system clock directly, so a test that pins the
+  // time could never observe its own bookkeeping. A counter nothing can
+  // measure is a counter nothing can prove.
+  const minute = new Date(Date.now()).toISOString().slice(0, 16);
   const row = await env.DB.prepare('SELECT calls FROM rate_window WHERE bucket = ?')
     .bind(`${minute}|${model}`)
     .first<{ calls: number }>();

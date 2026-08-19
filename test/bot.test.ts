@@ -1533,6 +1533,65 @@ async function main() {
     rig.restore();
   }
 
+
+  section('a call that was refused does not spend the minute it never used');
+  {
+    /**
+     * `withinRateWindow` increments FIRST and decides second. So a decorative
+     * call turned away at the 70% ceiling had already consumed a slot against
+     * the FULL limit — and with a ladder underneath, one speak() attempt walks
+     * every rung and burns one slot per model without making a single HTTP
+     * request. Those slots come straight out of the budget `route()` is
+     * measured against, and route() is the call that must never be dropped.
+     *
+     * Asserted on the counter rather than on behaviour: the counter IS the
+     * bug, and a behavioural assertion here would depend on how deep the
+     * ladder happens to be.
+     */
+    const rig = createRig();
+    seedSettings(rig);
+    const frozen = wallToUtc(2026, 8, 7, 12, 0, TZ);
+    const minute = new Date(frozen).toISOString().slice(0, 16);
+    const model = modelLadder(rig.env)[0];
+
+    // Ceiling 10 for routing, 7 for decorative. Seven already spent, so the
+    // next decorative call is over its ceiling and the next routing call is
+    // not — the same arithmetic as the section above.
+    rig.env.GEMINI_RPM = '10';
+    // Every rung, for the reason the section above spells out: the window is
+    // per MODEL, so seeding only the primary would let the call drop a tier
+    // and succeed, and the test would be measuring the ladder's depth.
+    for (const m of modelLadder(rig.env)) {
+      rig.db.prepare('INSERT INTO rate_window (bucket, calls) VALUES (?, 7)').run(`${minute}|${m}`);
+    }
+
+    await withNow(frozen, async () => {
+      const { generate } = await import('../src/gemini');
+      // Decorative, and over its ceiling on every rung, so nothing is sent.
+      await generate(rig.env, {
+        system: 's', contents: [{ role: 'user', parts: [{ text: 'x' }] }], decorative: true,
+      }).catch(() => {});
+
+      eq('nothing actually went out', rig.geminiCalls.length, 0);
+      eq(
+        'and the minute is exactly where it was before',
+        await db.rateWindowNow(rig.env, model),
+        7,
+      );
+
+      // The point of all of it: routing still has its slots.
+      rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+      rig.speakQueue.push('נו?');
+      await runWebhook(rig, 'תזכיר לי כל יומיים לשלם');
+      check(
+        'so the router is still consulted afterwards',
+        rig.geminiCalls.some((c) => c.kind === 'router'),
+        JSON.stringify(rig.geminiCalls.map((c) => c.kind)),
+      );
+    });
+    rig.restore();
+  }
+
   section('a used-up minute stops calling the model at all');
   {
     const rig = createRig();
