@@ -5,7 +5,7 @@ import { judgePhoto, route, speak, type Context } from './brain';
 import { buildFacts } from './facts';
 import { validate } from './validate';
 import { CHECKIN_GOAL, CONVERSATION_WINDOW_MIN, GIVE_UP, NAG_LADDER, NAG_LADDER_ITEMS, nagDelayMinutes } from './persona';
-import { asksForNewReminder, findFutureInstant, parseAnswerTime, quickParse } from './quickparse';
+import { addressesSomeoneElse, asksForNewReminder, findFutureInstant, namesSomeoneElse, parseAnswerTime, quickParse } from './quickparse';
 import {
   answerCallback,
   getPhotoBase64,
@@ -409,7 +409,32 @@ async function respondToOwner(
     // #30." — capturing a request to MOVE something as a brand-new inbox item.
     // Two gates asking the same question had to be fixed twice; now there is
     // one answer and one place to change it.
-    if (asksForNewReminder(text)) {
+    // ...and only when it is HIS. `asksForNewReminder` answers "did he ask for
+    // a reminder", never "whose is it", and the capture files the raw message
+    // as a title in HIS inbox.
+    //
+    // Production, 17.08.2026: reminder #43, still in the owner's inbox three
+    // days later, titled `תזכיר לאמנון "להגיד לי איזה פיצר טוב" עוד שתי דקות`.
+    // The router truncated mid-string, JSON.parse threw, and the whole message
+    // was filed verbatim — his row, somebody else's errand, the addressing
+    // still in the title. An inbox row has no next_fire_at to age out on, so
+    // it is then shown to the router on every turn forever.
+    //
+    // quickparse refuses exactly this shape for exactly this reason, and it
+    // uses TWO gates to do it: `namesSomeoneElse` asks the address book,
+    // `addressesSomeoneElse` asks the grammar. Both are needed and neither
+    // subsumes the other — the production message above defeats the grammar
+    // one on its own, because a quotation mark sits between the two ל-phrases
+    // ("תזכיר לאמנון \"להגיד...") and CLAUDE.md records that widening the
+    // pattern to cover it trades the miss for real over-refusal.
+    //
+    // So this asks both, the same way and in the same order. One question,
+    // one answer, one place to change it — which is the lesson from
+    // asksForNewReminder having had to be fixed twice.
+    const notHis =
+      namesSomeoneElse(text, (ctx.friends ?? []).map((f) => f.nickname)) ||
+      addressesSomeoneElse(text);
+    if (asksForNewReminder(text) && !notHis) {
       const id = await db.addInboxItem(env, chatId, text.slice(0, 200), ctx.settings.tz);
       effects.push({ kind: 'reminder_captured', id, title: text.slice(0, 200) });
     }

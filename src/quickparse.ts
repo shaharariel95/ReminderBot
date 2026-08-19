@@ -909,7 +909,7 @@ export function addressesSomeoneElse(text: string): boolean {
  * told outright that "תזכיר לי" is always his. Guessing the other way costs
  * an errand filed in her chat, which nobody is watching for.
  */
-function namesSomeoneElse(t: string, friends: string[]): boolean {
+export function namesSomeoneElse(t: string, friends: string[]): boolean {
   return friends.some((name) => {
     const n = name.trim();
     if (n.length < 2) return false;

@@ -593,4 +593,59 @@ section('the router is told to report a name it does not recognise');
   rig.restore();
 }
 
+// --------------------------------------------------------------------------
+section('a broken turn does not file somebody else\'s errand as his');
+
+/**
+ * When the router throws, anything that looks like a reminder request is
+ * captured to the inbox rather than lost. That is right — but the gate was
+ * `asksForNewReminder` alone, which asks only "did he ask for a reminder",
+ * never "whose reminder is it".
+ *
+ * Production, 17.08.2026: reminder #43, still sitting in the owner's inbox
+ * three days later, titled
+ *
+ *   תזכיר לאמנון "להגיד לי איזה פיצר טוב" עוד שתי דקות
+ *
+ * The router had truncated mid-string and JSON.parse threw, so the raw message
+ * was filed verbatim — a row in HIS inbox, holding somebody else's errand,
+ * with "תזכיר לאמנון" as part of the title. An inbox row never ages out, so it
+ * is shown to the router on every single turn from then on.
+ *
+ * The capture is for HIS errands. quickparse already refuses these for exactly
+ * the same reason — cleanTitle strips "תזכיר לי" and nothing else — and the
+ * fallback has to make the same refusal, or the two gates disagree again.
+ */
+async function aBrokenTurnDoesNotFileHerErrand(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  // The address book holds him, spelled the way the owner types it — which is
+  // the state production is in now that the nickname was corrected.
+  rig.db.prepare("INSERT INTO friends (chat_id, friend_chat_id, nickname, status, requested_by, created_at) VALUES (?,?,'אמנון','accepted',?,0)").run(HIM, HER, HIM);
+  // No router response queued and no speak response: the turn throws, exactly
+  // as it did in production.
+  await runWebhook(rig, 'תזכיר לאמנון "להגיד לי איזה פיצר טוב" עוד שתי דקות');
+
+  const rows = rig.db.prepare('SELECT title, status FROM reminders').all() as any[];
+  eq('nothing was filed under his name', rows.length, 0);
+
+  const texts = rig.texts().join('\n');
+  check(
+    'and he is still told the turn fell over',
+    texts.includes('/list') || texts.includes('נפל'),
+    JSON.stringify(rig.texts()),
+  );
+
+  // His OWN errand still survives a broken router — that is what the capture
+  // is for, and widening the gate must not cost it.
+  const rig2 = createRig({ tz: TZ });
+  await runWebhook(rig2, 'תזכיר לי לקנות חלב');
+  const mine = rig2.db.prepare('SELECT title, status FROM reminders').all() as any[];
+  eq('his own request is still captured when the router dies', mine.length, 1);
+  eq('as an inbox row', mine[0]?.status, 'inbox');
+  rig.restore();
+  rig2.restore();
+}
+
+await aBrokenTurnDoesNotFileHerErrand();
+
 done();
