@@ -869,6 +869,85 @@ async function inventionIsStillCaught(): Promise<void> {
   rig.restore();
 }
 
+// --------------------------------------------------------------------------
+section('a nag that names an errand can see which errands are done');
+
+/**
+ * `NAG_LADDER_ITEMS` tells the model: "תבקש ממנו פריט אחד בלבד מהרשימה
+ * שלמעלה, בשמו" — ask for one item from the list above, by name.
+ *
+ * There was no list. `speak()` rebuilds a Context from `Facts` to render
+ * openSummary, and `Facts` had no `items` field, so the item lines the ROUTER
+ * sees were absent from the persona's prompt entirely.
+ *
+ * It half-worked, which is why it survived: items are always a comma-split of
+ * the title, and the title IS shown, so the model could read the parts off it.
+ * What it could not read is the ✓/☐ state — so the level-1 nag was free to
+ * demand the errand he had just reported doing, which is the one thing this
+ * whole feature exists to make unnecessary.
+ *
+ * test/patterns.ts only ever asserted that NAG_LADDER_ITEMS *contains the
+ * words* "פריט אחד". That stays green with the entire mechanism broken.
+ */
+async function theNagSeesWhichErrandsAreDone(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  const title = 'להחזיר ראוטר, לקנות מחבת, ללכת למחסני תאורה';
+
+  await withNow(NOW, async () => {
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title, schedule_type: 'once', in_minutes: 1 }],
+    });
+    rig.speakQueue.push('קבעתי.');
+    await say(rig, `תזכיר לי עוד דקה ${title}`);
+  });
+
+  const items = rig.db.prepare('SELECT id, title FROM reminder_items ORDER BY position').all() as any[];
+  eq('three errands were split out', items.length, 3);
+
+  await withNow(NOW + 90_000, async () => {
+    rig.speakQueue.push('נו? שלושה דברים.');
+    await runCron(rig);
+  });
+
+  // He does one of them.
+  await withNow(NOW + 120_000, async () => {
+    await db.completeItem(rig.env, items[0].id);
+  });
+
+  rig.geminiCalls.length = 0;
+
+  // The level-1 nag, half an hour later.
+  await withNow(NOW + 35 * 60_000, async () => {
+    rig.speakQueue.push('תעשה אחד מהם.');
+    await runCron(rig);
+  });
+
+  const spoke = rig.geminiCalls.filter((c) => c.kind === 'speak').pop();
+  const persona = spoke?.system.split('## מה שקרה עכשיו')[0] ?? '';
+
+  check(
+    'the tone note asks for one item by name',
+    (spoke?.system ?? '').includes('פריט אחד בלבד'),
+    'this test is meaningless if the items ladder was not the one selected',
+  );
+  check(
+    'and the items are actually in the prompt it is pointing at',
+    /item:\d+/.test(persona),
+    persona.slice(-500),
+  );
+  check(
+    'the one he already did is marked done',
+    new RegExp(`✓ "${items[0].title}"`).test(persona),
+    persona.slice(-500),
+  );
+  check(
+    'and the two still open are not',
+    new RegExp(`☐ "${items[1].title}"`).test(persona) && new RegExp(`☐ "${items[2].title}"`).test(persona),
+    persona.slice(-500),
+  );
+  rig.restore();
+}
+
 await captureThenAnswer();
 await anOpenQuestionDoesNotEatANewRequest();
 await inboxIsVisibleToTheRouter();
@@ -882,4 +961,5 @@ await noNagWhileTalking();
 await elapsedOnlyWhenChasing();
 await quotingHimBackIsNotInvention();
 await inventionIsStillCaught();
+await theNagSeesWhichErrandsAreDone();
 done();

@@ -169,6 +169,10 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     reminders: ctx.reminders,
     open: ctx.open,
     goals: ctx.goals,
+    // Passed straight through so speak() can render the ✓/☐ state in
+    // openSummary. The router has always been shown these (brain.openSummary);
+    // the persona was not — while being told to name one of them.
+    items: ctx.items,
     settings: ctx.settings,
     stats: ctx.stats,
     nowLabel: ctx.nowLabel,

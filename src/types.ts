@@ -540,6 +540,20 @@ export interface Facts {
   reminders: Reminder[];
   open: Instance[];
   goals: Goal[];
+  /**
+   * The errands under the reminders behind `open`, keyed by reminder_id.
+   *
+   * Carried so `speak()` can rebuild a Context that renders them. It could
+   * not: `Facts` had no such field, so `openSummary` in the persona prompt
+   * showed instances with no items under them, while `NAG_LADDER_ITEMS` was
+   * telling the model to "ask for one item from the list above, by name".
+   *
+   * It half-worked, which is why it lasted — items are a comma-split of the
+   * title and the title IS shown, so the model could read the parts off it.
+   * What it could not read is the ✓/☐ state, leaving the level-1 nag free to
+   * demand the errand he had just reported doing.
+   */
+  items?: Map<number, ReminderItem[]>;
   settings: Settings;
   stats: Stats;
   nowLabel: string;

@@ -453,6 +453,9 @@ export async function speak(
   const ctx: Context = {
     settings: facts.settings, stats: facts.stats, reminders: facts.reminders,
     goals: facts.goals, open: facts.open, nowLabel: facts.nowLabel,
+    // Without this, openSummary renders instances with no errands under them —
+    // while NAG_LADDER_ITEMS is telling the model to name one of them by name.
+    items: facts.items,
   };
   const system =
     buildSystemPrompt(
