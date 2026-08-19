@@ -226,6 +226,7 @@ section(
     { kind: 'checkin_goal', id: 3, title: 'לפתוח תיק מסחר', why: null, lastProgress: null, lastProgressAt: null, lastCheckinAt: null },
     { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
     { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
+    { kind: 'pattern_kept' },
     { kind: 'distress', text: 'אני שבור' },
     { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
     { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },

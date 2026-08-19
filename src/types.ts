@@ -332,6 +332,21 @@ export type Effect =
   | { kind: 'pattern_pushed'; id: number; title: string; snoozes: number; fires: number; at?: number }
   | { kind: 'pattern_failing'; id: number; title: string; failures: number; fires: number }
   /**
+   * He tapped "leave it as it is" on one of the two offers above.
+   *
+   * Carries nothing, writes nothing, and sits outside WROTE — the cooldown was
+   * already recorded when the question was ASKED, so a decline has no work to
+   * do beyond being acknowledged.
+   *
+   * It exists as its own kind rather than reusing `nothing: 'chat'`, which is
+   * what the button used to send: voice.ts words that as the bare "נו?" — the
+   * bot's own nag opener — so a man who had just declined an unsolicited
+   * question got nagged for it. CLAUDE.md says outright that "נו?" is not
+   * available as a fallback, and that route was legitimate enough that nothing
+   * flagged it.
+   */
+  | { kind: 'pattern_kept' }
+  /**
    * The new reminder landed in a part of a day that is already busy.
    *
    * An observation, never a refusal: he is allowed a crowded morning, and a

@@ -93,6 +93,11 @@ function one(e: Effect, tz: string): string {
       // about him, it is a reminder that is wrong, and an accountability bot
       // that cannot say so is just noise with a streak counter.
       return `"${e.title}" נגמרה בלי שנסגרה ${e.failures} פעמים, ואף פעם לא נסגרה. לשנות שעה, או למחוק?`;
+    // A decline, acknowledged and dropped. Nothing was written, so no verb
+    // here may claim otherwise — and it must not be the bare "נו?", which is
+    // what this used to send and which reads as being nagged for saying no.
+    case 'pattern_kept':
+      return 'אוקיי, משאיר.';
     case 'friend_unknown': {
       // Names BOTH spellings on purpose. The usual cause is a script mismatch
       // he cannot see — the book holds the Telegram profile name ("amnon"),

@@ -100,7 +100,7 @@ import * as db from '../src/db';
 import { renderBaseline } from '../src/voice';
 import { buttonsFor, decode, encode } from '../src/buttons';
 import { buildFacts } from '../src/facts';
-import { createRig, withNow, type Rig } from './harness';
+import { check, createRig, eq, withNow, type Rig } from './harness';
 
 const HIM = '12345';
 const TZ = 'Asia/Jerusalem';
@@ -248,7 +248,100 @@ async function ladderHonesty(): Promise<void> {
   );
 }
 
+// --------------------------------------------------------------------------
+section('a tap that declines, and a tap that deletes');
+
+/** The suffix settleButtons appended — "✓" if the tap did something, "—" if not. */
+function settleMark(rig: Rig): string {
+  const edit = rig.sent.filter((s) => s.method === 'editMessageText').pop();
+  return (edit?.text ?? '').trim().split('\n').pop() ?? '';
+}
+
+async function tap(rig: Rig, data: string): Promise<void> {
+  const pending: Promise<unknown>[] = [];
+  const ctx: any = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {} };
+  await worker.fetch(
+    new Request('https://x/tg', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
+      },
+      body: JSON.stringify({
+        callback_query: {
+          id: 'cb1',
+          from: { id: Number(HIM) },
+          message: { message_id: 555, chat: { id: Number(HIM) }, text: 'שאלה' },
+          data,
+        },
+      }),
+    }),
+    rig.env,
+    ctx,
+  );
+  await Promise.all(pending);
+}
+
+/**
+ * Both branches lived inside handleCallback's switch and both declared their
+ * OWN `const effects`, shadowing the array the tail reads. The tail therefore
+ * saw an empty list and settled the keyboard with the "nothing happened"
+ * marker — on `rdrop`, which had just deleted a reminder.
+ *
+ * And `keep` answered with {nothing, why:'chat'}, which voice.ts words as the
+ * bare "נו?" — the bot's own nag opener, handed back to a man who had just
+ * tapped "leave it as it is". CLAUDE.md is explicit that "נו?" is not
+ * available as a fallback; this reached it through a route that is
+ * technically legitimate, which is why nothing caught it.
+ */
+async function declineAndDrop(): Promise<void> {
+  const seed = (rig: Rig, now: number) =>
+    rig.db
+      .prepare(
+        "INSERT INTO reminders (chat_id, title, notes, schedule, tz, requires_proof, proof_type," +
+          " nag_interval_min, max_nags, next_fire_at, event_at, status, active, created_at)" +
+          " VALUES (?, 'לרוץ', NULL, ?, ?, 0, 'any', 20, 3, ?, NULL, 'scheduled', 1, ?)",
+      )
+      .run(HIM, JSON.stringify({ type: 'daily', time: '08:00' }), TZ, now + 3_600_000, now);
+
+  {
+    const rig = createRig({ tz: TZ });
+    const now = Date.UTC(2026, 7, 17, 6, 0, 0);
+    await withNow(now, async () => {
+      seed(rig, now);
+      await tap(rig, encode({ t: 'rdrop', reminder: 1 }));
+
+      const row = rig.db.prepare('SELECT status FROM reminders WHERE id = 1').get() as any;
+      eq('the drop actually deletes the reminder', row?.status, 'cancelled');
+      eq('and the keyboard says so, rather than "nothing happened"', settleMark(rig), '✓');
+    });
+    rig.restore();
+  }
+  {
+    const rig = createRig({ tz: TZ });
+    const now = Date.UTC(2026, 7, 17, 6, 0, 0);
+    await withNow(now, async () => {
+      seed(rig, now);
+      await tap(rig, encode({ t: 'keep' }));
+
+      const row = rig.db.prepare('SELECT status, next_fire_at FROM reminders WHERE id = 1').get() as any;
+      eq('declining writes nothing at all', row?.status, 'scheduled');
+      check('and above all does not unschedule it', row?.next_fire_at !== null, JSON.stringify(row));
+
+      const replies = rig.sent.filter((x) => x.method === 'sendMessage').map((x) => x.text ?? '');
+      check(
+        'declining is acknowledged, never answered with the nag opener',
+        replies.length > 0 && !replies.some((t) => t.trim() === 'נו?'),
+        JSON.stringify(replies),
+      );
+      eq('and the keyboard says the tap registered', settleMark(rig), '✓');
+    });
+    rig.restore();
+  }
+}
+
 await endToEnd();
+await declineAndDrop();
 await crowding();
 await ladderHonesty();
 done();

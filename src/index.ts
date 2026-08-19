@@ -699,8 +699,22 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       // silence, which this bot is otherwise inclined to read as avoidance.
       // The cooldown was already recorded when the question was asked.
       case 'keep': {
-        await sendOutcome(env, chatId, await buildContext(env, chatId),
-          [{ kind: 'nothing', why: 'chat', userText: '' }], undefined, 'none', undefined, 'replying');
+        // Pushed onto the SHARED array, not sent from in here. Both this
+        // branch and `rdrop` used to declare their own `const effects`,
+        // shadowing the one the tail reads — so the tail saw an empty list and
+        // settled the keyboard with "—", the marker that means nothing
+        // happened, on a tap that had just deleted a reminder.
+        //
+        // And this used to answer `{nothing, why:'chat'}`, which voice.ts
+        // words as the bare "נו?" — the bot's own nag opener, handed back to a
+        // man who had just tapped "leave it as it is". CLAUDE.md is explicit
+        // that "נו?" is not available as a fallback, and this reached it
+        // through a route that is technically legitimate, which is exactly why
+        // nothing caught it.
+        //
+        // `pattern_kept` writes nothing and is deliberately outside WROTE. The
+        // cooldown was already recorded when the question was asked.
+        effects.push({ kind: 'pattern_kept' });
         break;
       }
 
@@ -708,11 +722,16 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       // through the same chat-scoped delete every other path uses, so a
       // replayed or forged payload cannot reach another chat's row.
       case 'rdrop': {
-        const ctx2 = await buildContext(env, chatId);
-        const effects = await applyIntent(
-          env, chatId, ctx2, { action: 'delete', target_id: cb.reminder }, '',
+        // Into the shared array, so the tail settles the keyboard with "✓" and
+        // sends once. This used to shadow `effects` with a local const and
+        // send from in here, which left the outer array empty — the tap
+        // deleted the reminder and the message said nothing had happened.
+        effects.push(
+          ...(await applyIntent(
+            env, chatId, await buildContext(env, chatId),
+            { action: 'delete', target_id: cb.reminder }, '',
+          )),
         );
-        await sendOutcome(env, chatId, ctx2, effects, undefined, 'none', undefined, 'replying');
         break;
       }
 
