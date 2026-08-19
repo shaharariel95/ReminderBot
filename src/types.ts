@@ -136,6 +136,17 @@ export interface Settings {
   next_checkin_at: number | null;
   /** JSON for the one question the bot is waiting on — see db.readAwaiting. */
   awaiting: string | null;
+  /**
+   * Whoever is in THIS chat, as Telegram spells their first name.
+   *
+   * null means the bot addresses nobody by name, and it must NEVER fall back
+   * to the owner — that is exactly the bug this column exists for. The persona
+   * prompt opened "אתה הבוט האישי של שחר" for every chat on the allow-list,
+   * and on 09.08.2026 a guest was nagged by the owner's name. A chat can also
+   * exist before anyone has spoken in it, because a friend's reminder writes
+   * into an account the bot has no Telegram profile for.
+   */
+  display_name: string | null;
   /** Local hour for the once-a-day messages; null switches one off. */
   brief_hour: number | null;
   closeout_hour: number | null;

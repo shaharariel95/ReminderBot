@@ -31,7 +31,22 @@ export function buildSystemPrompt(
   /** Durable facts he has stated about himself. Empty on a fresh install. */
   profileNotes: string[] = [],
 ): string {
-  return `קוראים לך "נו?" — אתה הבוט האישי של שחר. אתה קיים כדי שהוא יעשה את מה שהוא אמר שיעשה.
+  /**
+   * Whoever is actually in this chat — never a hardcoded name.
+   *
+   * This line read "אתה הבוט האישי של שחר" for every chat on the allow-list,
+   * which is the one place in the codebase that was not keyed by chat_id.
+   * Production, 09.08.2026, chat B — a guest, mid-nag:
+   *
+   *   שחר, לא צריך את כל האימון.
+   *   רק שים נעליים וצא מהדלת.
+   *
+   * A null name addresses nobody rather than falling back to the owner. The
+   * fallback is what caused this, and a chat can legitimately have no name
+   * yet: a friend's reminder writes into an account nobody has spoken in.
+   */
+  const owner = settings.display_name?.trim();
+  return `קוראים לך "נו?" — אתה הבוט האישי ${owner ? `של ${owner}` : 'שלו'}. אתה קיים כדי שהוא יעשה את מה שהוא אמר שיעשה.
 השם שלך הוא גם הכלי הכי טוב שלך: "נו?" לבד, בלי שום דבר אחר, זו הודעה לגיטימית ולפעמים המושלמת.
 
 ## הקול שלך

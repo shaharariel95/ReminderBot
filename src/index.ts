@@ -252,6 +252,24 @@ async function respondToOwner(
 
   // Any inbound message ends a chill period. If he is talking, he is available.
   const ctx = await buildContext(env, chatId);
+
+  // Learn what Telegram calls whoever is in this chat, so the persona can
+  // address HIM rather than the owner. Written only when it actually changed,
+  // so an ordinary message costs no write; refreshed rather than written once,
+  // so a rename in Telegram reaches the prompt without a command.
+  //
+  // This is the only place the raw Telegram sender exists, and it is on the
+  // inbound path on purpose — the cron has no message to read a name from,
+  // which is exactly why the name has to be stored rather than passed through.
+  // Best-effort: failing to learn a name must never cost him the turn, and the
+  // prompt degrades to addressing nobody, never to addressing the owner.
+  const senderName: string | undefined = msg.from?.first_name;
+  if (senderName && senderName !== ctx.settings.display_name) {
+    await db.setDisplayName(env, chatId, senderName).catch((e) =>
+      console.error('setDisplayName', e),
+    );
+    ctx.settings.display_name = senderName.slice(0, 60);
+  }
   if (ctx.settings.muted_until && ctx.settings.muted_until > Date.now()) {
     await db.setMuted(env, chatId, null);
     ctx.settings.muted_until = null;

@@ -25,6 +25,11 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
       closeout_hour: row.closeout_hour ?? null,
       last_brief_on: row.last_brief_on ?? null,
       last_closeout_on: row.last_closeout_on ?? null,
+      // undefined on a database that has not run migrations/016. `?? null`
+      // degrades to "address nobody by name", which is the safe direction —
+      // the unsafe one is the owner's name in a stranger's chat, which is the
+      // bug the column exists for.
+      display_name: row.display_name ?? null,
     };
   }
   const fresh: Settings = {
@@ -39,6 +44,7 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
     quiet_end_hour: 8,
     next_checkin_at: null,
     awaiting: null,
+    display_name: null,
     brief_hour: 8,
     closeout_hour: 21,
     last_brief_on: null,
@@ -48,6 +54,32 @@ export async function getSettings(env: Env, chatId: string): Promise<Settings> {
     .bind(chatId, fresh.tz)
     .run();
   return fresh;
+}
+
+/**
+ * Remember what Telegram calls whoever is in this chat.
+ *
+ * Called only when the name has actually CHANGED, so an ordinary message costs
+ * no write — the caller compares against the settings row it already loaded.
+ * Refreshing on change rather than writing once matters: a rename in Telegram
+ * should reach the prompt without anybody running a command, and the whole
+ * point of the column is that the bot addresses the person who is there.
+ *
+ * Best-effort by contract. Failing to learn a name must never cost a turn; the
+ * prompt simply addresses nobody, which is what it does for a chat nobody has
+ * spoken in yet.
+ */
+export async function setDisplayName(env: Env, chatId: string, name: string): Promise<void> {
+  // An upsert rather than a bare UPDATE. Today's only caller runs after
+  // buildContext, so the row is always there — but a plain UPDATE against a
+  // missing row succeeds while changing nothing, and a name that silently
+  // fails to stick is the same class of bug as the one this column fixes.
+  await env.DB.prepare(
+    `INSERT INTO settings (chat_id, tz, display_name) VALUES (?, ?, ?)
+       ON CONFLICT(chat_id) DO UPDATE SET display_name = excluded.display_name`,
+  )
+    .bind(chatId, env.DEFAULT_TZ ?? 'Asia/Jerusalem', name.slice(0, 60))
+    .run();
 }
 
 export async function setQuietHours(

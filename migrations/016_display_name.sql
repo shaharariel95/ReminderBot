@@ -1,0 +1,22 @@
+-- Who the bot is actually talking to.
+--
+-- Everything user-facing in this codebase is keyed by chat_id — reminders,
+-- instances, goals, usage, friends, quota. The persona prompt was the one
+-- place that was not: it opened `אתה הבוט האישי של שחר`, hardcoded, for every
+-- chat on the allow-list.
+--
+-- Production, 09.08.2026, chat B — a guest, not שחר, mid-nag:
+--
+--   שחר, לא צריך את כל האימון.
+--   רק שים נעליים וצא מהדלת.
+--
+-- Nullable, and null means "address nobody by name" rather than "fall back to
+-- the owner". A chat can exist before anyone has spoken in it — a friend's
+-- reminder writes into an account the bot has no Telegram profile for — and
+-- guessing there puts somebody else's name in a stranger's chat, which is the
+-- same refusal db.matchFriend already makes.
+--
+-- Captured from `message.from.first_name`, which is the only place the raw
+-- Telegram sender exists, and refreshed when it changes: a rename in Telegram
+-- should reach the prompt without anybody running a command.
+ALTER TABLE settings ADD COLUMN display_name TEXT;

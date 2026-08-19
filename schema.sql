@@ -113,7 +113,11 @@ CREATE TABLE settings (
   -- JSON, and it carries its own timestamp because the slot must expire: a
   -- question left open forever means a bare "15:00" typed two hours later,
   -- about something else, silently retimes whatever was last asked about.
-  awaiting         TEXT
+  awaiting         TEXT,
+  -- Whoever is actually in this chat, from message.from.first_name. NULL means
+  -- address nobody by name — never fall back to the owner, whose name used to
+  -- be hardcoded into the persona prompt for every chat. See migrations/016.
+  display_name     TEXT
 );
 
 -- One row per minute per model. The free tier limits requests per MINUTE, not
