@@ -388,6 +388,25 @@ fut('לקנות חלב', null);
 // Already past this week rolls forward rather than offering yesterday.
 fut('בבוקר של יום ראשון', '2026-08-16T09:00');
 
+// An explicit clock, still ahead of us, with no day word at all.
+//
+// Production, 09.08.2026, chat B — his first two messages ever:
+//   "יש לי אימון אגרוף תאילנדי בשעה 18:00 ויש לי נסיעה של 35 דקות..."
+//   "יש לי איגרוף תאילנדי בשעה 18:00"
+// Both answered "נו?". offerAppointment could not help, because a day had to
+// be PINNED and he had named only an hour. In Hebrew an hour with no day, and
+// still ahead of now, is today — that is the commonest way anyone says it.
+fut('יש לי איגרוף תאילנדי בשעה 18:00', '2026-08-10T18:00');
+fut('יש לי פגישה ב-14:30', '2026-08-10T14:30');
+// ...but ONLY today. An hour already gone is a story, not a plan, and rolling
+// it to tomorrow would offer a reminder for a day he never mentioned.
+fut('יש לי איגרוף תאילנדי בשעה 18:00', null, wallToUtc(2026, 8, 10, 20, 0, TZ));
+// A bare PERIOD with no day still refuses — tonight? tomorrow? Nothing here
+// says, and PERIOD_HOUR is a convention, not a reading.
+fut('יש לי אימון בערב', null);
+fut('נדבר בבוקר', null);
+
+
 // ---------------------------------------------------------------------------
 // A reminder addressed to somebody else must never become his own.
 //

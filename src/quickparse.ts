@@ -1,6 +1,6 @@
 import type { Intent } from './types';
 import { UNTITLED_TITLE } from './types';
-import { wallParts, wallString, wallToUtc } from './time';
+import { localDateKey, wallParts, wallString, wallToUtc } from './time';
 
 /**
  * Deterministic fast path for the common shapes of "remind me to X at Y".
@@ -817,9 +817,36 @@ const PERIOD_HOUR: [RegExp, number][] = [
  */
 export function findFutureInstant(text: string, nowMs: number, tz: string): number | null {
   const day = matchDay(text);
-  if (!day) return null;
-
   const clock = matchClock(text);
+
+  if (!day) {
+    /**
+     * No day word — but an explicit clock that is still ahead of us today.
+     *
+     * This used to refuse, and it cost the commonest phrasing there is.
+     * Production, 09.08.2026, chat B — his first two messages ever:
+     *
+     *   יש לי אימון אגרוף תאילנדי בשעה 18:00 ויש לי נסיעה של 35 דקות...
+     *   יש לי איגרוף תאילנדי בשעה 18:00
+     *
+     * Both were answered "נו?". He got a reminder only on the third try, once
+     * he had phrased it the bot's way, and the transcript never recovered.
+     *
+     * In Hebrew an hour with no day, still ahead of now, is today. Nothing is
+     * assumed here: the clock is explicit and the day is the one we are in.
+     *
+     * The restraint is that it must land TODAY. `resolve` rolls a past hour
+     * forward to tomorrow, and tomorrow is a day he never mentioned — "יש לי
+     * אימון ב-18:00" said at 20:00 is a story about this evening, not a plan
+     * for the next one. A bare PERIOD still refuses below, because "בערב"
+     * really is ambiguous and PERIOD_HOUR is a convention rather than a
+     * reading.
+     */
+    if (!clock) return null;
+    const at = resolve(clock, null, nowMs, tz)?.ts ?? null;
+    return at !== null && localDateKey(at, tz) === localDateKey(nowMs, tz) ? at : null;
+  }
+
   if (clock) return resolve(clock, day, nowMs, tz)?.ts ?? null;
 
   const period = PERIOD_HOUR.find(([re]) => re.test(text));
