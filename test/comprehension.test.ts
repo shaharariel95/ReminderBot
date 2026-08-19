@@ -123,6 +123,58 @@ async function captureThenAnswer(): Promise<void> {
   rig.restore();
 }
 
+/**
+ * An open "מתי?" must not swallow a request that names its own SUBJECT.
+ *
+ * The `{k:'time'}` branch runs before the router and before quickparse, so
+ * whatever `parseAnswerTime` accepts is retimed without anything else getting
+ * a say. What keeps that safe is its one strict rule: the WHOLE message has to
+ * be consumed by the time phrase. "תזכיר לי ב-15:00 לקנות חלב" leaves
+ * "לקנות חלב" behind, so it falls through and becomes its own reminder.
+ *
+ * Worth stating what is deliberately NOT guarded here, because it looks like
+ * the same bug and is not. `cleanTitle` strips "תזכיר לי", so a SUBJECTLESS
+ * "תזכיר לי ב-15:00" does consume the slot and retimes the row the bot just
+ * asked about. That is correct: he was asked "מתי?" about a specific errand
+ * and answered with an hour and no new subject. Routing it away from the slot
+ * would create a second reminder titled "תזכורת" — which is precisely the
+ * #35/#36/#37 bug this whole mechanism exists to prevent.
+ *
+ * The `{k:'title'}` branch beside it DOES gate on `asksForNewReminder`, and
+ * the asymmetry is deliberate rather than an oversight: there, the fallback is
+ * renaming an existing reminder to the text of a new request, which loses
+ * both. Here the fallback is an hour on the row he was just asked about.
+ */
+async function anOpenQuestionDoesNotEatANewRequest(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  await withNow(NOW, async () => {
+    rig.routerQueue.push({ actions: [{ action: 'create_reminder', title: 'לקבוע טיפול וטסט' }] });
+    rig.speakQueue.push('תפסתי. מתי?');
+    await say(rig, 'תזכיר לי לקבוע טיפול וטסט');
+
+    const captured = reminderRows(rig);
+    eq('the capture is waiting for an hour', captured.length, 1);
+    const askedAbout = captured[0]!.id;
+
+    // Not an answer. A NEW request, that happens to name an hour — and the
+    // router is the only thing equipped to tell those apart.
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'לקנות חלב', schedule_type: 'once', once_at: '2026-08-20T15:00' }],
+    });
+    rig.speakQueue.push('קבעתי.');
+    await say(rig, 'תזכיר לי ב-15:00 לקנות חלב');
+
+    const after = reminderRows(rig);
+    eq('a new request makes a new row', after.length, 2);
+    eq(
+      'and the row the bot was waiting on is untouched — still in the inbox',
+      after.find((r) => r.id === askedAbout)?.status,
+      'inbox',
+    );
+  });
+  rig.restore();
+}
+
 // --------------------------------------------------------------------------
 section('the router can see what the bot already captured');
 
@@ -724,6 +776,7 @@ async function titleUsesOnlyHisScript(): Promise<void> {
 
 await titleUsesOnlyHisScript();
 await captureThenAnswer();
+await anOpenQuestionDoesNotEatANewRequest();
 await inboxIsVisibleToTheRouter();
 await createReadsTheHourInTheSentence();
 await untitledCreateAsksAndRemembers();
