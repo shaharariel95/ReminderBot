@@ -110,12 +110,76 @@ export function splitIntoItems(title: string): string[] {
  * its email, because the Latin is his. Only a script absent from the source
  * is removed, and if that empties the title the caller's own fallback applies.
  */
+/**
+ * Characters that structure a DOCUMENT rather than name an errand.
+ *
+ * A person writing a task in Hebrew does not reach for these; a model spilling
+ * its own scratch work does. The set is deliberately small and contains no
+ * ordinary punctuation — a comma, a period, a hyphen and a plus are all things
+ * he really types ("ללכת לקניות - אדויל, נובימול", "טיפול + טסט") and cutting
+ * a title at one of those would lose half an errand he wrote himself.
+ */
+const FILLER = /[_=~^*|\\/<>[\]{}]/;
+/** One underscore is already a tell; everything else needs a run of two. */
+const FILLER_RUN = /_|[=~^*|\\/<>[\]{}]{2,}/;
+
+/**
+ * A title the model returned, with anything he never typed taken back out.
+ *
+ * Two rules, both learned in production, both about the same thing: the router
+ * may re-word him but may not put characters in his mouth.
+ *
+ * **Script.** On 17.08.2026 "תזכיר לאמנון לדבר עם שחר עוד שתי דקות" came back
+ * titled "לדבר עם שחרy", then "לדבר עם שחרyil" — hex 79 69 6C, stray Latin on
+ * otherwise correct Hebrew, from a message with no Latin in it at all.
+ *
+ * **Filler.** On 18.08.2026 "...תבדוק מה המצב היום בערב" came back as
+ *
+ *   תבדוק מה המצב היום בערב//______________18____19_00_____פורש____2026_08_1820_00___
+ *
+ * — the real title, then a separator, then the model's own scratch: once_at
+ * and event_at fragments written as prose. That is the failure mode that
+ * killed the `why` field (see brain.ts), relocated into `title` now that `why`
+ * is gone from the schema. The script rule could not see it, because
+ * underscores and digits are not `[A-Za-z]`.
+ *
+ * So the spill is CUT rather than filtered: everything from the first filler
+ * run onwards goes. Filtering would have left "תבדוק מה המצב היום בערב 18 19
+ * 00 פורש 2026 08 1820 00", which is no better a claim about what he asked
+ * for. The real title is always in front of the separator, because that is
+ * what a separator is.
+ *
+ * Nothing downstream can do this job. validate.ts compares the REPLY against
+ * the EFFECT, so a title corrupted before the effect exists is reported
+ * faithfully, quoted back to him, and read out every time it fires. And it can
+ * hide for hours: every message that quoted #53 went through speak(), and the
+ * persona dropped the junk each time. It surfaced exactly once, on the BUTTON
+ * close — the one path that never calls the model.
+ *
+ * Both rules are narrow in the same direction and for the same reason. Only
+ * what is ABSENT from his message is removed, so "תזכיר לי לשלוח email" keeps
+ * its email and "לשלם ביט // מזומן" keeps its slashes. Rewording is the
+ * router's job and survives untouched; dropping "תזכיר לאמנון" from the front
+ * is exactly right. Deliberately NOT a length bound: "כן" confirming an offer
+ * is a real production shape, and a two-character message is not licence to
+ * cut the title it confirms.
+ */
 export function titleFromHisWords(title: string, userText: string): string {
   // Nothing to compare against: button and cron paths have no message.
   if (!userText.trim()) return title;
-  if (/[A-Za-z]/.test(userText)) return title;
-  if (!/[A-Za-z]/.test(title)) return title;
-  return title.replace(/[A-Za-z]+/g, '').replace(/\s{2,}/g, ' ').trim();
+
+  let out = title;
+  // Filler first. It cuts a TAIL, so running it before the script filter keeps
+  // the two independent — otherwise stripping Latin out of the spill could
+  // erase the very run this needs to find.
+  if (!FILLER.test(userText)) {
+    const spill = FILLER_RUN.exec(out);
+    if (spill) out = out.slice(0, spill.index);
+  }
+  if (!/[A-Za-z]/.test(userText) && /[A-Za-z]/.test(out)) {
+    out = out.replace(/[A-Za-z]+/g, '');
+  }
+  return out.replace(/\s{2,}/g, ' ').trim();
 }
 
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {

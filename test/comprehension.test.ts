@@ -664,6 +664,62 @@ async function titleUsesOnlyHisScript(): Promise<void> {
   // Button and cron paths have no message to compare against, so they are
   // left alone rather than being silently emptied.
   eq('no source text means no judgement', titleFromHisWords('anything', ''), 'anything');
+
+  /**
+   * Production, 18.08.2026, chat A — reminder #53, straight out of D1:
+   *
+   *   תבדוק מה המצב היום בערב//______________18____19_00_____פורש____2026_08_1820_00___
+   *
+   * The `events` row proves it was corrupted at CREATION, three seconds after
+   * his message. Those are once_at/event_at fragments written as prose — the
+   * same failure mode that killed the `why` field, relocated into `title` now
+   * that `why` is gone from the schema.
+   *
+   * The Latin rule above could not see it: underscores and digits are not
+   * `[A-Za-z]`. And nothing downstream could either — every message that
+   * quoted it went through speak(), and the persona silently dropped the junk.
+   * It surfaced exactly once, on the BUTTON close, which is the one path that
+   * never calls the model.
+   */
+  eq(
+    'the production spill is cut at the separator he never typed',
+    titleFromHisWords(
+      'תבדוק מה המצב היום בערב//__________18____19_00_______פורש___________2026_08_1820_00______',
+      'טוב, בדקתי. ויש 2 בעיות. אחת שהדברים לא עובדים. והשנייה שלא בא לי לתקן אותם. תבדוק מה המצב היום בערב',
+    ),
+    'תבדוק מה המצב היום בערב',
+  );
+  eq(
+    'a bare underscore run is enough — it never survives a human typing an errand',
+    titleFromHisWords('לקנות חלב ___ 2026_08_20', 'תזכיר לי לקנות חלב'),
+    'לקנות חלב',
+  );
+  // The same restraint the Latin rule has. Punctuation HE used is his, and a
+  // title is cut only at filler he did not type — otherwise a perfectly good
+  // errand loses half of itself for containing a slash.
+  eq(
+    'a separator he actually typed is left alone',
+    titleFromHisWords('לשלם ביט // מזומן', 'תזכיר לי לשלם ביט // מזומן'),
+    'לשלם ביט // מזומן',
+  );
+  eq(
+    'and ordinary Hebrew punctuation is not filler',
+    titleFromHisWords('ללכת לקניות - אדויל, נובימול וגלולות', 'תזכיר ללכת לקניות - אדויל, נובימול וגלולות מחר ב15:30'),
+    'ללכת לקניות - אדויל, נובימול וגלולות',
+  );
+  eq(
+    'nor is a plus between two words',
+    titleFromHisWords('טיפול + טסט', 'תזכיר לי טיפול + טסט מחר'),
+    'טיפול + טסט',
+  );
+  // A confirmation carries almost no text of its own — "כן" answering an offer
+  // is a real production shape (errors id 9). The guard must not read a short
+  // message as licence to cut a legitimate title down.
+  eq(
+    'a one-word confirmation does not shrink the title it confirms',
+    titleFromHisWords('טיפול וטסט', 'כן'),
+    'טיפול וטסט',
+  );
 }
 
 await titleUsesOnlyHisScript();
