@@ -775,6 +775,100 @@ async function titleUsesOnlyHisScript(): Promise<void> {
 }
 
 await titleUsesOnlyHisScript();
+// --------------------------------------------------------------------------
+section('the model may quote the conversation it was shown');
+
+/**
+ * CLAUDE.md states the rule: "If you add a fact the model is shown, sweep it
+ * into facts.ts too, or the validator will discard truthful rewrites for
+ * repeating what the prompt handed them. That failure mode is silent."
+ *
+ * speak() is handed the last eight turns of conversation, and they were never
+ * swept. So the model quoting HIS OWN WORDS back — the most natural thing a
+ * rewrite does — scored as an invented task and the whole rewrite was binned.
+ *
+ * Production, 19.08.2026, chat A: `invented task "לשחרר"` on an
+ * evening_closeout, minutes after he typed "שחרר אין פה באמת משימה. נקסט".
+ * facts.ts sweeps `userText` for the `nothing` kind only, and that was a
+ * closeout. Two of the other six rejections on record are the same shape.
+ */
+async function quotingHimBackIsNotInvention(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  await withNow(NOW, async () => {
+    // A reminder, fired, so there is something open to nag about.
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'לרוץ', schedule_type: 'once', in_minutes: 1 }],
+    });
+    rig.speakQueue.push('קבעתי.');
+    await say(rig, 'תזכיר לי עוד דקה לרוץ');
+  });
+
+  await withNow(NOW + 90_000, async () => {
+    rig.speakQueue.push('נו? לרוץ.');
+    await runCron(rig);
+  });
+
+  // His own words, in the conversation the persona is about to be shown.
+  await withNow(NOW + 120_000, async () => {
+    rig.routerQueue.push({ actions: [{ action: 'chat' }] });
+    rig.speakQueue.push('בטח.');
+    await say(rig, 'שחרר אין פה באמת משימה. נקסט');
+  });
+
+  // The nag, with the persona quoting him back verbatim.
+  const quoted = 'אמרת "אין פה באמת משימה" ובכל זאת היא פתוחה.';
+  await withNow(NOW + 45 * 60_000, async () => {
+    rig.speakQueue.push(quoted);
+    await runCron(rig);
+  });
+
+  const rejections = rig.db.prepare('SELECT reason FROM rejections').all() as any[];
+  check(
+    'quoting his own message back is not scored as an invented task',
+    rejections.length === 0,
+    `rejected: ${JSON.stringify(rejections)}`,
+  );
+  const texts = rig.sent.filter((s) => s.method === 'sendMessage').map((s) => s.text ?? '');
+  check(
+    'so the rewrite actually ships instead of the flat baseline',
+    texts.some((t) => t.includes('אין פה באמת משימה')),
+    JSON.stringify(texts.slice(-3)),
+  );
+  rig.restore();
+}
+
+/**
+ * And the rule keeps its teeth. A quote the model was shown NOWHERE — not in
+ * the effects, not in the reminders, not in the conversation — is still an
+ * invented task, and the whole rewrite is still discarded for it.
+ */
+async function inventionIsStillCaught(): Promise<void> {
+  const rig = createRig({ tz: TZ });
+  await withNow(NOW, async () => {
+    rig.routerQueue.push({
+      actions: [{ action: 'create_reminder', title: 'לרוץ', schedule_type: 'once', in_minutes: 1 }],
+    });
+    rig.speakQueue.push('קבעתי.');
+    await say(rig, 'תזכיר לי עוד דקה לרוץ');
+  });
+  await withNow(NOW + 90_000, async () => {
+    rig.speakQueue.push('נו? לרוץ.');
+    await runCron(rig);
+  });
+  await withNow(NOW + 45 * 60_000, async () => {
+    rig.speakQueue.push('ומה עם "לכתוב את הדוח השנתי"? גם זה פתוח.');
+    await runCron(rig);
+  });
+
+  const rejections = rig.db.prepare('SELECT reason FROM rejections').all() as any[];
+  check(
+    'a task nobody ever mentioned is still rejected',
+    rejections.some((r) => String(r.reason).includes('לכתוב את הדוח השנתי')),
+    `rejected: ${JSON.stringify(rejections)}`,
+  );
+  rig.restore();
+}
+
 await captureThenAnswer();
 await anOpenQuestionDoesNotEatANewRequest();
 await inboxIsVisibleToTheRouter();
@@ -786,4 +880,6 @@ await bareperiodStillRefuses();
 await eventTimeIsSeparateFromRingTime();
 await noNagWhileTalking();
 await elapsedOnlyWhenChasing();
+await quotingHimBackIsNotInvention();
+await inventionIsStillCaught();
 done();

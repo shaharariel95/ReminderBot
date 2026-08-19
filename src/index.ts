@@ -1050,10 +1050,31 @@ async function sendOutcome(
       // every button tap — do not pay for it. The notes go into `quotable` as
       // well as `profile`: the model is shown them, so it may truthfully quote
       // one back, and the validator has to know that is allowed.
+      // The conversation goes into `quotable` for the same reason the notes
+      // do, and CLAUDE.md states the rule outright: anything the model is
+      // SHOWN has to be swept, or the validator discards truthful rewrites for
+      // repeating what the prompt handed them — silently, as a rejection count
+      // in /diag rather than an error.
+      //
+      // `recent` is passed straight to speak() four lines down, so these are
+      // literally the turns the model just read. Quoting him back is the most
+      // natural thing a rewrite does, and it was scored as an invented task:
+      // production 19.08.2026, chat A, `invented task "לשחרר"` on an
+      // evening_closeout, minutes after he typed "שחרר אין פה באמת משימה".
+      // facts.ts sweeps `userText` for the `nothing` kind alone, and that was
+      // a closeout. Two more of the seven rejections on record are this shape.
+      //
+      // Rule 3 keeps its teeth: `quotable` is matched one-directionally, so a
+      // quote only passes when some message actually CONTAINS it. A task
+      // nobody ever mentioned is still rejected.
       const spoken: Facts = {
         ...facts,
         profile: notes.map((n) => n.note),
-        quotable: [...facts.quotable, ...notes.map((n) => n.note)],
+        quotable: [
+          ...facts.quotable,
+          ...notes.map((n) => n.note),
+          ...recent.map((m) => m.text),
+        ],
       };
       const dressed = await withTyping(env, chatId, () =>
         speak(env, spoken, recent, baseline, toneNote, stance),
