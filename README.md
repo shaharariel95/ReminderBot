@@ -6,14 +6,45 @@
 A private Telegram bot that reminds you, chases you, demands proof, and is a bit
 of a dick about it. Runs entirely on free tiers.
 
-**Stack:** Telegram Bot API → Cloudflare Worker (webhook + 1-minute cron) → D1 (SQLite) → Gemini, primary model with a cheaper fallback.
+**Stack:** Telegram Bot API → Cloudflare Worker (webhook + 1-minute cron) → D1 (SQLite) → Gemini, walked down a ladder of models.
 
 **Cost:** $0 at personal volume. ~1,440 cron invocations/day against a 100,000/day
-free allowance, and a couple of Gemini calls per message against a free tier of
-roughly 15 RPM / 1,500 RPD. Verify current limits before you scale it up. Past a
+free allowance, and a couple of Gemini calls per message against a free tier
+metered per minute **per model** — which is why the model ladder below is extra
+capacity, not just redundancy. Verify current limits before you scale it up. Past a
 configurable daily call count, unprompted check-ins stop calling the model
 entirely and ship deterministic text instead — see **Model configuration**
 below.
+
+---
+
+## What it sounds like
+
+The bot lines marked **·** are `voice.ts` verbatim — deterministic Hebrew,
+printed by running the code, true no matter what the model does with them. The
+nags in between are the persona's, which is the only part a model writes.
+
+```
+you    תזכיר לי כל יום ב-7:00 לרוץ
+bot ·  #12 "לרוץ" — נקבע ל-יום ב׳, 24.08.2026, 07:00.
+
+07:00, next morning
+bot ·  נו? לרוץ.
+
++20 min, no reply
+bot    עדיין לרוץ. נעליים, זה הכל. חמש דקות.
+
++2 h, still nothing
+bot    שעתיים וחצי זה פתוח. או שאתה יוצא לעשר דקות עכשיו,
+       או שאתה אומר לי שזה לא קורה היום.
+
+you    לא קורה היום
+bot ·  "לרוץ" ירדה להיום. בלי כישלון.
+```
+
+Nothing got louder. The ask got smaller every round, and the way out was a
+sentence, not a task. That is the entire product — everything below is how it
+is kept honest while it does that.
 
 ---
 
@@ -112,16 +143,18 @@ Copy the printed `database_id` into `wrangler.toml`, then:
 npm run db:init
 ```
 
-**Already deployed an earlier version?** `db:init` drops your data. Run the
-migrations instead, in order, once each:
+**Already deployed an earlier version?** `db:init` starts with `DROP TABLE` and
+will take your data with it. Run the migrations instead — they are numbered, so
+a glob applies them in the right order:
 
 ```bash
-npx wrangler d1 execute nu-bot --remote --file=./migrations/001_goals.sql
-npx wrangler d1 execute nu-bot --remote --file=./migrations/002_inbox_and_usage.sql
+for m in migrations/*.sql; do
+  npx wrangler d1 execute nu-bot --remote --file="./$m"
+done
 ```
 
-`002` adds `reminders.status` (the inbox) and the `usage` table. Re-running it
-errors with "duplicate column name", which is safe to ignore.
+Re-applying one you already have errors with `duplicate column name` or
+`table already exists`. Those two are safe to ignore. Nothing else is.
 
 ### 4. Secrets
 
@@ -184,7 +217,17 @@ npx wrangler secret put OWNER_CHAT_ID   # paste the number it gave you
 npm run deploy
 ```
 
-From here on, every message from any other chat id is silently dropped.
+From here on you are the owner, and the bot is no longer single-user.
+
+Anyone else who messages it gets a brief hello and lands in `/pending` — at
+most twice per chat ever, on a capped queue, with refusals remembered, so an
+unknown number can't turn your bot into its chat partner. `/allow` lets someone
+in, `/deny` keeps them out, `/allowed` shows who's in. Guests get their own
+reminders, timezone, settings and quota, and each chat's cron tick is isolated
+so one person's failure can't swallow another's reminders.
+
+The owner is always in the allowed set whatever the database says — a broken
+row degrades to owner-only rather than locking everyone out.
 
 ---
 
@@ -195,7 +238,7 @@ From here on, every message from any other chat id is silently dropped.
 ```toml
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
-GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite"
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
 GEMINI_SOFT_LIMIT = "200"
 GEMINI_RPM = "18"
 ```
@@ -205,9 +248,9 @@ a ladder of models is capacity, not just redundancy. `GEMINI_MODEL` and
 `GEMINI_MODEL_FALLBACK` are the top two rungs; `GEMINI_MODELS` is everything
 under them. A call walks down until one answers.
 
-**None of these ids has been verified against any particular key** — they're
-forward-looking pins. That is survivable by design: an id that doesn't exist
-returns 404, and the bot treats 404, 429 (quota) and 503 (overloaded) the same
+**Verify these ids before you edit them** — the published free-tier list moves.
+Two of the six that were once pinned here did not exist, which is exactly the
+failure this design is built to survive: an id that doesn't exist returns 404, and the bot treats 404, 429 (quota) and 503 (overloaded) the same
 way — step down a rung, and *write the model off* so the next message skips it
 without paying for a round trip:
 
@@ -305,20 +348,34 @@ Talk normally, in Hebrew or English:
 - `אני רוצה סוף סוף לפתוח תיק מסחר` → goal, and it'll chase you about it
 - `התקדמתי קצת עם התיק, מילאתי טפסים` → logged as progress on that goal
 - `סיימתי` / send a photo → it judges the photo against the task
-Full command list (`/help` prints it in the chat):
+
+Bare Hebrew words work as commands too (`רשימה`, `עזרה`), and like the slash
+commands they never cost a model call.
+
+Full list — `/help` prints it in the chat, and shows a guest only what a guest
+can actually run:
 
 | Command | Does |
 |---|---|
+| `/today` | What's on today, and what's still open |
 | `/list` | Reminders, with next fire time |
 | `/goals` | Ongoing goals + last progress on each |
 | `/inbox` | Things captured without a time — see below |
 | `/stats` | Streak, done, failed |
+| `/profile` | What it thinks it knows about you |
+| `/remember [text]` | A durable fact about you it should keep |
+| `/daily [morning] [evening]` | Daily summary hours; `off` disables |
 | `/chill [hours]` | Total silence, default 4h. Any message from you cancels it. |
 | `/checkins on\|off\|1-8` | How often it starts conversations |
 | `/intensity 1\|2\|3` | Snark dial |
 | `/quiet [start] [end]` | Quiet hours, e.g. `/quiet 23 8` |
 | `/offlimits [text]` | Topics it must never touch. No argument shows current; `clear` wipes. |
-| `/diag` | Health check: which model actually answered today and how many times (primary + fallback), rejected-rewrite count, whether the key is set, live Gemini + D1 probe |
+| `/why [id]` | Everything that ever happened to one reminder — fired, snoozed, closed, given up, timestamped |
+| `/errors` | The last five throws, tagged by stage |
+| `/id` | Your chat id — what a friend needs to add you |
+| `/friends` `/friend` `/unfriend` | See **Friends** below |
+| `/pending` `/allow` `/deny` `/allowed` | Owner only: who's asking to get in, and who's in |
+| `/diag` | Health check: which rungs of the ladder answered today and how often, which are blocked and until when, rejected-rewrite count, whether the key is set, live Gemini + D1 probe |
 
 ## The inbox
 
@@ -329,6 +386,76 @@ the reply comes with buttons: *in an hour*, *this evening*, *tomorrow morning*,
 or *no time* (stays in the inbox as a plain note). `/inbox` lists what's
 waiting. This is the fallback for "the model choked but the user clearly asked
 for something" — before it existed, that case was a silently dropped reminder.
+
+## Checklists
+
+One reminder can hold several errands, and it fires as a list rather than as
+one comma-spliced sentence:
+
+```
+נו? 2 דברים:
+✓ רשיון
+☐ ביטוח
+```
+
+The ticks reset every time the reminder fires — that's what makes a daily
+three-errand reminder work on day two. Closing one errand never falls back to
+closing the whole task, and a name that matches two errands gets a question
+instead of a guess: marking the wrong one is the bot claiming you did something
+you didn't.
+
+Splitting is deliberately narrow — commas, plus at least two parts starting
+with an infinitive ל. Over-splitting is the worse failure, because a checklist
+you never asked for turns one task into three ticks you have to clear, while a
+title with commas in it is just what you typed.
+
+## When it happens vs when to ring
+
+> `קבעתי טיפול ליום שלישי ב-8:30, תזכיר לי בשני בערב`
+
+Two hours in one sentence, and they mean different things. `event_at` is when
+the thing **is**; `next_fire_at` is when to **ring** about it. Until they were
+separate there was nowhere to put the first, so the appointment hour was
+dropped in every phrasing — and a reminder to *prepare* for something that
+can't tell you what it's preparing for has just sent you to go look it up.
+
+It's stated when the reminder is created and again when it fires.
+
+## Noticing that a reminder isn't working
+
+Every fire, snooze, close and give-up lands in `events`. `patterns.ts` reads
+that back **across** instances and asks the one question the nag ladder can't,
+because the ladder resets every time the reminder fires: is this reminder
+actually working?
+
+```
+דחית את "לרוץ" 6 מתוך 7 הפעמים האחרונות, ובדרך כלל סוגר את זה ב-20:00. להזיז לשם?
+```
+
+The rule the whole file is written under: **state the count, never the motive.**
+*"You pushed it 6 of 7 times"* is checkable against rows you can go and list.
+*"You're avoiding this"* is a claim about you that you can't check, and a wrong
+one costs more than a wrong claim about a reminder ever could.
+
+The thresholds *are* the feature, so they live in one pure file — no database,
+no clock, no env — where they can be read and tested in one place:
+
+- **Four samples minimum**, not two. A habit announced off two data points is
+  astrology, and it spends trust earned everywhere else.
+- **The suggested hour is a mode, never a mean.** The average of 08:00 and
+  20:00 is 14:00, an hour you have never once used — that's inventing a habit
+  out of two real ones. No clear cluster, no suggested hour: the offer becomes
+  `מתי כן?`.
+- **"Never once completed" is checked before "keeps getting pushed."** Offering
+  to retime a reminder you have never finished treats a wrong reminder as a
+  scheduling problem.
+- **There's a cooldown**, or the feature built to notice you're over-reminded
+  becomes another reminder.
+
+Declining writes nothing at all. That sounds too obvious to state, except the
+first version reused the "no time" button — which doesn't mean *leave it*, it
+means *unschedule it*. A decline button that changes something is worse than no
+decline button.
 
 ## Unprompted check-ins
 
@@ -354,13 +481,24 @@ not louder.**
 | Round | What it does |
 |---|---|
 | 1 | Reminder + one concrete small action |
-| 2 | No reply → offers half the task, or only its first step |
-| 3 | Still nothing → cuts it to something almost insultingly small, and names the avoidance pattern |
-| 4 | Offers a dignified out: do the tiny thing now, or say out loud it isn't happening today |
+| 2 | No reply → the smallest **visible** next step: one phone call, one line, five minutes |
+| 3 | Still nothing → almost insultingly small, in two short messages, plus how long it has been open — the number, never a theory about the number |
+| 4 | A dignified out: do the tiny thing now, or say out loud it isn't happening today |
 | — | Gives up, logs a failure, offers to reschedule |
 
-"Forget tidying, just fill one bag." "Close one function today and we'll talk."
-"Open the account by yourself now, do the transfer together tomorrow."
+When the reminder has real checklist items, round 2 asks for **one of them by
+name** instead — the smallest true request available (`NAG_LADDER_ITEMS`).
+
+Two things the ladder is forbidden to do, both because it did them once:
+
+- **It may not invent a breakdown.** Round 2 used to say *offer half of it*.
+  For `לסדר את המוסך` that means nothing, because the bot only knows a task's
+  parts when you happened to type them as a list. A made-up half is a claim
+  about your task that you never made.
+- **It may not name a motive.** Round 3 used to end *"and name his avoidance
+  pattern"*, and after ninety minutes of silence it produced
+  `הימנעות קלאסית דרך שתיקה` — classic avoidance through silence. He might
+  have been driving. It states the elapsed minutes and stops there.
 
 Rising volume is what gets these bots muted in week two. A shrinking ask is what
 makes them work, because the blocker is almost never motivation — it's that the
@@ -397,16 +535,25 @@ touch. Worth doing.
 ## Local development
 
 ```bash
-npm run typecheck     # two projects: tsc --noEmit, then -p tsconfig.test.json
-npm test              # all seven suites below, in order, no framework
-npm run test:time     # recurrence + DST checks
-npm run test:parse    # the deterministic phrase parser
-npm run test:voice    # renderBaseline() — the deterministic Hebrew per Effect
-npm run test:validate # the rewrite-vs-baseline validator
-npm run test:buttons  # callback_data encode/decode + buttonsFor()
-npm run test:bot      # end-to-end: webhook + cron against real SQLite
-npm run test:facts    # buildFacts() allow-lists
-npx wrangler dev      # local Worker; use `npx wrangler tail` for live logs
+npm run typecheck          # two projects: tsc --noEmit, then -p tsconfig.test.json
+npm test                   # all fourteen suites below, in order, no framework
+
+npm run test:time          # recurrence + DST checks
+npm run test:parse         # the deterministic phrase parser
+npm run test:voice         # renderBaseline() — the deterministic Hebrew per Effect
+npm run test:validate      # the rewrite-vs-baseline validator
+npm run test:buttons       # callback_data encode/decode + buttonsFor()
+npm run test:bot           # end-to-end: webhook + cron against real SQLite
+npm run test:facts         # buildFacts() allow-lists
+npm run test:effects       # applyIntent() — intent to database
+npm run test:v08           # the 0.7 transcript, turned into failing tests
+npm run test:friends       # cross-chat reminders and their refusals
+npm run test:models        # the ladder: blocking, backoff, recovery
+npm run test:comprehension # what the router can see, and what it does with it
+npm run test:patterns      # the thresholds in patterns.ts
+npm run test:whoami        # who the bot thinks it is talking to
+
+npx wrangler dev           # local Worker; use `npx wrangler tail` for live logs
 ```
 
 `test/time.test.ts` covers the part most likely to break silently: daily and
@@ -440,6 +587,7 @@ on `validate.test.ts` to catch it indirectly.
 | `src/validate.ts` | Rejects a model rewrite that strays from the facts |
 | `src/buttons.ts` | Inline-keyboard `callback_data` encode/decode + which buttons go on which message |
 | `src/persona.ts` | The entire personality |
+| `src/patterns.ts` | Reads `events` across instances — is this reminder working? Pure: no database, no clock |
 | `src/slash.ts` | Slash commands (`/list`, `/diag`, `/inbox`, ...), handled without an LLM call |
 | `src/time.ts` | Timezone, recurrence, quiet hours, check-in jitter |
 | `src/db.ts` | D1 queries |
@@ -456,3 +604,25 @@ on `validate.test.ts` to catch it indirectly.
 - The free plan's 10ms CPU limit sounds alarming but only counts CPU, not time
   spent awaiting `fetch()`, so waiting on Gemini is free.
 - `messages` is pruned to the last 200 rows per chat automatically.
+- Bump `src/version.ts` before every deploy. It's the only thing that tells a
+  running Worker it's new, and `/diag` reports it. Deploying without bumping
+  fails silently, which is the worst way to fail.
+
+## The one rule
+
+Everything above is downstream of a single line, and it's the reason for the
+baseline, the validator, the allow-lists, the refusals and most of the tests:
+
+> **The bot must never claim something it did not do.**
+
+A missed reminder is a bug. A reminder it *says* it set and didn't is the
+failure this whole codebase exists to prevent. Where a change forces a choice
+between saying less and risking a false claim, it says less — which is why so
+much of this thing is built to shut up rather than to guess.
+
+`CLAUDE.md` is the working notes: why each guard is there, and which message to
+a real person put it there.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
