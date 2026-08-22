@@ -5,7 +5,8 @@
  * names the message the owner actually saw, so a regression here is legible
  * without re-reading the chat log.
  *
- * See 0.8-plan.md for the full write-up of what each of these cost him.
+ * Each block below carries its own write-up, because the plan document that
+ * used to hold them is not part of this repository.
  */
 import worker from '../src/index';
 import { quickParse } from '../src/quickparse';
