@@ -1078,8 +1078,31 @@ async function sendOutcome(
     return false;
   }
 
+  /*
+   * A turn that THREW is reported in voice.ts's words and nobody else's.
+   *
+   * `applyIntent` can close an instance and then throw before producing an
+   * effect, so the failure wording is written to confirm and deny nothing —
+   * it says what is certain and points at /list and /errors. Handing that
+   * sentence to a model whose entire licence is to rephrase it invites the one
+   * thing it was written to avoid.
+   *
+   * That is not a worry, it is `rejections` #8. On 23.08.2026 07:47 the router
+   * returned unparseable JSON (`errors` #14), the turn failed, and the persona
+   * rewrote "משהו נפל לי באמצע" into
+   *
+   *   העברתי את #60 ללכת למוסך להיום ב-08:47. בלי תירוצים, כן?
+   *
+   * — an invented move, an invented hour, about a reminder that had not been
+   * touched. Rule 1 caught it because 08:47 was an hour the turn did not know.
+   * Nothing would have caught "העברתי את #60" on its own if the model had
+   * happened to pick an hour off the context, and there is no reason to keep
+   * running that race for a message the user reads as an apology anyway.
+   */
+  const turnFailed = effects.some((e) => e.kind === 'nothing' && e.why === 'failed');
+
   let text = baseline;
-  if (facts && (await modelAllowed(env, priority, chatId))) {
+  if (facts && !turnFailed && (await modelAllowed(env, priority, chatId))) {
     try {
       const [recent, notes] = await Promise.all([
         history ? Promise.resolve(history.slice(-8)) : db.recentMessages(env, chatId, 8),
@@ -1534,8 +1557,22 @@ async function tickChat(
       tone);
   }
 
-  if (briefDue) await sendMorningBrief(env, chatId, now, settings.tz);
-  if (closeoutDue) await sendEveningCloseout(env, chatId, now, settings.tz);
+  /*
+   * The daily messages keep his quiet hours, exactly as check-ins do.
+   *
+   * They were the one unprompted path that did not. The owner's row is
+   * quiet_end_hour = 9 against brief_hour = 8, so the bot opened every single
+   * morning an hour inside the window he had asked it to stay out of — and
+   * "unprompted" is the whole distinction quiet hours draw. A reminder firing
+   * at 08:30 is his own instruction and still fires; a good-morning is not.
+   *
+   * A hold, not a cancellation: markDailySent runs inside the two senders, so
+   * skipping here leaves the day unmarked and dailyDue picks it up on the
+   * first tick after the window closes. DAILY_GRACE_HOURS still bounds it, so
+   * a brief cannot arrive at lunchtime.
+   */
+  if (briefDue && !quiet) await sendMorningBrief(env, chatId, now, settings.tz);
+  if (closeoutDue && !quiet) await sendEveningCloseout(env, chatId, now, settings.tz);
 
   if (checkinDue) await maybeCheckIn(env, ctx, chatId, now, quiet, due.length + nags.length > 0);
 }
@@ -1586,16 +1623,23 @@ async function sendMorningBrief(env: Env, chatId: string, now: number, tz: strin
 
 async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: string): Promise<void> {
   await db.markDailySent(env, chatId, 'closeout', localDateKey(now, tz));
-  const { from } = localDayBounds(now, tz);
-  const [tally, missed, dropped] = await Promise.all([
+  const { from, to } = localDayBounds(now, tz);
+  const [tally, missed, dropped, ahead] = await Promise.all([
     db.dayTally(env, chatId, from, now),
     db.openInstances(env, chatId),
     db.droppedBetween(env, chatId, from, now),
+    // The rest of TONIGHT. Everything else here looks backwards, which is how
+    // a close-out at 21:00 came to announce "אין יותר להיום" over a reminder
+    // due at 22:00 — see the effect's own comment in types.ts.
+    db.remindersBetween(env, chatId, now, to),
   ]);
-  if (!tally.done && !missed.length && !dropped.length) return;
+  // A day with something still ahead in it is worth closing out even if
+  // nothing has happened yet: "nothing so far, and here is what is left" is a
+  // useful message, and it is the one the old guard suppressed entirely.
+  if (!tally.done && !missed.length && !dropped.length && !ahead.length) return;
   const ctx = await buildContext(env, chatId);
   await sendOutcome(env, chatId, ctx, [
-    { kind: 'evening_closeout', done: tally.done, missed, dropped },
+    { kind: 'evening_closeout', done: tally.done, missed, dropped, ahead },
   ]);
 }
 

@@ -14,6 +14,7 @@ const settings: Settings = {
   next_checkin_at: null,
   awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
+    display_name: null,
 };
 const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 3 };
 

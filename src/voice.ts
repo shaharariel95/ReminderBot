@@ -286,14 +286,37 @@ function one(e: Effect, tz: string): string {
     }
     case 'evening_closeout': {
       const closed = e.done === 0 ? 'לא סגרת כלום היום' : `סגרת ${e.done} היום`;
-      if (!e.missed.length && !e.dropped.length) return `${closed}. אין זנבות.`;
       const name = (i: { title: string }) =>
         `· ${untitled(i.title) ? 'משהו שלא אמרת מה זה' : i.title}`;
+      /*
+       * What is still to come tonight, stated BEFORE the "אין זנבות" line can
+       * be reached. The close-out runs at 21:00 and reads only backwards, so a
+       * 22:00 reminder was invisible to it — and on 25.08.2026 the persona
+       * turned that silence into "זהו, אין יותר להיום" an hour before the dose.
+       *
+       * The hour is stated, not just the title: this block is shared with the
+       * persona through remindersSummary, and a time the baseline never said
+       * is a time validate.ts rule 1 will not let it say either.
+       */
+      const ahead = e.ahead.length
+        ? [
+            'עוד היום:',
+            ...e.ahead.map(
+              (r) =>
+                `· ${untitled(r.title) ? 'משהו שלא אמרת מה זה' : r.title}` +
+                (r.next_fire_at ? ` ב-${hhmm(r.next_fire_at, tz)}` : ''),
+            ),
+          ]
+        : [];
+      // "אין זנבות" is a claim about the whole day, so it may only be made
+      // when the evening really is empty as well.
+      if (!e.missed.length && !e.dropped.length && !ahead.length) return `${closed}. אין זנבות.`;
       const parts = [`${closed}.`];
       if (e.missed.length) parts.push('עדיין פתוח:', ...e.missed.map(name));
       // Named, not counted. "2 נפלו" tells him nothing he can act on, and the
       // whole point of the button underneath is that he can act on it.
       if (e.dropped.length) parts.push('ויתרתי על אלה היום:', ...e.dropped.map(name));
+      parts.push(...ahead);
       return parts.join('\n');
     }
     case 'distress':

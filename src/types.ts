@@ -476,7 +476,13 @@ export type Effect =
    * NAME them — a close-out that can only say "2 נפלו" is how an ignored task
    * quietly stops existing.
    */
-  | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[] }
+  /**
+   * `ahead` is what is still to come TONIGHT, and it is the reason this effect
+   * is not purely a look backwards. Without it the baseline had nothing to say
+   * about the rest of the evening, and the persona filled the silence: chat B,
+   * 25.08.2026 21:00, "זהו, אין יותר להיום" — with a 22:00 dose scheduled.
+   */
+  | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[]; ahead: Reminder[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
   /**
@@ -573,6 +579,23 @@ export interface Facts {
    * `times` cannot see, because it is written in words and never as a clock.
    */
   elapsed: number[];
+  /**
+   * The same spans measured WITHOUT the quiet-hours discount, when a quiet
+   * window sat inside one and the two therefore differ.
+   *
+   * `elapsed` is what the prompt SHOWS, and it excludes the hours he was
+   * asleep — see facts.ts. This is only ever folded into validate.ts's
+   * allow-list, because the raw span is a true statement about the reminder
+   * too: a model that reads fired_at off openSummary and says "מאתמול בערב"
+   * with the real number attached has not invented anything, and discarding
+   * that rewrite would cost more than it protects.
+   */
+  elapsedRaw: number[];
+  /**
+   * Did any span cross a quiet window? Drives the one extra line in the
+   * prompt's elapsed block that stops the night being narrated as avoidance.
+   */
+  elapsedSpansQuiet: boolean;
   /** Every task or goal title the model may quote. */
   titles: string[];
   /**

@@ -340,6 +340,37 @@ const B_COUNTED = new RegExp(B_LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` +
  * not. Returning null rather than a guess is the point: it tells the caller
  * "he named no length", which is a different fact from "he named 30 minutes".
  */
+/**
+ * Is this fragment nothing but a time word?
+ *
+ * The same vocabulary CLOCK_RESIDUE polices, asked as a question about a whole
+ * fragment rather than about a title's insides — because the caller
+ * (effects.splitIntoItems) is deciding whether a comma-separated part names an
+ * ERRAND, and "להיום" names a day.
+ *
+ * Production, reminder 57: "לקבוע רעמוו נשק במאי, להיום" was split into two
+ * tickable items, the second of them "להיום", and the nag then read
+ * "עזוב את 'להיום'. רק תעשה את החלק של לקבוע רעמוו נשק במאי" — the bot naming
+ * an errand that does not exist. splitIntoItems counts a part as an action
+ * when it starts with ל plus a letter, and ל+היום passes that test.
+ *
+ * Deliberately NOT a rule about ל followed by ה: "להיות", "להיכנס",
+ * "להירדם" and every other nif'al infinitive have exactly that shape and are
+ * real errands. What makes "להיום" different is the WORD, not the letters, so
+ * this matches whole words off a closed list — days and parts of the day, with
+ * the one-letter prefixes Hebrew glues onto them. Anchored, so it can only
+ * ever reject a fragment that is a time word and nothing else.
+ */
+const BARE_TIME_WORD = new RegExp(
+  String.raw`^[ולבמ]?(?:היום|הערב|הבוקר|הלילה|הצהריי?ם|מחרתיים|מחר|אתמול|` +
+    String.raw`בוקר|ערב|לילה|צהריי?ם|${PERIOD})$`,
+  'i',
+);
+
+export function isBareTimeWord(s: string): boolean {
+  return BARE_TIME_WORD.test(s.trim());
+}
+
 export function parseDuration(text: string): number | null {
   const rel = parseRelative(text);
   if (rel && rel.minutes > 0) return rel.minutes;

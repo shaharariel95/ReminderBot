@@ -100,7 +100,7 @@ import * as db from '../src/db';
 import { renderBaseline } from '../src/voice';
 import { buttonsFor, decode, encode } from '../src/buttons';
 import { buildFacts } from '../src/facts';
-import { check, createRig, eq, withNow, type Rig } from './harness';
+import { createRig, withNow, type Rig } from './harness';
 
 async function runCron(rig: Rig): Promise<void> {
   const pending: Promise<unknown>[] = [];

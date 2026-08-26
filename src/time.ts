@@ -143,6 +143,46 @@ export function isQuietHour(ts: number, tz: string, startHour: number, endHour: 
   return startHour < endHour ? h >= startHour && h < endHour : h >= startHour || h < endHour;
 }
 
+/**
+ * How many minutes between `from` and `to` fall inside the quiet window.
+ *
+ * Exists so a span can be stated as the time he was AWAKE for. facts.ts used a
+ * flat `now - fired_at`, and on 26.08.2026 that greeted him at 08:03 with
+ * "התרופה מאתמול גוררת חוב של 600 דקות" about a reminder that had fired at
+ * 22:00 the night before. Nine of those hours were the bot's own quiet window.
+ * The elapsed block exists to keep the model from inventing a number; a number
+ * that counts his sleep as avoidance is accurate arithmetic and a false claim
+ * about him, which is the more expensive of the two.
+ *
+ * Walks LOCAL dates rather than stepping the instant by 24h: a wall-clock
+ * window has to be resolved per calendar day or a DST change silently shifts
+ * or double-counts one. wallToUtc normalises day overflow, so `day + i` past
+ * the end of a month is fine. One day either side of the range covers a
+ * wrapping window that opened the previous evening.
+ */
+export function quietMinutesBetween(
+  from: number,
+  to: number,
+  tz: string,
+  startHour: number,
+  endHour: number,
+): number {
+  if (startHour === endHour || to <= from) return 0;
+  const p = wallParts(from, tz);
+  const days = Math.ceil((to - from) / 86_400_000) + 2;
+  let total = 0;
+  for (let i = -1; i < days; i++) {
+    const start = wallToUtc(p.year, p.month, p.day + i, startHour, 0, tz);
+    // A window whose start hour is later than its end hour closes tomorrow.
+    const end =
+      startHour < endHour
+        ? wallToUtc(p.year, p.month, p.day + i, endHour, 0, tz)
+        : wallToUtc(p.year, p.month, p.day + i + 1, endHour, 0, tz);
+    total += Math.max(0, Math.min(to, end) - Math.max(from, start));
+  }
+  return Math.round(total / 60_000);
+}
+
 /** Push an instant forward to the end of the quiet window, plus a little jitter. */
 export function afterQuietHours(
   ts: number,

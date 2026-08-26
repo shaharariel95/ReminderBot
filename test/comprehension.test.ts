@@ -816,7 +816,14 @@ async function quotingHimBackIsNotInvention(): Promise<void> {
   });
 
   // The nag, with the persona quoting him back verbatim.
-  const quoted = 'אמרת "אין פה באמת משימה" ובכל זאת היא פתוחה.';
+  //
+  // It names "לרוץ" as well as quoting him, because validate.ts rule 6 requires
+  // a message about a fired reminder to say which errand it is about — and the
+  // rig's queue hands this string to whichever speak() call comes next, which
+  // is not reliably the nag. A fixture that quoted him and named nothing was
+  // testing rule 3 through an effect that rule 6 rightly rejects. Quoting him
+  // back is still the only thing under test here.
+  const quoted = 'אמרת "אין פה באמת משימה" ובכל זאת לרוץ עדיין פתוחה.';
   await withNow(NOW + 45 * 60_000, async () => {
     rig.speakQueue.push(quoted);
     await runCron(rig);

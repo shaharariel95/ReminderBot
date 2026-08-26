@@ -1,7 +1,7 @@
 import type { Context } from './brain';
 import type { Effect, Facts } from './types';
 import { WROTE } from './types';
-import { formatLocal } from './time';
+import { formatLocal, quietMinutesBetween } from './time';
 
 /** "יום ד׳, 05.08.2026, 07:05" → "07:05" */
 function clock(ts: number, tz: string): string | null {
@@ -17,6 +17,7 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   const titles = new Set<string>();
   const quotable = new Set<string>();
   const elapsed = new Set<number>();
+  const elapsedRaw = new Set<number>();
 
   const addQuotable = (s: string | null | undefined) => {
     if (typeof s === 'string' && s.trim().length > 0) quotable.add(s.trim());
@@ -33,11 +34,44 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
    * How long ago `ts` was, in whole minutes. Read from the clock at build
    * time, exactly like the message it is about to license — which is what
    * makes it comparable to anything the model says in the same breath.
+   *
+   * `discountQuiet` is false for spans that are measured in DAYS by nature.
+   * Taking his sleep out of "this has been open since 22:00" is the whole
+   * point (see below). Taking it out of "you last touched this goal on Friday
+   * morning" is distortion: two nights come off a two-and-a-quarter-day span
+   * and the model is handed a number that reads as a day and a half. The
+   * discount belongs to the pressure figure, not to every subtraction.
    */
-  const addElapsed = (ts: number | null | undefined) => {
+  const addElapsed = (ts: number | null | undefined, discountQuiet = true) => {
     if (typeof ts !== 'number') return;
-    const mins = Math.round((Date.now() - ts) / 60_000);
-    if (mins >= 0) elapsed.add(mins);
+    const now = Date.now();
+    const raw = Math.round((now - ts) / 60_000);
+    if (raw < 0) return;
+    /*
+     * The span he was AWAKE for, not the span on the wall clock.
+     *
+     * Production, 26.08.2026 08:03, chat B: instance 44 had fired at 22:00 the
+     * previous night, so a flat subtraction handed the model 630 and he woke
+     * up to "התרופה מאתמול גוררת חוב של 600 דקות". Nine of those hours were
+     * this bot's own quiet window. The block exists so a nag can state a TRUE
+     * number instead of guessing one; counting his sleep as time he spent
+     * avoiding the task is arithmetic in the service of a claim about him,
+     * which CLAUDE.md rules out more firmly than it rules out a wrong minute.
+     *
+     * The raw span is kept as well, but only for validate.ts — it is still a
+     * true thing to say, and a rewrite that says it should not be discarded.
+     */
+    const waking = discountQuiet
+      ? Math.max(
+          0,
+          raw -
+            quietMinutesBetween(
+              ts, now, tz, ctx.settings.quiet_start_hour, ctx.settings.quiet_end_hour,
+            ),
+        )
+      : raw;
+    elapsed.add(waking);
+    if (waking !== raw) elapsedRaw.add(raw);
   };
 
   // Everything already on file is fair game to talk about.
@@ -137,6 +171,15 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     }
     if (e.kind === 'evening_closeout') {
       for (const i of [...e.missed, ...e.dropped]) titles.add(i.title);
+      // `ahead` states an HOUR as well as a title — it is the one part of this
+      // effect that looks forward. Sweeping the time is not optional: voice.ts
+      // now prints it, and CLAUDE.md's rule is that a fact the model is shown
+      // must be swept or rule 1 discards the rewrite for repeating what the
+      // baseline itself said, silently, as a counter in /diag.
+      for (const r of e.ahead) {
+        titles.add(r.title);
+        addTime(r.next_fire_at);
+      }
     }
     if (e.kind === 'photo_accepted' || e.kind === 'photo_rejected') addQuotable(e.reason);
     if (e.kind === 'checkin_goal') {
@@ -146,8 +189,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       // these two were swept the model had no fact to reach for and simply
       // made the span up. Both matter: last progress is how long since he DID
       // anything, last check-in is how long since the bot last asked.
-      addElapsed(e.lastProgressAt);
-      addElapsed(e.lastCheckinAt);
+      addElapsed(e.lastProgressAt, false);
+      addElapsed(e.lastCheckinAt, false);
     }
     if (e.kind === 'goal_progress') {
       addQuotable(e.note);
@@ -178,6 +221,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     nowLabel: ctx.nowLabel,
     times: [...times],
     elapsed: [...elapsed],
+    elapsedRaw: [...elapsedRaw],
+    elapsedSpansQuiet: elapsedRaw.size > 0,
     titles: [...titles],
     quotable: [...quotable],
     // Filled in by sendOutcome, and only when the model is actually consulted.

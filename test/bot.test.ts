@@ -271,6 +271,7 @@ async function main() {
       next_checkin_at: null,
   awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
+    display_name: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const prompt = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');
@@ -1326,12 +1327,19 @@ async function main() {
     // guess. Nothing in the prompt stated the span until this line.
     const rig = createRig();
     seedSettings(rig);
-    const remId = seedReminder(rig, 'לדבר על המוסך', Date.now() - 90 * 60_000);
-    seedInstance(rig, remId, 'לדבר על המוסך', Date.now() - 90 * 60_000);
+    // Pinned to the middle of the afternoon rather than left on the real
+    // clock. facts.addElapsed now discounts quiet hours from the span, so a
+    // bare `Date.now() - 90m` gives a different answer depending on what time
+    // of day the suite happens to run — 90 at lunchtime, less at 08:30.
+    const noon = wallToUtc(2026, 8, 26, 14, 0, TZ);
+    const remId = seedReminder(rig, 'לדבר על המוסך', noon - 90 * 60_000);
+    seedInstance(rig, remId, 'לדבר על המוסך', noon - 90 * 60_000);
     rig.routerQueue.push({ actions: [{ action: 'chat' }] });
     rig.speakQueue.push('נו?');
 
-    await runWebhook(rig, 'מה קורה');
+    await withNow(noon, async () => {
+      await runWebhook(rig, 'מה קורה');
+    });
 
     const speakCall = rig.geminiCalls.find((c) => c.kind === 'speak');
     check('the true elapsed span is in the system prompt',
@@ -2297,6 +2305,7 @@ async function chillDefersRatherThanSwallows(): Promise<void> {
       next_checkin_at: null,
   awaiting: null,
   brief_hour: 8, closeout_hour: 21, last_brief_on: null, last_closeout_on: null,
+    display_name: null,
     };
     const stats: Stats = { done7: 0, failed7: 0, done30: 0, failed30: 0, currentStreak: 0 };
     const p = buildSystemPrompt(settings, stats, 'עכשיו', '  (אין)', '  (אין)', '  (אין)');

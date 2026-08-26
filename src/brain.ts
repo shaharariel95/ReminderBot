@@ -41,8 +41,35 @@ const ACTION_SCHEMA = {
         'chat',
       ],
     },
-    title: { type: 'STRING' },
-    note: { type: 'STRING' },
+    /*
+     * BOUNDED, and the bound is the fix.
+     *
+     * Removing `why` from this schema (see the block below) closed one
+     * scratchpad and the model simply moved into the next unbounded STRING it
+     * could find. All three route/apply failures since 0.14.0 are `title`:
+     *
+     *   errors #13  "ללכת למוסךTrimmed to: ללכת למוסך והוא לא אמר משהו אחר.
+     *                ללכת למוסך. ללכת למוסך…"                    3022 chars
+     *   errors #14  "ללכת למוסך24.08.2026, 07:30 — הבא: יום ב׳…"  4345 chars
+     *   errors #15  "להזמין רכב לאוסטריה Lights-out-time-limit-
+     *                reached-or-similar-context-implied-by…"     4800 chars
+     *
+     * The first is the model reciting titleFromHisWords' own prompt rule back
+     * into the field it governs; the second is the rendered context block.
+     * Each ran until the response truncated mid-string, so JSON.parse threw,
+     * the turn died, and the catch-block filed his raw sentence as a reminder
+     * (reminder #62's title is one of his messages, word for word).
+     *
+     * titleFromHisWords cannot catch this — it runs on the parsed intent, and
+     * there is no parse. The lesson `why` taught is the one that applies:
+     * asking the model to be brief is a request, `maxLength` under constrained
+     * decoding is a guarantee. 120 is what effects.ts and quickparse.ts
+     * already slice titles to, so the schema now describes what gets stored.
+     */
+    title: { type: 'STRING', maxLength: 120 },
+    /** One short sentence in his words — a profile fact, a detail on a
+     *  reminder, a goal's reason. Bounded for the same reason `title` is. */
+    note: { type: 'STRING', maxLength: 200 },
     /*
      * `why` USED TO BE HERE, and removing it is the fix, not an omission.
      *
@@ -84,7 +111,9 @@ const ACTION_SCHEMA = {
     chill_hours: { type: 'INTEGER' },
     intensity: { type: 'INTEGER' },
     distress: { type: 'BOOLEAN' },
-    reason: { type: 'STRING' },
+    /** What he said about a goal, briefly. 400 is what effects.ts slices it
+     *  to; the bound belongs here too, where it cannot be exceeded at all. */
+    reason: { type: 'STRING', maxLength: 400 },
   },
   required: ['action'],
 } as const;
@@ -516,6 +545,15 @@ export async function speak(
           .join(' · ')}` +
         (stance === 'replying'
           ? '\nהוא ענה לך עכשיו — המספר הזה הוא רקע בלבד. אל תשאל אותו למה זה לקח כל כך הרבה, ואל תנקר לו בזה. אם הוא לא רלוונטי לתשובה, אל תזכיר אותו בכלל.'
+          : '') +
+        // The span crossed his quiet hours, so the number above already has
+        // the night taken out of it (facts.addElapsed). Said out loud because
+        // the model can see fired_at in openSummary and would otherwise
+        // "correct" the smaller number back up — which is how 26.08.2026
+        // opened with "התרופה מאתמול גוררת חוב של 600 דקות" for a reminder
+        // that rang at 22:00 and was slept through, as intended.
+        (facts.elapsedSpansQuiet
+          ? '\nהמספר הזה כבר לא כולל את שעות השקט — הוא ישן אז. זה נפתח אתמול, אז תגיד "מאתמול" ואל תגלגל לו את הלילה כחוב.'
           : '')
       : '') +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
@@ -531,7 +569,37 @@ export async function speak(
   }));
   while (contents.length && contents[0].role === 'model') contents.shift();
   if (!contents.length || contents[contents.length - 1].role === 'model') {
-    contents.push({ role: 'user', parts: [{ text: '(המשך)' }] });
+    /*
+     * The API needs the last turn to be `user`, and every UNPROMPTED message —
+     * a fire, a nag, the daily brief, the close-out — ends on a bot turn. So
+     * one has to be synthesised. What it says is load-bearing.
+     *
+     * It used to be the bare string "(המשך)", and the model read that as his
+     * word and answered IT instead of rewriting the baseline. Production,
+     * chat B, 25.08.2026 22:00 — this is the "לקחת תרופה" reminder FIRING:
+     *
+     *   המשך למה בדיוק? הכל נקי פה.
+     *   או שתביא משימה חדשה, או שתשחרר אותי לראות טלוויזיה.
+     *
+     * and its nag half an hour later: "מה המשך? הכל סגור. לך לישון." A
+     * reminder that goes off, never names the errand, and asserts that nothing
+     * is open. `rejections` #2 and #3 are the same phantom months earlier,
+     * caught only because the model happened to put quotes round it — rule 3
+     * sees a quoted invention and nothing sees an unquoted one.
+     *
+     * The replacement is not a nicer filler word. Any word he could plausibly
+     * have typed has this failure mode; the fix is to say outright that he did
+     * not type anything, so there is nothing to answer and the only thing left
+     * to do is the rewrite the system prompt asked for.
+     */
+    contents.push({
+      role: 'user',
+      parts: [{
+        text:
+          '[הודעה מהמערכת, לא ממנו] הוא לא אמר עכשיו כלום — אתה זה שפותח. ' +
+          'אל תתייחס להודעה הזאת ואל תצטט אותה. נסח את מה שכתוב ב"מה שקרה עכשיו" בקול שלך.',
+      }],
+    });
   }
 
   // Decorative: the baseline this rewrites is already true and already

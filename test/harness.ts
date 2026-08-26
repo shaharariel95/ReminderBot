@@ -96,6 +96,17 @@ export interface GeminiCall {
    * difference is not observable from `system` alone.
    */
   schema?: any;
+  /**
+   * The conversation turns actually sent, alongside the systemInstruction.
+   *
+   * Captured for the same reason `schema` is: the Gemini API requires the last
+   * turn to be `role: 'user'`, so an unprompted message (a fire, a nag, the
+   * daily brief) has to synthesise one — and WHAT that synthetic turn says is
+   * not observable from `system`. It shipped as a bare "(המשך)" for months,
+   * which the model read as the user's own word and answered instead of the
+   * baseline. See brain.speak and test/v14.test.ts.
+   */
+  contents?: { role: string; parts: { text: string }[] }[];
 }
 
 export interface Rig {
@@ -315,6 +326,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
         kind: isRouter ? 'router' : 'speak',
         system: body?.systemInstruction?.parts?.[0]?.text ?? '',
         schema: body?.generationConfig?.responseSchema,
+        contents: body?.contents,
       });
       rig.timeline.push(`gemini:${isRouter ? 'router' : 'speak'}`);
       const queue = isRouter ? rig.routerQueue : rig.speakQueue;

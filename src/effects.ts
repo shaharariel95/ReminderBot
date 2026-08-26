@@ -3,7 +3,7 @@ import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDateKey, localDayBounds, wallParts, wallString, wallToUtc } from './time';
-import { findFutureInstant, findNamedTime, parseDuration } from './quickparse';
+import { findFutureInstant, findNamedTime, isBareTimeWord, parseDuration } from './quickparse';
 import { detectPattern } from './patterns';
 
 /**
@@ -85,7 +85,19 @@ export function splitIntoItems(title: string): string[] {
   if (parts.length < 2 || parts.length > db.MAX_ITEMS) return [];
   // The Hebrew infinitive marker, followed by a real letter. Two of them means
   // he listed actions, not the parts of one action.
-  const verbs = parts.filter((p) => /^ל[א-ת]/.test(p)).length;
+  //
+  // Except that ל also glues onto a day: "להיום" passes that test and is not
+  // an errand. Production reminder 57, "לקבוע רעמוו נשק במאי, להיום", became
+  // two tickable items and the nag went on to name the second one out loud.
+  // The time phrase belongs to the SCHEDULE and the router left it in the
+  // title; discounting it here means the part count drops to one and nothing
+  // is split at all, which is the right outcome — over-splitting is the worse
+  // error, and a title with a comma in it is just what he typed.
+  //
+  // Only the split is refused. The title still reads "…במאי, להיום", because
+  // stripping time words out of a title the ROUTER wrote is a different and
+  // far riskier job: "לתכנן את היום" is an errand whose subject is the day.
+  const verbs = parts.filter((p) => /^ל[א-ת]/.test(p) && !isBareTimeWord(p)).length;
   return verbs >= 2 ? parts : [];
 }
 
@@ -912,6 +924,55 @@ export async function applyIntent(
         return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
       }
 
+      /*
+       * Is this reminder RINGING right now?
+       *
+       * brain.ts tells the router that a task which has already rung takes
+       * `snooze` and one still waiting takes `reschedule`. On 23.08.2026 it
+       * returned `reschedule` for "עוד חצי שעה", said thirty seconds after
+       * "נו? ללכת למוסך" went out, and the two branches below are what that
+       * cost. A prompt rule is a request; this is the deterministic half.
+       */
+      const ringing = ctx.open.find((i) => i.reminder_id === rem.id) ?? null;
+
+      /*
+       * A RELATIVE push on something that is ringing is a snooze, whatever the
+       * router called it.
+       *
+       * "עוד חצי שעה" means "not now, later" — it is about this ring, not
+       * about the rule. Taking it as a reschedule flattens the rule into the
+       * offset: scheduleFromIntent turns in_minutes into `{type:'once'}`, so
+       * pushing a DAILY reminder half an hour would end the recurrence
+       * outright. That is the same trap findNamedTime refuses to walk into
+       * when it sees a repeat rule, and it has to be refused here too.
+       *
+       * Only the relative form is redirected. "תעביר את זה ל-9" while it rings
+       * is an absolute retime and stays one — it falls through to the branch
+       * below, which closes the ring it supersedes.
+       */
+      if (ringing) {
+        const pushed = intent.in_minutes && intent.in_minutes > 0
+          ? intent.in_minutes
+          : scheduleFromIntent(intent, tz) === null ? parseDuration(userText) : null;
+        if (pushed !== null && pushed > 0) {
+          const minutes = Math.min(720, Math.max(5, pushed));
+          await db.snoozeInstance(env, ringing.id, minutes);
+          const snoozed: Effect[] = [
+            {
+              kind: 'instance_snoozed',
+              id: ringing.id,
+              title: ringing.title,
+              until: Date.now() + minutes * 60_000,
+              minutes,
+            },
+          ];
+          // Same as the `snooze` branch: the moment he pushes it for the sixth
+          // time is the moment the question about the hour makes sense.
+          snoozed.push(...(await patternFor(env, chatId, ctx, ringing.reminder_id, ringing.title)));
+          return snoozed;
+        }
+      }
+
       // The router routinely returns a reschedule with the time field empty,
       // even when he said the hour out loud in the same breath. Reading it off
       // his own words is the same move parseDuration already makes for snooze,
@@ -944,6 +1005,31 @@ export async function applyIntent(
 
       if (!(await db.retimeReminder(env, rem.id, next, JSON.stringify(schedule)))) {
         return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
+      }
+
+      /*
+       * Moving a reminder that is ringing SUPERSEDES the ring.
+       *
+       * Without this the instance is orphaned: retimeReminder puts the row
+       * back to `scheduled`, the cron fires it again at the new time, and a
+       * second instance opens alongside the first. Production, 23.08.2026 —
+       * reminder 61 rang at 08:30, was moved to 09:00, and at 09:00:42 opened
+       * instance 41 while instance 39 was still open and still on its nag
+       * ladder. He got a fresh fire and a nag for the old ring three seconds
+       * apart, then closed both: "רצף 27" and "רצף 28" for one trip.
+       *
+       * `skipped`, never `done` or `failed`. He did not do it and he did not
+       * flake — he moved it, and db.stats counts only done/failed, so this
+       * cannot pay him a streak point for an errand he has not run yet.
+       *
+       * Best-effort: the reminder really has been retimed either way, and a
+       * failure to tidy the old ring must not turn a successful move into a
+       * reported failure.
+       */
+      if (ringing) {
+        await db
+          .closeInstance(env, ringing.id, 'skipped')
+          .catch((e) => console.error('closing the ring a retime superseded', e));
       }
 
       // Giving an inbox capture its FIRST hour is not a move, and saying

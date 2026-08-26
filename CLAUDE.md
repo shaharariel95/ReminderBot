@@ -32,7 +32,8 @@ whether it belongs in `WROTE` (types.ts), and add it to the sample lists in
 `test/voice.test.ts` and `test/validate.test.ts` — they enumerate kinds by
 hand and will not tell you it is missing.
 
-`validate.ts` has four rules, each with an allow-list built by `facts.ts`:
+`validate.ts` has six rules, each with an allow-list built by `facts.ts`.
+Rules 1–4 ask "did the model INVENT this?":
 
 1. clock times — only times the turn actually knows
 2. write-claim verbs — only when a write of THAT KIND happened (CLAIM_GROUPS).
@@ -40,10 +41,63 @@ hand and will not tell you it is missing.
 3. quoted titles and prose — only real ones
 4. elapsed-time claims — only spans the turn can back up
 
+Rules 5–6 ask the opposite question, and they exist because the first four
+have a blind side: **a rewrite that says LESS than the baseline asserts
+nothing, so it passes all of them.**
+
+5. a MOVE may not drop the hour it moved to
+6. a reminder that FIRES must name the errand
+
+Both are floors, deliberately low, because the persona's job is to reword and
+a rule demanding fidelity would discard good writing. Rule 5 is scoped to
+moves alone: on a create the operation is legible without the clock, on a
+delete there is no clock. Rule 6 is scoped to fires alone — a NAG refers back
+to a thread he is already in ("רק תרים את הפלסטיק של המזגן" against the title
+"לנקות פילטרים למזגנים"), and substring matching cannot see through a Hebrew
+prefix and a plural. The nag half of that failure is closed at its root
+instead, in `brain.speak`.
+
 If you add a fact the model is shown, sweep it into `facts.ts` too, or the
 validator will discard truthful rewrites for repeating what the prompt handed
 them. That failure mode is silent: it shows up as a rising rejection count in
-`/diag`, not as an error.
+`/diag`, not as an error. It is not hypothetical and not rare: `rejections` #9
+binned a good rewrite because he had typed a stray apostrophe ("עוד 'שעה
+בערך") and the quote was compared with a raw `includes`. Both quote tests now
+fold quote marks, geresh/gershayim and whitespace first (`normQuote`).
+
+**The failed turn never reaches the model at all.** `sendOutcome` skips
+`speak()` when the effects carry `nothing: 'failed'`. The failure wording is
+written to confirm and deny nothing; handing it to something whose licence is
+to rephrase invites exactly what it was written to avoid, and that is
+`rejections` #8 — "העברתי את #60 ללכת למוסך להיום ב-08:47" over a turn that
+had thrown, caught only because 08:47 was an hour the turn did not know.
+
+## The turn the model is handed when nobody spoke
+
+The Gemini API requires the last entry in `contents` to be `role: 'user'`.
+Every unprompted message — a fire, a nag, the brief, the close-out, a
+check-in — ends on a bot turn, so `brain.speak` has to synthesise one.
+
+**What that synthetic turn says is load-bearing.** It was the bare string
+`(המשך)` for months, and the model read it as his word and answered IT instead
+of rewriting the baseline. Production, chat B, 25.08.2026 22:00 — this is the
+"לקחת תרופה" reminder FIRING:
+
+```
+המשך למה בדיוק? הכל נקי פה.
+או שתביא משימה חדשה, או שתשחרר אותי לראות טלוויזיה.
+```
+
+and its nag: "מה המשך? הכל סגור. לך לישון." A reminder that goes off, never
+names the errand, and asserts that nothing is open. `rejections` #2 and #3 are
+the same phantom months earlier, caught only because the model happened to put
+quotes round it — rule 3 sees a quoted invention and nothing saw an unquoted
+one until rule 6.
+
+The replacement is not a nicer filler word: any word he could plausibly have
+typed has this failure mode. The turn now says outright that he said nothing
+and that this is the bot opening. If you ever change it, change it to
+something that cannot be read as speech.
 
 ## Saying nothing, and saying "נו?"
 
@@ -111,6 +165,39 @@ single fire, because that ENDS the recurrence — the same trap the retime butto
 was fixed for. Two times in one sentence and an hour already past are the other
 two. Every refusal falls through to the question, which is what the slot is for.
 
+## Moving a reminder that is ringing
+
+A `reschedule` on a reminder with an OPEN instance is two different requests
+depending on how he phrased the time, and until 0.14.1 it was neither.
+
+Reminder 61, "ללכת למוסך", 23.08.2026, straight out of `events`:
+
+```
+08:30:38  צלצלה   instance 39 opens
+08:30:54  הוזזה   retimed to 09:00 — instance 39 left untouched
+09:00:42  צלצלה   instance 41 opens, while 39 is STILL open
+09:00:45  נדנוד   on instance 39, three seconds after the new fire
+09:04     נסגרה   instance 39 — "רצף 27"
+09:31     נסגרה   instance 41 — "רצף 28"
+```
+
+One trip to the garage, two streak points, four messages inside ten seconds.
+
+- **A RELATIVE push on something that is ringing is a snooze**, whatever the
+  router called it. `brain.ts` says so in prose and the model ignored it for
+  "עוד חצי שעה"; `applyIntent` now decides it deterministically. This matters
+  most on a REPEAT: `scheduleFromIntent` turns `in_minutes` into
+  `{type:'once'}`, so taking it as a reschedule would end the recurrence — the
+  same trap `findNamedTime` refuses to walk into when it sees a repeat rule.
+- **An ABSOLUTE retime supersedes the ring.** "תעביר את זה ל-9" stays a
+  reschedule and closes the open instance as `skipped`. Never `done` or
+  `failed`: he did not do it and he did not flake, and `db.stats` counts only
+  those two, so a superseded ring cannot pay him a streak point.
+
+Note what was NOT done: `dueReminders` still has no "skip if an instance is
+open" guard, and must not get one. A daily reminder he never closed should
+still ring tomorrow — that is a new day's dose, not a duplicate.
+
 ## Items
 
 A reminder can hold several errands (`reminder_items`, migrations/011). Items
@@ -121,6 +208,20 @@ Splitting is deliberately narrow (`effects.splitIntoItems`): commas, plus at
 least two parts starting with an infinitive ל. Over-splitting is the worse
 error — a checklist he did not ask for turns one task into three ticks he has
 to clear, whereas a title with commas in it is just what he typed.
+
+**ל also glues onto a day.** "לקבוע רעמוו נשק במאי, להיום" was split into two
+items, the second of them "להיום", and the nag then named it out loud: "עזוב
+את 'להיום'. רק תעשה את החלק של…" — the bot naming an errand that does not
+exist. `quickparse.isBareTimeWord` discounts those parts from the verb count,
+which drops it to one and refuses the split entirely. Note what the fix is NOT:
+it is not a rule about ל followed by ה, because "להיות", "להיכנס" and every
+other nif'al infinitive has exactly that shape and every one of them is a real
+errand. It matches whole words off the closed list of days and parts of a day.
+
+The title still reads "…במאי, להיום". Stripping time words out of a title the
+ROUTER wrote is a different and much riskier job — "לתכנן את היום" is an errand
+whose subject is the day — and `CLOCK_RESIDUE` already covers the quickparse
+side, where the parse is the thing that was incomplete.
 
 `complete_item` NEVER falls back to closing the whole task, and `matchItem`
 returns null on a tie. Marking the wrong errand is a claim that he did
@@ -285,6 +386,39 @@ It changes exactly one thing, and the thing it does NOT change is the point:
 - What `'replying'` removes is permission to WEAPONISE the number. On
   16.08.2026 that block produced "למה לקח לך 69 דקות להבין מתי זה?" — aimed at
   a cooperative answer to the bot's own question.
+
+**The number is the span he was AWAKE for.** `facts.addElapsed` subtracts the
+quiet window (`time.quietMinutesBetween`). Instance 44 fired at 22:00 and was
+nagged again at 08:03, so a flat subtraction handed the model 630 and he woke
+up to "התרופה מאתמול גוררת חוב של 600 דקות" — nine of those hours being this
+bot's own quiet hours. Accurate arithmetic in the service of a claim about
+HIM, which is the more expensive of the two errors.
+
+Three things hold it together. The raw span still rides in `facts.elapsedRaw`
+and is folded into rule 4's allow-list only — it is equally true, the model can
+derive it from `fired_at` in `openSummary`, and discarding a rewrite for saying
+something true costs more than it protects. `facts.elapsedSpansQuiet` adds one
+line to the prompt saying the night is already out of the number, because
+otherwise the model "corrects" the smaller figure back up. And the discount is
+OFF for `checkin_goal` (`addElapsed(ts, false)`): a goal last touched on Friday
+morning is a span measured in days, and taking two nights out of it hands the
+model a number that reads as a day and a half.
+
+**The daily messages keep quiet hours too.** `briefDue`/`closeoutDue` are
+guarded by `quiet`, exactly as check-ins always were — they were the one
+unprompted path that was not, and the owner's row is `quiet_end_hour` 9 against
+`brief_hour` 8, so the bot opened every morning inside the window he had asked
+it to stay out of. It is a hold, not a cancellation: `markDailySent` runs inside
+the senders, so the day stays unmarked and `dailyDue` picks it up on the first
+tick after the window closes, still bounded by `DAILY_GRACE_HOURS`.
+
+**The close-out says what is still AHEAD.** Everything else in it looks
+backwards — a tally, what is still open, what was given up on — so at 21:00 it
+had nothing to say about the evening and the persona filled the silence: "זהו,
+אין יותר להיום", an hour before a 22:00 dose. `evening_closeout.ahead` carries
+tonight's remaining rows, `voice.ts` states them WITH the hour, `facts.ts`
+sweeps that hour, and "אין זנבות" is now reachable only when the evening is
+empty as well.
 
 **Nags hold off while he is talking** (`CONVERSATION_WINDOW_MIN`). Five
 messages stacked up on 16.08.2026 while he was actively answering, and a bot
@@ -518,6 +652,29 @@ The rig captures `schema` as well as `system` (test/harness.ts) precisely so
 this is assertable: "the model was asked not to" and "the model cannot" are
 different facts and are indistinguishable from the prompt text alone.
 
+**Removing the field did not end this. It relocated it.** Every route/apply
+failure since — `errors` #13, #14 and #15, all after 0.14.0 shipped — is the
+same runaway in `title`, which was the next unbounded STRING within reach:
+
+```
+#13  "ללכת למוסךTrimmed to: ללכת למוסך והוא לא אמר משהו אחר. ללכת למוסך…"  3022
+#14  "ללכת למוסך24.08.2026, 07:30 — הבא: יום ב׳, 24.08.2026, 07:30\n\n…"   4345
+#15  "להזמין רכב לאוסטריה Lights-out-time-limit-reached-or-similar-…"      4800
+```
+
+The first is the model reciting `titleFromHisWords`' own prompt rule back into
+the field it governs; the second is the rendered context block. Each ran until
+the response truncated mid-string, so `JSON.parse` threw and the catch-block
+filed his raw sentence as a reminder — reminder #62's title is one of his
+messages, word for word.
+
+`titleFromHisWords` cannot catch this: it runs on the PARSED intent, and there
+is no parse. Every free-text field in `ACTION_SCHEMA` now carries a
+`maxLength` (title 120, note 200, reason 400 — matching what the code slices
+them to anyway). The lesson is the one `why` taught, one level up: **an
+unbounded free-text field WILL become a scratchpad, and the bound belongs in
+the schema, where decoding enforces it.** If you add a STRING here, bound it.
+
 Not supported, and deliberately: he cannot cancel or move a reminder he set for
 her. Every mutation path resolves through a chat-scoped read, and it is her row
 now.
@@ -559,9 +716,14 @@ was per-model and would simply have stopped binding.
 
 ## Testing
 
-`npm test` runs twelve files with a real in-memory SQLite behind a D1-shaped
+`npm test` runs fifteen files with a real in-memory SQLite behind a D1-shaped
 facade (`test/harness.ts`). The webhook and cron paths run end to end, so
 "the reminder never arrived" is reproducible rather than arguable.
+
+`npm run typecheck` is part of the deal and was red for a while without anyone
+noticing — migration 016 added a required `Settings` field and four hand-built
+fixtures never got it. A permanently red typecheck is how a real type error
+hides, so keep it clean.
 
 **Write the test first, watch it fail, then implement.** And then do the thing
 that actually matters here:
@@ -600,6 +762,7 @@ npx wrangler d1 execute nu-bot --remote --file=./migrations/012_usage_by_chat.sq
 npx wrangler d1 execute nu-bot --remote --file=./migrations/013_friends.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/014_model_health.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/015_event_at.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/016_display_name.sql
 npm run deploy
 ```
 
