@@ -54,6 +54,17 @@ export default {
         ? handleCallback(update, env)
         : handleUpdate(update, env);
       ctx.waitUntil(job.catch((e) => console.error('update', e)));
+      // A second way for the scheduler to be alive.
+      //
+      // The cron is best-effort and demonstrably drops minutes — on 01.09.2026
+      // it dropped eighty in a row and a 16:30 reminder rang at 17:50. An
+      // inbound message is proof the Worker itself is fine, so it is the one
+      // moment the bot can notice the schedule has gone quiet and do something
+      // about it without waiting for a trigger that may not come.
+      //
+      // Alongside his turn rather than before it: his reply must not wait on a
+      // tick, and db.claimTick makes the overlap safe.
+      ctx.waitUntil(catchUpTick(env).catch((e) => console.error('catchUpTick', e)));
     }
     // Always 200 fast, or Telegram retries the same update.
     return new Response('ok');
@@ -74,8 +85,65 @@ export default {
  */
 const DONE_SHOWN_MS = 2 * 24 * 3_600_000;
 
+/**
+ * How late a fire has to be before it admits to it.
+ *
+ * Above the platform's routine jitter — Cloudflare dropped single minutes
+ * thirteen times in the 24h to 02.09.2026 — and far below an outage. See the
+ * fire effect in tickChat for the arithmetic this bounds.
+ */
+const LATE_THRESHOLD_MIN = 3;
+
+/**
+ * How quiet the cron has to have gone before an inbound message runs the tick
+ * itself.
+ *
+ * He is talking to the bot, which means the Worker is demonstrably alive — so
+ * a minute the platform skipped can be made up off the back of his message
+ * rather than waiting for the next one that happens to arrive. Bounded well
+ * above the normal cadence so an ordinary conversation never becomes a second
+ * scheduler; db.claimTick makes it harmless if it is.
+ */
+const CATCHUP_AFTER_MS = 3 * 60_000;
+
+/**
+ * How long everything that happens because of one message may take, in total.
+ *
+ * `gemini.budgets` bounds ONE call's ladder. Nothing bounded the turn, so
+ * route() could spend its 30 seconds and speak() could then start a fresh 30
+ * of its own — and on 02.09.2026 22:27 that is what happened. Routing took
+ * 18.9s, reminder 71 was written correctly at 22:27:58, and then nothing was
+ * sent: no bot message, no error row, no catch anywhere. The invocation was
+ * killed on the wall clock, which — as CLAUDE.md already records — does not
+ * throw, so every `.catch` in the file is bypassed and the turn evaporates.
+ *
+ * He got silence, which is the worst answer this bot can give: it is
+ * indistinguishable from being down, and it lands exactly when he is waiting
+ * to hear that something counted.
+ *
+ * 25 seconds leaves the routing ladder room to walk a slow primary and still
+ * reach a fallback, and leaves the send itself comfortably inside whatever the
+ * runtime allows. What gives way when it runs out is speak(), which is the
+ * right thing to lose — voice.ts output is already true and already shippable.
+ */
+const TURN_BUDGET_MS = 25_000;
+
+/**
+ * Overridable, like GEMINI_BUDGET_MS — but zero is allowed here where it is
+ * not there, and that is deliberate.
+ *
+ * The test rig pins `Date.now()` (harness.withNow), so no test can make time
+ * actually pass. "The turn has already spent its allowance" is therefore only
+ * expressible as an allowance of nothing, and it is the state that matters: it
+ * is what 02.09.2026 22:27 looked like from inside sendOutcome.
+ */
+function turnDeadline(env: Env): number {
+  const n = Number(env.GEMINI_TURN_BUDGET_MS);
+  return Date.now() + (Number.isFinite(n) && n >= 0 ? n : TURN_BUDGET_MS);
+}
+
 async function buildContext(env: Env, chatId: string): Promise<Context> {
-  const [settings, stats, reminders, goals, open, friends, inbox, done] = await Promise.all([
+  const [settings, stats, scheduled, goals, open, friends, inbox, done, ringing] = await Promise.all([
     db.getSettings(env, chatId),
     db.stats(env, chatId),
     db.listReminders(env, chatId),
@@ -97,7 +165,29 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
     // the id out of the conversation. It was right that time. Bounded hard
     // (two days, five rows) because this is prompt space paid on every turn.
     db.recentlyDone(env, chatId, Date.now() - DONE_SHOWN_MS).catch(() => []),
+    // Whatever is ringing RIGHT NOW, whatever its status word says. A `once`
+    // reminder flips to 'done' the moment it fires, so listReminders above
+    // cannot see the one task the bot is actively chasing him about. See
+    // db.ringingReminders and issues.md §4.
+    db.ringingReminders(env, chatId).catch(() => []),
   ]);
+
+  /*
+   * One list, with the ringing rows folded in.
+   *
+   * Merged rather than carried alongside, because FIVE consumers read
+   * `ctx.reminders` and every one of them wanted the same answer: `/list`,
+   * remindersSummary for the router, remindersSummary for the persona,
+   * resolveReminder's lookup by id, and its single-reminder fallback. A
+   * second list would have meant fixing five call sites and missing the sixth.
+   *
+   * Deduplicated by id, because a RECURRING reminder appears in both — it
+   * stays 'scheduled' across its own firing — and a row printed twice is how
+   * the model comes to believe there are two of them.
+   */
+  const byId = new Map(scheduled.map((r) => [r.id, r]));
+  for (const r of ringing) if (!byId.has(r.id)) byId.set(r.id, r);
+  const reminders = [...byId.values()];
   // Only when something is actually being chased. A chat with nothing open has
   // no errands to tick off, and this would otherwise be a query per message to
   // build an empty map.
@@ -113,7 +203,28 @@ async function buildContext(env: Env, chatId: string): Promise<Context> {
 }
 
 async function handleUpdate(update: any, env: Env): Promise<void> {
-  const msg = update.message ?? update.edited_message;
+  /*
+   * An EDIT is not a new message, and running the pipeline on one is how a
+   * single errand becomes two rows.
+   *
+   * This read `update.message ?? update.edited_message` and treated them
+   * identically, so correcting "מחר ב8" to "מחר ב9" routed a second time and
+   * created a second reminder — the first one still sitting there at 8.
+   *
+   * Telegram gives no way to know what the text WAS, so the bot cannot undo
+   * what it did the first time; the only honest options are to ignore the edit
+   * or to say so. Saying so, because silence here looks exactly like the bot
+   * having read it. No model call, no write, one deterministic line.
+   */
+  if (update.edited_message && !update.message) {
+    const editChat = String(update.edited_message?.chat?.id ?? '');
+    if (editChat && (await db.allowedChats(env)).has(editChat)) {
+      await sendMessage(env, editChat, 'לא קורא עריכות של הודעות. תשלח לי את זה כהודעה חדשה.');
+    }
+    return;
+  }
+
+  const msg = update.message;
   if (!msg?.chat?.id) return;
 
   const chatId = String(msg.chat.id);
@@ -264,6 +375,18 @@ async function respondToOwner(
   // equivalent on the cron path, since there's no incoming message to react to.
   if (msg.message_id) await react(env, chatId, msg.message_id, '👀');
 
+  /*
+   * One clock for the whole turn, started here and shared by route() and
+   * speak(). See TURN_BUDGET_MS: each of them used to get its own full
+   * allowance, so a slow router could leave nothing for the send and the
+   * invocation died on the wall clock with no catch anywhere and no message.
+   *
+   * Started before the context reads on purpose. The D1 round trips are part
+   * of what he is waiting through, and a budget that ignores them is not a
+   * budget for the thing he experiences.
+   */
+  const deadline = turnDeadline(env);
+
   // Any inbound message ends a chill period. If he is talking, he is available.
   const ctx = await buildContext(env, chatId);
 
@@ -370,7 +493,7 @@ async function respondToOwner(
           ? [{ action: 'rename', target_id: answeredTitle.target, title: answeredTitle.title }]
           : fast
           ? [fast]
-          : await route(env, ctx, text, history.slice(0, -1), image ?? undefined);
+          : await route(env, ctx, text, history.slice(0, -1), image ?? undefined, deadline);
     // Visible in `wrangler tail`. When the bot claims it did something it
     // didn't, this line is what tells you whether the router or the persona lied.
     console.log(`intent${fast ? ' (quickparse)' : ''}`, JSON.stringify(intents));
@@ -506,7 +629,7 @@ async function respondToOwner(
   // does not want it.
   await tellFriends(env, chatId, effects);
 
-  await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history, 'replying');
+  await sendOutcome(env, chatId, ctx, effects, toneNote, 'high', history, 'replying', deadline);
 }
 
 /**
@@ -545,6 +668,30 @@ async function tellFriends(env: Env, chatId: string, effects: Effect[]): Promise
  *  path — decode() bounds hour/minute but not this, so a crafted callback_data
  *  like 's:1:999999999' would otherwise reach db.snoozeInstance unclamped. */
 const clampSnooze = (minutes: number) => Math.min(720, Math.max(5, minutes));
+
+/**
+ * Will this reminder ring again of its own accord?
+ *
+ * The question `reminders.status` cannot answer: a one-off that has fired and
+ * a recurring reminder that has finished for the day both read 'done' with
+ * next_fire_at NULL (issues.md §4). The schedule is the only thing that knows,
+ * and it has to be asked at the moment of the skip — see the `recurs` comment
+ * on instance_skipped in types.ts.
+ *
+ * An unparseable schedule is treated as NOT recurring, which is the answer
+ * that promises him less. Being told an errand will not come back when it
+ * quietly does is a surprise he can fix in one message; the reverse is a task
+ * that disappears while he is waiting for it.
+ */
+async function reminderRecurs(env: Env, reminderId: number): Promise<boolean> {
+  const rem = await db.getReminder(env, reminderId).catch(() => null);
+  if (!rem) return false;
+  try {
+    return (JSON.parse(rem.schedule) as Schedule).type !== 'once';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * An inline button tap. Zero model calls: the effect is known from the payload,
@@ -605,7 +752,10 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       case 'skip': {
         const inst = await db.getInstance(env, cb.instance);
         if (inst && (await db.closeIfOpen(env, cb.instance, 'skipped', 'כפתור'))) {
-          effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
+          effects.push({
+            kind: 'instance_skipped', id: inst.id, title: inst.title,
+            recurs: await reminderRecurs(env, inst.reminder_id),
+          });
         }
         break;
       }
@@ -660,12 +810,9 @@ async function handleCallback(update: any, env: Env): Promise<void> {
           // closed already. Gating the whole branch on closeIfOpen made the
           // button a no-op for exactly the tasks that most need it — the ones
           // with no other way back.
-          if (
+          const closed =
             inst.status === 'open' &&
-            (await db.closeIfOpen(env, cb.instance, 'skipped', 'נדחה למחר'))
-          ) {
-            effects.push({ kind: 'instance_skipped', id: inst.id, title: inst.title });
-          }
+            (await db.closeIfOpen(env, cb.instance, 'skipped', 'נדחה למחר'));
           const rem = await db.getReminder(env, inst.reminder_id);
           // A recurring reminder already has tomorrow covered by its own rule —
           // overwriting it with a one-off would silently end the recurrence,
@@ -676,13 +823,25 @@ async function handleCallback(update: any, env: Env): Promise<void> {
           } catch {
             /* unparseable schedule: leave it alone */
           }
+          let rearmed = false;
           if (rem && schedule?.type === 'once') {
             const p = wallParts(inst.fired_at, rem.tz);
             const at = wallToUtc(p.year, p.month, p.day + 1, p.hour, p.minute, rem.tz);
             const next: Schedule = { type: 'once', at: wallString(at, rem.tz) };
             if (await db.retimeReminder(env, rem.id, at, JSON.stringify(next))) {
+              rearmed = true;
               effects.push({ kind: 'reminder_retimed', id: rem.id, title: rem.title, at });
             }
+          }
+          // Pushed AFTER the re-arm, not before it, because `recurs` is a claim
+          // about whether he will hear about this again — and on this button
+          // the answer usually comes from the retime two lines up rather than
+          // from the schedule. Emitting it first would have forced the guess.
+          if (closed) {
+            effects.push({
+              kind: 'instance_skipped', id: inst.id, title: inst.title,
+              recurs: rearmed || (schedule !== null && schedule.type !== 'once'),
+            });
           }
         }
         break;
@@ -1050,6 +1209,14 @@ async function sendOutcome(
    * the reply paths opt out explicitly.
    */
   stance: 'chasing' | 'replying' = 'chasing',
+  /**
+   * When the turn this belongs to runs out of time.
+   *
+   * Absent on the cron paths, which are not answering anybody and can take the
+   * full per-call ladder. Present on every reply path, where route() has
+   * already spent part of it — see TURN_BUDGET_MS.
+   */
+  deadline?: number,
 ): Promise<boolean> {
   // The reminder's own history, written here because this is the single point
   // every path converges on — webhook, button tap and cron alike — and it runs
@@ -1101,8 +1268,23 @@ async function sendOutcome(
    */
   const turnFailed = effects.some((e) => e.kind === 'nothing' && e.why === 'failed');
 
+  /*
+   * Out of time is the same answer as out of quota: ship the baseline.
+   *
+   * Checked BEFORE the call rather than left to the deadline to clamp inside
+   * generate(), so a turn with nothing left spends no round trip, no D1 reads
+   * for the profile and history, and no typing indicator. The whole point is
+   * that the message goes out NOW.
+   *
+   * This is the line that would have answered him on 02.09.2026 22:27 — the
+   * reminder was already written and correct, and the only thing between him
+   * and being told so was a persona call the turn could not afford.
+   */
+  const outOfTime = deadline !== undefined && Date.now() >= deadline;
+  if (outOfTime) console.warn('turn out of budget before speak(); shipping the baseline');
+
   let text = baseline;
-  if (facts && !turnFailed && (await modelAllowed(env, priority, chatId))) {
+  if (facts && !turnFailed && !outOfTime && (await modelAllowed(env, priority, chatId))) {
     try {
       const [recent, notes] = await Promise.all([
         history ? Promise.resolve(history.slice(-8)) : db.recentMessages(env, chatId, 8),
@@ -1139,7 +1321,7 @@ async function sendOutcome(
         ],
       };
       const dressed = await withTyping(env, chatId, () =>
-        speak(env, spoken, recent, baseline, toneNote, stance),
+        speak(env, spoken, recent, baseline, toneNote, stance, deadline),
       );
       // Same-turn baseline, never a cached or recomputed one — it's what the
       // validator's allow-lists are built from and what speak() just saw.
@@ -1277,14 +1459,70 @@ async function announceDeploy(env: Env, chatId: string): Promise<void> {
  * another user's reminders, for exactly the reason one failed send never
  * aborts the rest of a tick.
  */
+/**
+ * Run a tick off the back of an inbound message, but only if the cron has
+ * actually gone quiet.
+ *
+ * Deliberately reads the clock and decides here rather than always calling
+ * `tick` and letting the claim sort it out. The claim would sort it out — but
+ * every message would then pay for a write to `meta` and the reasoning "why
+ * does an ordinary conversation touch the scheduler" would be invisible. A
+ * healthy cron is left to do its own job.
+ */
+async function catchUpTick(env: Env): Promise<void> {
+  const last = await db.lastTick(env).catch(() => null);
+  /*
+   * Only on EVIDENCE that the scheduler was alive and has gone quiet.
+   *
+   * "Never ticked at all" is deliberately not evidence, and the first version
+   * of this treated it as the strongest evidence there is. It is not: it is
+   * also the state of a Worker deployed ninety seconds ago, of a fresh
+   * database, and of every test rig — three of which promptly started firing
+   * reminders in the middle of unrelated webhook turns, which is exactly what
+   * this would do in production to a bot whose first cron had simply not
+   * arrived yet.
+   *
+   * A cron that has never run once is a misconfiguration, not a stall, and it
+   * already has a loud reader: /diag says "מעולם לא רץ!". Quietly propping it
+   * up from the webhook path would keep the bot limping — answering when
+   * spoken to, silent the rest of the day — while hiding the one fact that
+   * explains it.
+   */
+  if (last === null || Date.now() - last < CATCHUP_AFTER_MS) return;
+  console.log(`cron looks quiet (last tick ${last === null ? 'never' : `${Date.now() - last}ms ago`}) — catching up`);
+  await tick(env);
+}
+
 async function tick(env: Env): Promise<void> {
   const now = Date.now();
 
-  // Stamped before any work, so /diag can distinguish "the scheduler is dead"
-  // from "the scheduler ran and something inside it threw". Those look
-  // identical from the user's side — no message arrives either way — and they
-  // are completely different bugs.
-  await db.markTick(env, now).catch((e) => console.error('markTick', e));
+  /*
+   * Claimed before any work, not merely stamped.
+   *
+   * The stamp still does its original job — /diag can distinguish "the
+   * scheduler is dead" from "the scheduler ran and something inside it threw",
+   * which look identical from his side and are completely different bugs.
+   *
+   * What is new is that losing the claim ENDS the tick. There are three
+   * triggers now (the every-minute cron, the five-minute catch-up, and a
+   * webhook that notices the cron has gone quiet), and `tick` reads the due
+   * rows before it
+   * writes anything — so two that overlap between the read and the write would
+   * both fire, both nag, and both send. One conditional UPDATE covers all of
+   * that, including the unprompted paths nobody has written yet.
+   *
+   * Fails CLOSED, unlike most best-effort bookkeeping here: if the claim query
+   * throws we do not know whether another tick is running, and a duplicate
+   * ping is worse than a minute's delay on a cadence that retries in sixty
+   * seconds anyway.
+   */
+  const claimed = await db
+    .claimTick(env, now)
+    .catch((e) => {
+      console.error('claimTick', e);
+      return false;
+    });
+  if (!claimed) return;
 
   // The deploy ping is the owner's, not every user's — it is the bot
   // reporting on itself. Before the per-chat work, so a tick with nothing
@@ -1397,6 +1635,11 @@ async function tickChat(
   // the whole block is skipped and the rows stay due — bounded, because
   // `chill` clamps to 72 hours, so a deferred row cannot sit here forever.
   for (const r of muted ? [] : due) {
+    // When it was SUPPOSED to ring, captured BEFORE setNextFire moves the
+    // schedule on. It is the idempotency key for this dose (migrations/017)
+    // and the only way the fire below can know it is late.
+    const dueAt = r.next_fire_at;
+
     // Reschedule first: if the send throws, we still don't fire twice.
     let next: number | null = null;
     try {
@@ -1415,7 +1658,14 @@ async function tickChat(
     const instanceId = await db.createInstance(
       env, r, now,
       now + nagDelayMinutes(0) * 60_000,
+      dueAt,
     );
+    // Somebody else already opened this dose. The row is theirs, the send is
+    // theirs, and going on would ping him twice for one errand.
+    if (instanceId === null) {
+      console.log(`reminder ${r.id} already fired for slot ${dueAt} — skipping`);
+      continue;
+    }
     console.log(`fired reminder ${r.id} → instance ${instanceId}${misses ? ` (${misses} missed)` : ''}`);
     // Ticks from the LAST time this fired are cleared before it goes out
     // again, or a daily three-errand reminder arrives on day two already
@@ -1446,6 +1696,28 @@ async function tickChat(
       // Dropped once it is in the past, so a daily reminder whose appointment
       // has been and gone stops announcing it.
       ...(r.event_at && r.event_at > now ? { eventAt: r.event_at } : {}),
+      /*
+       * Late, and saying so.
+       *
+       * Cloudflare's cron is best-effort: 1251 of ~1420 minutes in the 24h to
+       * 02.09.2026, and on 01.09 it skipped eighty in a row. Reminder #69 was
+       * due at 16:30 and instance 53 records fired_at 17:50:39 — and it opened
+       * with "נו? לנקות את הפילטרים של המזגנים", word for word what it would
+       * have said on time.
+       *
+       * That is a false claim about WHEN, which is the class this whole
+       * pipeline exists to prevent; it arrived through the one door nobody had
+       * built a guard on, because until migrations/017 the scheduled instant
+       * was not on the row to compare against.
+       *
+       * Only past LATE_THRESHOLD_MIN. Single dropped minutes are routine (13
+       * gaps of 3-5 minutes in that same sample), and a reminder that
+       * apologises every morning for scheduling jitter is noise — which is how
+       * a true statement stops being read.
+       */
+      ...(dueAt !== null && now - dueAt >= LATE_THRESHOLD_MIN * 60_000
+        ? { dueAt, lateBy: Math.round((now - dueAt) / 60_000) }
+        : {}),
       ...(misses > 0 ? { misses } : {}),
       ...(items.length ? { items } : {}),
       ...(from ? { from } : {}),
@@ -1553,7 +1825,10 @@ async function tickChat(
     const tone =
       level === 1 && hasItems ? NAG_LADDER_ITEMS : (NAG_LADDER[level] ?? NAG_LADDER[3]);
     await sendOutcome(env, chatId, ctx,
-      [{ kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at, round: level }],
+      [{
+        kind: 'nagged', instanceId: inst.id, title: inst.title, since: inst.fired_at,
+        round: level, granted: inst.granted_min ?? 0,
+      }],
       tone);
   }
 
@@ -1571,8 +1846,24 @@ async function tickChat(
    * first tick after the window closes. DAILY_GRACE_HOURS still bounds it, so
    * a brief cannot arrive at lunchtime.
    */
-  if (briefDue && !quiet) await sendMorningBrief(env, chatId, now, settings.tz);
-  if (closeoutDue && !quiet) await sendEveningCloseout(env, chatId, now, settings.tz);
+  /*
+   * ...and they also keep out of the way of an actual reminder.
+   *
+   * Chat B, 01.09.2026: the morning brief at 08:00:41 and a nag at 08:00:55,
+   * fourteen seconds apart, naming the same two tasks. One tick, two senders,
+   * no coordination. The brief's whole job is to say what today holds; saying
+   * it immediately after ringing about one of those things is not a summary,
+   * it is the same message twice.
+   *
+   * A hold on exactly the same terms as the quiet-hours one above — markDailySent
+   * runs inside the senders, so the day stays unmarked and the next tick, sixty
+   * seconds later, sends it with nothing in the way. DAILY_GRACE_HOURS still
+   * bounds how long that can go on, so a reminder that fires every morning at
+   * the brief hour costs the brief a minute, never the day.
+   */
+  const chasing = due.length > 0 || nags.length > 0;
+  if (briefDue && !quiet && !chasing) await sendMorningBrief(env, chatId, now, settings.tz);
+  if (closeoutDue && !quiet && !chasing) await sendEveningCloseout(env, chatId, now, settings.tz);
 
   if (checkinDue) await maybeCheckIn(env, ctx, chatId, now, quiet, due.length + nags.length > 0);
 }

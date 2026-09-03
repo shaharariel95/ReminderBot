@@ -1006,7 +1006,7 @@ section('the brief does not call this morning "yesterday"');
   // codebase exists to prevent.
   const open = [
     { id: 9, reminder_id: 1, chat_id: CHAT, title: 'לקנות בשר', fired_at: Date.now(),
-      next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+      next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
   ] as any;
   const text = renderBaseline([{ kind: 'morning_brief', rows: [], openCount: 1 }], TZ);
   check('it does not claim they are from yesterday', !text.includes('מאתמול'), `got: ${text}`);
@@ -1252,7 +1252,7 @@ section('a mutation says which row it touched');
   // Nags and fires deliberately do NOT — an id in the middle of being chased
   // reads like a ticketing system, and he already knows what it is about.
   const nag = renderBaseline(
-    [{ kind: 'nagged', instanceId: 9, title: 'לקנות בשר', since: at, round: 1 }],
+    [{ kind: 'nagged', instanceId: 9, title: 'לקנות בשר', since: at, round: 1, granted: 0 }],
     TZ,
   );
   check('a nag stays clean', !nag.includes('#'), `got: ${nag}`);

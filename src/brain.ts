@@ -204,7 +204,28 @@ export function remindersSummary(ctx: Context): string {
       } catch {
         /* keep raw */
       }
-      const next = r.next_fire_at ? formatLocal(r.next_fire_at, r.tz) : 'לא מתוזמן';
+      /*
+       * "צלצלה — מחכה לדיווח", not "לא מתוזמן".
+       *
+       * A reminder with no next_fire_at used to mean one thing: an inbox
+       * capture that had never been given an hour. Since ctx.reminders also
+       * carries whatever is RINGING (see buildContext), it now usually means
+       * the opposite — it has already gone off and is waiting on him.
+       * Rendering that as "not scheduled" reads as broken, two lines above an
+       * openSummary entry saying the same task is open and on its second nag.
+       *
+       * The discriminator is the OPEN INSTANCE, not `active` and not `status`.
+       * Both of those are set to the same values by setNextFire for a fired
+       * one-off as for a row that is genuinely finished — which is the whole
+       * reason §4 exists. `ctx.open` is the only thing here that answers the
+       * engagement question directly.
+       */
+      const ringing = ctx.open.some((i) => i.reminder_id === r.id);
+      const next = r.next_fire_at
+        ? formatLocal(r.next_fire_at, r.tz)
+        : ringing
+          ? 'צלצלה כבר — מחכה לדיווח'
+          : 'לא מתוזמן';
       // The note is the detail that makes a nag land — what it is for, what to
       // bring. It lives on the row precisely so it is still here after the
       // conversation that produced it has been pruned away.
@@ -331,6 +352,10 @@ export async function route(
   userText: string,
   history: { role: 'user' | 'bot'; text: string }[] = [],
   image?: { data: string; mimeType: string },
+  /** The turn-wide deadline this call shares with speak(). See
+   *  GenerateOpts.deadline — routing is the half that must NOT give way, so
+   *  it gets first claim on whatever the turn has left. */
+  deadline?: number,
 ): Promise<Intent[]> {
   // Without this, a bare "כן" is unroutable: the router can't see that the
   // previous turn was "לשים לך תזכורת ל-11?" and the reminder is silently lost.
@@ -427,6 +452,33 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
     contents: [{ role: 'user', parts }],
     jsonSchema: ROUTER_SCHEMA as unknown as Record<string, unknown>,
     maxOutputTokens: 2000,
+    /*
+     * `thinkingLevel: 'high'` WAS HERE, in 0.16.0, and reverting it is the
+     * fix rather than a retreat.
+     *
+     * The reasoning was sound on paper: this call classifies an intent,
+     * resolves an id against five context lists, and — before Stage 1 — did
+     * date arithmetic, all inside constrained decoding with nowhere to work.
+     * `errors` #16 is the model saying so in its own words, 6296 characters of
+     * correct reasoning written into `title` because that was the only string
+     * it could reach.
+     *
+     * Production answered on both counts within the hour:
+     *
+     *   - routing went from seconds to **18.9s**, and the turn died on the
+     *     wall clock with no message, no error row, and no catch anywhere.
+     *     That is what the turn-wide `deadline` below now bounds — but a
+     *     nineteen-second router is not worth having even when it is survivable.
+     *   - it did not even buy the thing it was for. Reminder 71's title still
+     *     came back "ללכת לישון / : ללכת לישון".
+     *
+     * And the premise had already expired: Stage 1's precedence flip means the
+     * model's arithmetic no longer decides anything, so the hard reasoning it
+     * was being given room for is not asked of it any more. The scratchpad is
+     * a schema problem (issues.md §3, a discriminated union per action), not a
+     * thinking-budget problem.
+     */
+    deadline,
     chatId: ctx.settings.chat_id,
   });
 
@@ -510,6 +562,9 @@ export async function speak(
   toneNote?: string,
   /** See sendOutcome. 'replying' withholds the elapsed-minutes block. */
   stance: 'chasing' | 'replying' = 'chasing',
+  /** What is left of the turn. This call is the one that gives way — the
+   *  baseline it rewrites is already true and already shippable. */
+  deadline?: number,
 ): Promise<string> {
   const ctx: Context = {
     settings: facts.settings, stats: facts.stats, reminders: facts.reminders,
@@ -554,6 +609,14 @@ export async function speak(
         // that rang at 22:00 and was slept through, as intended.
         (facts.elapsedSpansQuiet
           ? '\nהמספר הזה כבר לא כולל את שעות השקט — הוא ישן אז. זה נפתח אתמול, אז תגיד "מאתמול" ואל תגלגל לו את הלילה כחוב.'
+          : '') +
+        // Said for the same reason as the line above and NOT by the same line:
+        // the model can subtract fired_at from the clock and would otherwise
+        // "correct" the smaller figure upward. What it must not do is charge
+        // him for the part the bot itself agreed to — production 18:03,
+        // "93 דקות ש… פתוחה", sixty of which were a snooze granted at 17:02.
+        (facts.elapsedSpansGranted
+          ? '\nהמספר הזה כבר לא כולל את הזמן שאתה בעצמך נתת לו כשהוא ביקש דחייה. אל תחזיר אותו למספר הגדול ואל תזקוף לחובתו זמן שהסכמת לו.'
           : '')
       : '') +
     (toneNote ? `\n\n## הנחיית טון לתשובה הזאת\n${toneNote}` : '') +
@@ -607,6 +670,7 @@ export async function speak(
   // should go, leaving room for the routing that decides what actually happens.
   return generate(env, {
     system, contents, temperature: 1.05, maxOutputTokens: 2000, decorative: true,
+    deadline,
     chatId: facts.settings.chat_id,
   });
 }

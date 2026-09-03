@@ -199,6 +199,27 @@ function hhmm(ts: number, tz: string): string {
   return /(\d{2}:\d{2})/.exec(label)?.[1] ?? label;
 }
 
+/**
+ * The two ways to not do it now, on their own row.
+ *
+ * "מחר" was reachable only from the evening close-out, so the keyboard on a
+ * ringing reminder offered `עשיתי · עוד 10 דק׳ · לא היום` and nothing in
+ * between ten minutes and dropping it. Moving it to tomorrow is the deferral
+ * he actually reached for twice in two days, and both times it cost a model
+ * call, a question and a second message — while `tomorrow` sat wired up and
+ * working three functions away.
+ *
+ * Both are kept, because they are different answers: "מחר" re-arms it, "לא
+ * היום" lets it go and is what feeds `gave_up` and the pattern thresholds.
+ * They go on a second row rather than making a row of four — four Hebrew
+ * labels wrap on a phone, and a wrapped keyboard is how the wrong one gets
+ * tapped.
+ */
+const deferRow = (instance: number): Button[] => [
+  { text: 'מחר', data: { t: 'tomorrow', instance } },
+  { text: 'לא היום', data: { t: 'skip', instance } },
+];
+
 export function buttonsFor(
   effects: { kind: string; [k: string]: unknown }[],
   /** Only the inbox slots need these; every other keyboard is time-free. */
@@ -225,11 +246,13 @@ export function buttonsFor(
           : [[{ text: `✓ ${shortLabel(i.title)}`, data: { t: 'item', item } }] as Button[]];
       });
       if (rows.length) {
-        rows.push([
-          { text: 'הכל', data: { t: 'done', instance } },
-          { text: 'עוד 10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
-          { text: 'לא היום', data: { t: 'skip', instance } },
-        ]);
+        rows.push(
+          [
+            { text: 'הכל', data: { t: 'done', instance } },
+            { text: 'עוד 10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
+          ],
+          deferRow(instance),
+        );
         return rows;
       }
     }
@@ -238,8 +261,8 @@ export function buttonsFor(
       [
         { text: 'עשיתי', data: { t: 'done', instance } },
         { text: 'עוד 10 דק׳', data: { t: 'snooze', instance, minutes: 10 } },
-        { text: 'לא היום', data: { t: 'skip', instance } },
       ],
+      deferRow(instance),
     ];
   }
 

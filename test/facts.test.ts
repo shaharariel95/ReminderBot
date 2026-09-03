@@ -101,8 +101,8 @@ section('needs_reminder_choice — the candidates it lists must be quotable');
 section('needs_task_choice — instance titles come from ctx.open, already swept');
 {
   const openInstances = [
-    { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null },
-    { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null },
+    { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null, granted_min: 0 },
+    { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open' as const, proof: null, closed_at: null, granted_min: 0 },
   ];
   const f = buildFacts(ctx({ open: openInstances }), [
     { kind: 'needs_task_choice', action: 'complete', open: openInstances },

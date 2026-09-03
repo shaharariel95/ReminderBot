@@ -65,10 +65,18 @@ section('several reminders firing at once each get their own buttons');
   check('each button is labelled so they can be told apart',
     flat.includes('לקחת אוכל') && flat.includes('לזרוק זבל'), flat);
 
-  // A single fired reminder keeps the original, unlabelled keyboard.
+  // A single fired reminder keeps the UNLABELLED keyboard — there is only one
+  // task, so putting its title on every button is noise. The layout gained a
+  // second row in 0.18.0 (מחר, see deferRow); what this guards is that the
+  // multi-task branch has not swallowed the single-task case, which is the
+  // `.find()` regression above seen from the other side.
   const solo = buttonsFor([{ kind: 'reminder_fired', instanceId: 42, title: 'לרוץ' }]);
-  check('a lone reminder still gets the plain three buttons on one row',
-    !!solo && solo.length === 1 && solo[0].length === 3 && solo[0][0].text === 'עשיתי',
+  check('a lone reminder gets the plain keyboard, with no title on any button',
+    !!solo && solo[0][0].text === 'עשיתי' && !JSON.stringify(solo).includes('לרוץ'),
+    JSON.stringify(solo));
+  check('and every one of the four answers is on it',
+    !!solo && ['done', 'snooze', 'tomorrow', 'skip'].every((t) =>
+      JSON.stringify(solo).includes(`"t":"${t}"`)),
     JSON.stringify(solo));
 
   // One unusable id must not cost the other task its buttons.

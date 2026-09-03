@@ -205,9 +205,11 @@ section(
     { kind: 'reminder_captured', id: 2, title: 'לקנות חלב' },
     { kind: 'reminder_scheduled', id: 2, title: 'לקנות חלב', at: AT },
     { kind: 'reminder_retimed', id: 1, title: 'לרוץ', at: AT },
+  { kind: 'reminder_unchanged', id: 1, title: 'לרוץ', at: AT },
     { kind: 'reminder_deleted', id: 1, title: 'לרוץ' },
     { kind: 'instance_done', id: 9, title: 'לרוץ', streak: 4 },
-    { kind: 'instance_skipped', id: 9, title: 'לרוץ' },
+    { kind: 'instance_skipped', id: 9, title: 'לרוץ', recurs: true },
+  { kind: 'instance_skipped', id: 9, title: 'לרוץ', recurs: false },
     { kind: 'instance_snoozed', id: 9, title: 'לרוץ', until: AT, minutes: 10 },
     { kind: 'instance_started', id: 9, title: 'לרוץ', until: AT },
     { kind: 'reminder_annotated', id: 1, title: 'לרוץ', note: 'נעליים חדשות' },
@@ -222,7 +224,7 @@ section(
     { kind: 'listed_goals', rows: [] },
     { kind: 'listed_inbox', rows: [] },
     { kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false },
-    { kind: 'nagged', instanceId: 9, title: 'לרוץ', since: AT, round: 1 },
+    { kind: 'nagged', instanceId: 9, title: 'לרוץ', since: AT, round: 1, granted: 0 },
     { kind: 'gave_up', instanceId: 9, title: 'לרוץ', rounds: 3 },
     { kind: 'checkin_goal', id: 3, title: 'לפתוח תיק מסחר', why: null, lastProgress: null, lastProgressAt: null, lastCheckinAt: null },
     { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
@@ -246,8 +248,8 @@ section(
     {
       kind: 'needs_task_choice', action: 'complete',
       open: [
-        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
-        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
+        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
       ],
     },
   ];
@@ -308,7 +310,7 @@ section(
     // title match (documented in validate.ts) exists exactly for this.
     const since = wallToUtc(2026, 8, 5, 9, 0, TZ);
     const nag: Effect = {
-      kind: 'nagged', instanceId: 9, title: 'להתקשר לרואה חשבון בעניין הדוח', since, round: 2,
+      kind: 'nagged', instanceId: 9, title: 'להתקשר לרואה חשבון בעניין הדוח', since, round: 2, granted: 0,
     };
     const f = facts([nag]);
     check('facts.titles sweeps the nagged instance\'s title',
@@ -403,7 +405,7 @@ section('rule 4 — an elapsed-time claim must match how long it has actually be
   // one layer whose entire job is to stop invented facts.
   const SINCE = wallToUtc(2026, 8, 10, 9, 0, TZ);
   const nag: Effect = {
-    kind: 'nagged', instanceId: 9, title: 'לדבר על המוסך', since: SINCE, round: 1,
+    kind: 'nagged', instanceId: 9, title: 'לדבר על המוסך', since: SINCE, round: 1, granted: 0,
   };
   // Pinned so "how long has it been" is a fixed 30 minutes, not wall-clock luck.
   const NOW = wallToUtc(2026, 8, 10, 9, 30, TZ);

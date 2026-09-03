@@ -35,6 +35,23 @@ interface GenerateOpts {
    * check-in budget. Omitted only by callers that genuinely have no chat.
    */
   chatId?: string;
+  /**
+   * An absolute deadline shared with everything else in this turn.
+   *
+   * `budgets()` bounds ONE generate() — one ladder, one set of retries. It
+   * cannot see that route() has already spent nineteen seconds before speak()
+   * was even called, so a turn could legitimately run route's 30s and then
+   * speak's fresh 30s back to back.
+   *
+   * Production, 02.09.2026 22:27:39. Routing took 18.9 seconds; the reminder
+   * was written correctly at 22:27:58; and then nothing was sent, no error row
+   * appeared, and no catch anywhere ran — the signature of an overrun killing
+   * `ctx.waitUntil` without throwing. He got silence.
+   *
+   * Passing the same instant to both calls is what makes the budget belong to
+   * the TURN rather than to each call inside it.
+   */
+  deadline?: number;
 }
 
 /** "2026-08-07T14:32" — the window a call is counted against. */
@@ -146,6 +163,16 @@ const DEFAULT_TIMEOUT_MS = 12_000;
  * left of a ten-second overrun, which was not enough to be worth calling.
  */
 const DEFAULT_BUDGET_MS = 30_000;
+
+/**
+ * The least time worth spending a round trip on.
+ *
+ * Below this an attempt is theatre: it cannot finish, it burns a rate-window
+ * slot, and — because the abort surfaces as "model X timed out" — it blames
+ * whichever model happened to be next in the ladder. See the check in
+ * generate() for the message that produced this number.
+ */
+const MIN_ATTEMPT_MS = 1_500;
 
 /**
  * An abort, however the runtime chose to describe it.
@@ -352,14 +379,39 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
   // relied on to fire mid-request, so an exhausted budget costs no round trip
   // at all — and so the error names the budget instead of surfacing as an
   // opaque AbortError from somewhere inside the retry loop.
-  const deadline = Date.now() + total;
+  //
+  // Clamped to the TURN's deadline when the caller has one. Whichever runs out
+  // first wins: this call may not outlive the turn it belongs to, and a turn
+  // with time to spare does not extend it.
+  const deadline = Math.min(Date.now() + total, opts.deadline ?? Infinity);
 
   for (const model of tiers) {
     if (Date.now() >= deadline) break;
     for (let attempt = 0; attempt < 3; attempt++) {
       const left = deadline - Date.now();
-      if (left <= 0) {
-        lastDetail = `budget of ${total}ms exhausted on ${model}`;
+      /*
+       * Not "is there time", but "is there ENOUGH time".
+       *
+       * A round trip that cannot complete is worth less than the honest report
+       * that the budget is gone — and it actively lies about which model is at
+       * fault. Production, 02.09.2026 22:43: two slow models spent 24 of a 25
+       * second turn, and what he was shown was
+       *
+       *     gemini exhausted every tier (gemini-3.5-flash timed out after 635ms)
+       *
+       * naming the one model that had been answering in two seconds all week.
+       * It did not time out. It was handed the scraps.
+       *
+       * CLAUDE.md states this rule for the ladder budget already — "the second
+       * tier inherits a scrap of time and is not worth calling" — and the
+       * turn-wide deadline added in 0.16.1 re-created the exact condition it
+       * warns about, one level up.
+       */
+      if (left < MIN_ATTEMPT_MS) {
+        lastDetail =
+          left <= 0
+            ? `budget of ${total}ms exhausted before ${model}`
+            : `only ${left}ms left, too little to ask ${model}`;
         console.warn(`gemini: ${lastDetail}`);
         break;
       }
@@ -430,7 +482,29 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         .map((p: any) => p.text ?? '')
         .join('')
         .trim();
-      if (text) {
+      const finish = json?.candidates?.[0]?.finishReason ?? 'unknown';
+      /*
+       * A response that ran out of room mid-string is NOT an answer, and this
+       * is the line that used to decide it was.
+       *
+       * `MAX_TOKENS` has been in RETRYABLE since RETRYABLE existed. It was
+       * unreachable: the check below was `if (text)`, and a runaway that hit
+       * the ceiling has plenty of text in it — just not text that parses. So
+       * it returned, `JSON.parse` threw in generateJson, the turn died, and
+       * the catch-block in respondToOwner filed his raw sentence as an inbox
+       * row. That is errors #13, #14, #15, #16 and #17 — five turns, two
+       * retries and four ladder rungs sitting unused each time.
+       *
+       * Scoped to `jsonSchema` deliberately. A truncated PERSONA line is still
+       * Hebrew and still shippable, and it already has a validator and a
+       * deterministic baseline behind it; discarding it would trade a clipped
+       * sentence for no sentence. A truncated JSON object is worth nothing to
+       * anybody. The retry above widens maxOutputTokens and nudges the
+       * temperature, which is also what breaks the repetition loop these
+       * spills actually are.
+       */
+      const truncated = !!opts.jsonSchema && finish === 'MAX_TOKENS';
+      if (text && !truncated) {
         // Best-effort: a usage-tracking failure must never break a working reply.
         await db.recordUsage(env, model, opts.chatId).catch(() => {});
         // It answered, so whatever was held against it is over. Only written
@@ -442,21 +516,26 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         return text;
       }
 
-      const reason = json?.candidates?.[0]?.finishReason ?? 'unknown';
       const u = json?.usageMetadata ?? {};
       lastDetail =
-        `${model} finishReason=${reason} prompt=${u.promptTokenCount ?? '?'} ` +
+        `${model} finishReason=${finish} prompt=${u.promptTokenCount ?? '?'} ` +
         `thoughts=${u.thoughtsTokenCount ?? 0} out=${u.candidatesTokenCount ?? 0} ` +
-        `attempt=${attempt + 1}`;
+        `chars=${text.length} attempt=${attempt + 1}`;
 
-      if (!RETRYABLE.has(reason)) {
+      if (!RETRYABLE.has(finish)) {
         const hint =
-          reason === 'SAFETY' || reason === 'PROHIBITED_CONTENT'
+          finish === 'SAFETY' || finish === 'PROHIBITED_CONTENT'
             ? ' — blocked by safety filters'
             : '';
         throw new Error(`gemini returned no text (${lastDetail})${hint}`);
       }
-      console.warn(`gemini: empty response, retrying — ${lastDetail}`);
+      // Two different conditions land here now, and telling them apart in the
+      // log is the whole point of having chased this one: an EMPTY response is
+      // a filter or a reasoning overrun, a TRUNCATED one is the model using a
+      // string field as a scratchpad (see brain.ACTION_SCHEMA).
+      console.warn(
+        `gemini: ${truncated ? 'truncated' : 'empty'} response, retrying — ${lastDetail}`,
+      );
     }
   }
 

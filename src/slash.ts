@@ -40,6 +40,15 @@ const ALIASES: Record<string, string> = {
   בדיקה: '/diag',
   תקלות: '/errors',
   שגיאות: '/errors',
+  // The singulars, because he typed "/error" on 30.08.2026, was told there is
+  // no such command, and typed it again with the s. A command that exists
+  // under one spelling and not the obvious other one is a command he has to
+  // remember rather than guess — and this is the command he reaches for when
+  // something is already wrong.
+  error: '/errors',
+  errors: '/errors',
+  תקלה: '/errors',
+  שגיאה: '/errors',
   מחכים: '/pending',
   חברים: '/friends',
   // Deliberately only the LISTING. "/friend" needs a chat_id — digits, which
@@ -75,6 +84,47 @@ function normalizeCommand(text: string): string {
  * replies would tell a guest which commands are real.
  */
 const NO_SUCH_COMMAND = 'אין פקודה כזאת. /help לרשימה.';
+
+/**
+ * Past this, the scheduler is not merely jittery — it has stopped.
+ *
+ * The cron is meant to run every minute and does not: Cloudflare invoked the
+ * Worker on 1251 of ~1420 minutes in the 24h to 02.09.2026, with thirteen gaps
+ * of 3-5 minutes. So the threshold has to clear routine drops, or the alarm is
+ * wrong every hour and he learns to scroll past it — which is exactly the
+ * failure this line exists to fix, one level up.
+ *
+ * Five minutes clears every routine gap in that sample and is a fifth of the
+ * one real outage in it.
+ */
+const TICK_STALE_MS = 5 * 60_000;
+
+/**
+ * The cron's health, as a sentence rather than as a timestamp.
+ *
+ * This is the line /diag existed to print and could not read out loud. On
+ * 02.09.2026 at 20:36, twenty-eight minutes into a total cron outage — with a
+ * reminder due the next afternoon that was never going to fire — it said
+ *
+ *     טיק אחרון: יום ד׳, 02.09.2026, 20:08
+ *
+ * in exactly the same voice as `d1: תקין ✓` two lines below. Every fact needed
+ * to diagnose the outage was on screen and none of it was legible, because
+ * subtracting one from the other was left to the reader.
+ *
+ * The age is ALWAYS stated, so a three-minute gap is visible without being an
+ * alarm; the alarm is reserved for a gap that cannot be jitter.
+ */
+function tickLine(tick: number | null, tz: string): string {
+  if (tick === null) return 'מעולם לא רץ!';
+  const ageMs = Math.max(0, Date.now() - tick);
+  const mins = Math.round(ageMs / 60_000);
+  const ago = mins < 1 ? 'לפני פחות מדקה' : `לפני ${mins} דקות`;
+  const stamp = `${formatLocal(tick, tz)} (${ago})`;
+  return ageMs >= TICK_STALE_MS
+    ? `${stamp} — הקרון לא רץ! אמור לרוץ כל דקה. תזכורות לא יצלצלו עד שזה יחזור.`
+    : stamp;
+}
 
 /** Commands only the owner may run. See the gate in handleSlash for why. */
 const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending', '/errors']);
@@ -493,7 +543,7 @@ export async function handleSlash(
         .eventCounts(env, chatId, from, to)
         .catch(() => ({}));
       lines.push(
-        `טיק אחרון: ${tick === null ? 'מעולם לא רץ!' : formatLocal(tick, tz)}`,
+        `טיק אחרון: ${tickLine(tick, tz)}`,
         `צלצלו היום: ${counts['צלצלה'] ?? 0} · לא נמסרו: ${counts['לא נמסרה'] ?? 0} · ` +
           `נדנודים: ${counts['נדנוד'] ?? 0} · נסגרו: ${counts['נסגרה'] ?? 0}`,
       );
@@ -617,8 +667,25 @@ export async function handleSlash(
     }
 
     case '/list': {
-      const reminders = await db.listReminders(env, chatId);
+      /*
+       * Scheduled AND ringing, deduplicated — the same merge buildContext
+       * makes, for the same reason.
+       *
+       * `listReminders` alone filters `status = 'scheduled'`, and a `once`
+       * reminder goes to 'done' the moment it fires. So on 02.09.2026, with
+       * #69 ringing and on its second nag, this command printed nothing at all
+       * — and this is the command the failure message itself points him at
+       * ("תבדוק ב-/list שהכל כמו שצריך"). See db.ringingReminders, issues.md §4.
+       */
+      const [scheduled, ringing] = await Promise.all([
+        db.listReminders(env, chatId),
+        db.ringingReminders(env, chatId).catch(() => []),
+      ]);
+      const byId = new Map(scheduled.map((r) => [r.id, r]));
+      for (const r of ringing) if (!byId.has(r.id)) byId.set(r.id, r);
+      const reminders = [...byId.values()];
       if (!reminders.length) return 'אין לך תזכורות פעילות.';
+      const openIds = new Set(ringing.map((r) => r.id));
       const settings = await db.getSettings(env, chatId);
       // One query for every reminder's errands, not one per row. This is the
       // command he runs most, and it is also where "which of the three is
@@ -634,7 +701,14 @@ export async function handleSlash(
           } catch {
             /* raw */
           }
-          const next = r.next_fire_at ? formatLocal(r.next_fire_at, settings.tz) : 'לא מתוזמן';
+          // Same three-way reading as remindersSummary: a row with no next
+          // fire is either ringing right now or was never armed, and calling
+          // the first one "לא מתוזמן" is how /list came to look broken.
+          const next = r.next_fire_at
+            ? formatLocal(r.next_fire_at, settings.tz)
+            : openIds.has(r.id)
+              ? 'צלצלה כבר — מחכה לדיווח'
+              : 'לא מתוזמן';
           const head = `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${
             r.requires_proof ? ' · דורש הוכחה' : ''
           }`;

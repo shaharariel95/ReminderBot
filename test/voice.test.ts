@@ -21,9 +21,11 @@ const samples: Effect[] = [
   { kind: 'reminder_captured', id: 2, title: 'לקנות חלב' },
   { kind: 'reminder_scheduled', id: 2, title: 'לקנות חלב', at: AT },
   { kind: 'reminder_retimed', id: 1, title: 'לרוץ', at: AT },
+  { kind: 'reminder_unchanged', id: 1, title: 'לרוץ', at: AT },
   { kind: 'reminder_deleted', id: 1, title: 'לרוץ' },
   { kind: 'instance_done', id: 9, title: 'לרוץ', streak: 4 },
-  { kind: 'instance_skipped', id: 9, title: 'לרוץ' },
+  { kind: 'instance_skipped', id: 9, title: 'לרוץ', recurs: true },
+  { kind: 'instance_skipped', id: 9, title: 'לרוץ', recurs: false },
   { kind: 'instance_snoozed', id: 9, title: 'לרוץ', until: AT, minutes: 10 },
   { kind: 'instance_started', id: 9, title: 'לרוץ', until: AT },
   { kind: 'reminder_annotated', id: 1, title: 'לרוץ', note: 'נעליים חדשות' },
@@ -38,7 +40,7 @@ const samples: Effect[] = [
   { kind: 'listed_goals', rows: [] },
   { kind: 'listed_inbox', rows: [] },
   { kind: 'reminder_fired', id: 1, title: 'לרוץ', instanceId: 9, requiresProof: false },
-  { kind: 'nagged', instanceId: 9, title: 'לרוץ', since: AT, round: 1 },
+  { kind: 'nagged', instanceId: 9, title: 'לרוץ', since: AT, round: 1, granted: 0 },
   { kind: 'gave_up', instanceId: 9, title: 'לרוץ', rounds: 3 },
   { kind: 'checkin_goal', id: 3, title: 'לפתוח תיק מסחר', why: null, lastProgress: null, lastProgressAt: null, lastCheckinAt: null },
   { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
@@ -68,8 +70,8 @@ const samples: Effect[] = [
   {
     kind: 'needs_task_choice', action: 'complete',
     open: [
-      { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
-      { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+      { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
+      { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
     ],
   },
 ];
@@ -122,8 +124,8 @@ check('needs_task_choice lists every open instance, not just one',
     const t = render({
       kind: 'needs_task_choice', action: 'complete',
       open: [
-        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
-        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null },
+        { id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
+        { id: 10, reminder_id: 2, chat_id: '1', title: 'לזרוק זבל', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 },
       ],
     });
     return t.includes('לקחת בגד ים') && t.includes('לזרוק זבל');
@@ -152,7 +154,7 @@ section('a reminder with no subject never has the fallback title read back at it
   check('and still states the exact time it was set for',
     createdUntitled.includes('07:05'), `got: ${createdUntitled}`);
 
-  const naggedUntitled = render({ kind: 'nagged', instanceId: 9, title: UNTITLED_TITLE, since: AT, round: 1 });
+  const naggedUntitled = render({ kind: 'nagged', instanceId: 9, title: UNTITLED_TITLE, since: AT, round: 1, granted: 0 });
   check('the nag does not quote the fallback title either',
     !naggedUntitled.includes(`"${UNTITLED_TITLE}"`), `got: ${naggedUntitled}`);
   check('but still states when it has been open since',
@@ -226,7 +228,7 @@ section('the daily messages describe the day without claiming to have changed it
 
   const inst = (id: number, title: string, status: 'open' | 'failed') => ({
     id, reminder_id: 1, chat_id: '1', title, fired_at: AT, next_nag_at: null,
-    nag_count: 0, status, proof: null, closed_at: null,
+    nag_count: 0, status, proof: null, closed_at: null, granted_min: 0,
   });
 
   const closeout = renderBaseline([{
@@ -333,7 +335,7 @@ section('WROTE invariant — neither new non-writing effect uses a CLAIM verb');
   check('needs_task_choice\'s baseline contains no CLAIM verb',
     !CLAIM.test(render({
       kind: 'needs_task_choice', action: 'complete',
-      open: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null }],
+      open: [{ id: 9, reminder_id: 1, chat_id: '1', title: 'לקחת בגד ים', fired_at: AT, next_nag_at: null, nag_count: 0, status: 'open', proof: null, closed_at: null, granted_min: 0 }],
     })));
 }
 

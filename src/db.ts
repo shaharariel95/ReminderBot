@@ -333,10 +333,30 @@ export async function recentlyDone(
   sinceMs: number,
   limit = 5,
 ): Promise<Reminder[]> {
+  /*
+   * Ordered and filtered by when it FINISHED, not when it was created.
+   *
+   * It read `created_at >= ?` until 0.18.0, which is the wrong date for the
+   * question this function asks. "ללכת למוסך ב10:30" about a task that fired
+   * and closed this morning is the case the block exists for — and a reminder
+   * set last week and closed ten minutes ago is precisely the row that filter
+   * drops. The window was six hours wide and being applied to a timestamp that
+   * could be arbitrarily older than the event it was standing in for.
+   *
+   * COALESCE rather than an inner join: a reminder can reach 'done' without an
+   * instance ever opening (a create that was immediately completed), and those
+   * rows still have their creation date as the only date they have. Falling
+   * back to it preserves exactly the old behaviour for them instead of
+   * silently dropping a class of row while fixing another.
+   */
   const res = await env.DB.prepare(
-    `SELECT * FROM reminders
-      WHERE chat_id = ? AND status = 'done' AND created_at >= ?
-      ORDER BY id DESC LIMIT ?`,
+    `SELECT r.*, COALESCE(MAX(i.closed_at), r.created_at) AS finished_at
+       FROM reminders r
+       LEFT JOIN instances i ON i.reminder_id = r.id AND i.closed_at IS NOT NULL
+      WHERE r.chat_id = ? AND r.status = 'done'
+      GROUP BY r.id
+     HAVING finished_at >= ?
+      ORDER BY finished_at DESC LIMIT ?`,
   )
     .bind(chatId, sinceMs, limit)
     .all<Reminder>();
@@ -562,6 +582,20 @@ export async function setNextFire(env: Env, id: number, next: number | null): Pr
     .run();
 }
 
+/**
+ * Open one instance — or refuse, because this dose is already open.
+ *
+ * Returns `null` when the (reminder, due slot) pair already exists, which is
+ * how a second tick that got past the claim in claimTick finds out it is a
+ * duplicate. The caller must treat null as "somebody else already fired this"
+ * and go no further: sending is what costs the user a duplicate ping, and the
+ * instance row is the thing that says whether he was told.
+ *
+ * `dueAt` is optional so the pre-017 shape still compiles for callers that
+ * genuinely have no scheduled slot to name. Passing it is what arms both the
+ * uniqueness guarantee AND the lateness the fire is able to admit to, so every
+ * real caller should.
+ */
 export async function createInstance(
   env: Env,
   r: Reminder,
@@ -573,14 +607,58 @@ export async function createInstance(
    * per-reminder override for anyone who sets it deliberately.
    */
   nextNagAt: number = firedAt + r.nag_interval_min * 60_000,
-): Promise<number> {
+  /** The instant it was SUPPOSED to ring — `next_fire_at`, read before the
+   *  schedule was advanced. See migrations/017. */
+  dueAt: number | null = null,
+): Promise<number | null> {
   const res = await env.DB.prepare(
-    `INSERT INTO instances (reminder_id, chat_id, title, fired_at, next_nag_at, nag_count, status)
-     VALUES (?, ?, ?, ?, ?, 0, 'open')`,
+    `INSERT INTO instances (reminder_id, chat_id, title, fired_at, next_nag_at, nag_count, status, due_at)
+     VALUES (?, ?, ?, ?, ?, 0, 'open', ?)
+     ON CONFLICT DO NOTHING`,
   )
-    .bind(r.id, r.chat_id, r.title, firedAt, nextNagAt)
+    .bind(r.id, r.chat_id, r.title, firedAt, nextNagAt, dueAt)
     .run();
+  // `last_row_id` is not cleared when a conflict swallows the insert — it
+  // still holds whatever this connection wrote last, which would be a
+  // perfectly plausible id belonging to somebody else's instance. `changes` is
+  // the only honest answer to "did this write happen".
+  if ((res.meta.changes ?? 0) === 0) return null;
   return Number(res.meta.last_row_id);
+}
+
+/**
+ * The reminders behind whatever is ringing right now.
+ *
+ * `listReminders` filters `status = 'scheduled'`, and `setNextFire(id, null)`
+ * flips a `once` reminder to 'done' the moment it FIRES — so for the entire
+ * window in which the bot is chasing him, the row reads as finished and drops
+ * out of every list at once. Production, 02.09.2026: #69 rang at 16:30, was
+ * nagged twice, and at 19:17 "מחר ב16:30" was answered **"אין לי תזכורת
+ * כזאת."** `/list` was empty the whole time, and the persona was being told
+ * "זו הרשימה המלאה — מה שלא כאן, לא קיים" about the very task it was nagging
+ * him about.
+ *
+ * This is the ENGAGEMENT question — "is it ringing now" — asked separately
+ * instead of being read off a `status` word that is answering two others. See
+ * issues.md §4; the full column split follows, and this is the half that was
+ * costing him messages.
+ *
+ * `status != 'cancelled'` is not decoration: retimeReminder and renameReminder
+ * both exclude cancelled rows in their WHERE clause, so resurrecting one here
+ * would put a reminder he deliberately deleted back in front of the model,
+ * where every write against it would then silently fail.
+ */
+export async function ringingReminders(env: Env, chatId: string): Promise<Reminder[]> {
+  const res = await env.DB.prepare(
+    `SELECT r.* FROM reminders r
+       JOIN instances i ON i.reminder_id = r.id
+      WHERE i.chat_id = ? AND i.status = 'open' AND r.status != 'cancelled'
+      GROUP BY r.id
+      ORDER BY r.id`,
+  )
+    .bind(chatId)
+    .all<Reminder>();
+  return res.results ?? [];
 }
 
 export async function openInstances(env: Env, chatId: string): Promise<Instance[]> {
@@ -649,8 +727,14 @@ export async function closeInstance(
 }
 
 export async function snoozeInstance(env: Env, id: number, minutes: number): Promise<void> {
-  await env.DB.prepare('UPDATE instances SET next_nag_at = ? WHERE id = ?')
-    .bind(Date.now() + minutes * 60_000, id)
+  // granted_min accumulates rather than being overwritten: he can push the
+  // same instance five times and every one of those grants was the bot's own
+  // answer. facts.ts subtracts the total from the figure a nag is allowed to
+  // quote at him — see migrations/018 and the 18:03 "93 דקות" it names.
+  await env.DB.prepare(
+    'UPDATE instances SET next_nag_at = ?, granted_min = granted_min + ? WHERE id = ?',
+  )
+    .bind(Date.now() + minutes * 60_000, minutes, id)
     .run();
 }
 
@@ -1625,20 +1709,56 @@ export async function lastTick(env: Env): Promise<number | null> {
 }
 
 /**
- * Stamp that the cron ran.
+ * The shortest gap between two ticks that are allowed to both do work.
  *
- * Written at the START of a tick, not the end. The question /diag has to answer
- * is "is the scheduler alive at all", and a tick that began and then died is a
- * completely different diagnosis from one that never began — recording only
- * ticks that finished would report both as the same silence.
+ * Below the one-minute cadence, so the every-minute trigger always wins its
+ * own slot; above the spacing of anything that could plausibly arrive twice in
+ * the same moment — the five-minute trigger landing on the same minute as the
+ * every-minute one, a retried invocation, or the webhook catch-up firing while
+ * a real cron is already in flight.
  */
-export async function markTick(env: Env, at: number = Date.now()): Promise<void> {
-  await env.DB.prepare(
+export const TICK_CLAIM_GAP_MS = 30_000;
+
+/**
+ * Claim this tick, and say whether we got it.
+ *
+ * This used to be `markTick`, an unconditional stamp, and the upgrade to a
+ * CLAIM is what makes everything else in Stage 0 safe. `tick` reads the due
+ * rows and then writes; two invocations that interleave between the read and
+ * the write both fire, both nag, and both send. Nothing had surfaced that,
+ * because ticks were UNDER-running rather than overlapping — and then the
+ * second cron entry and the webhook catch-up were added, which is precisely
+ * what makes overlap normal.
+ *
+ * One conditional UPDATE is a better answer than per-resource idempotency
+ * everywhere, because it covers what an audit would keep missing: not just the
+ * instance insert, but the nag ladder, the daily marks, the check-in
+ * reschedule and anything added later. Whoever adds the next unprompted
+ * message does not have to know this problem exists.
+ *
+ * Still written at the START of a tick, for the reason the stamp always was:
+ * the question /diag answers is "is the scheduler alive at all", and a tick
+ * that began and then died is a different diagnosis from one that never began.
+ * Recording only ticks that finished reports both as the same silence.
+ */
+export async function claimTick(
+  env: Env,
+  at: number = Date.now(),
+  gapMs: number = TICK_CLAIM_GAP_MS,
+): Promise<boolean> {
+  // The WHERE rides on DO UPDATE, so the row is created on the very first tick
+  // and afterwards only moves forward when the previous claim is old enough.
+  // `changes` is the answer: 1 means we won it, 0 means somebody else has this
+  // window. CAST because `meta.value` is TEXT — comparing it as a string makes
+  // "9" > "10" and the lock silently stops locking.
+  const res = await env.DB.prepare(
     `INSERT INTO meta (key, value) VALUES ('last_tick', ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value
+       WHERE CAST(meta.value AS INTEGER) <= ?`,
   )
-    .bind(String(at))
+    .bind(String(at), at - gapMs)
     .run();
+  return (res.meta.changes ?? 0) > 0;
 }
 
 // ------------------------------------------------------- the open question

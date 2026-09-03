@@ -558,16 +558,21 @@ async function main() {
     rig.restore();
   }
 
-  section('snooze — with no length stated anywhere, the 30-minute default still applies');
+  section('snooze — with no length stated anywhere, it asks instead of inventing one');
   {
+    // This asserted the 30-minute default until 0.18.0, and the default was
+    // the bug: "לא יקרה היום, בוא ננסה שוב מחר" came back as
+    // "דחיתי … ב-30 דקות" — a number he never said, reported as his. The
+    // router omits snooze_minutes routinely, so this is the common path, not
+    // the edge case. See issues.md §12.11.
     const rig = createRig();
     seedSettings(rig);
     seedInstance(rig, 'לעבור במשק 27', Date.now() - 60_000);
     const result = await applyIntent(
       rig.env, CHAT, await ctxFor(rig), { action: 'snooze' }, 'תדחה את זה',
     );
-    check('the fallback is unchanged when he named no length',
-      result[0].kind === 'instance_snoozed' && result[0].minutes === 30,
+    check('no length anywhere means the question, not a guess',
+      result[0].kind === 'needs_time',
       `got: ${JSON.stringify(result[0])}`);
     rig.restore();
   }
@@ -583,8 +588,15 @@ async function main() {
     const result = await applyIntent(
       rig.env, CHAT, await ctxFor(rig), { action: 'snooze' }, 'תדחה לשעה 10',
     );
-    check('it falls back to the default rather than reading the clock as a length',
-      result[0].kind === 'instance_snoozed' && result[0].minutes === 30,
+    // Asserted against the 30-minute default until 0.18.0, which made it read
+    // as a test of the default. What it actually guards is the 600: a clock
+    // read as a length puts the reminder ten hours away and says so with total
+    // confidence. Anything that is not a length is now the question.
+    check('a clock is not a length — it asks rather than snoozing at all',
+      result[0].kind === 'needs_time',
+      `got: ${JSON.stringify(result[0])}`);
+    check('and above all it is not 600 minutes',
+      result[0].kind !== 'instance_snoozed' || result[0].minutes !== 600,
       `got: ${JSON.stringify(result[0])}`);
     rig.restore();
   }

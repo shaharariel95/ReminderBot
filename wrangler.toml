@@ -3,10 +3,21 @@ main = "src/index.ts"
 compatibility_date = "2026-01-01"
 
 # One tick per minute = ~1,440 invocations/day. The free plan gives 100,000/day.
-# Free plan allows up to 3 cron triggers per Worker; we only ever need this one,
-# because scheduling lives in the database, not in cron expressions.
+#
+# TWO entries, not one, and the second is not redundancy for its own sake.
+# Cloudflare's cron is best-effort: over the 24h to 02.09.2026 the Worker was
+# invoked on 1251 of ~1420 minutes — thirteen gaps of 3-5 minutes, plus one of
+# 28. On 01.09 it skipped eighty minutes in a row and reminder #69, due 16:30,
+# rang at 17:50. The trigger was registered and correct the whole time; the
+# platform simply did not call it.
+#
+# A second expression is a SEPARATE schedule entry, so a drop in one does not
+# imply a drop in the other. It is not a second tick: db.claimTick makes the
+# work exclusive within a window, so the */5 entry only ever does anything on
+# a minute the every-minute entry missed. Adding this without that claim would
+# double-fire every fifth minute.
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -15,9 +26,30 @@ database_id = "94c7c9d0-b8b5-4305-8c0f-7588c1c6a140"
 
 [vars]
 DEFAULT_TZ = "Asia/Jerusalem"
-# Primary is the stronger free-tier model; the fallback catches its tighter
-# rate limit — it's the model this project ran successfully before any of the
-# laddering, so it's a known-good floor.
+# The two that lead the ladder. gemini.modelLadder puts these FIRST, ahead of
+# GEMINI_MODELS.
+#
+# 0.16.0 changed these to 3.7 and 3.6 on the reasoning that the ladder was
+# "inverted" — that routing, the hardest call in the system, was being done by
+# the weakest model configured, while two better ones sat below, never reached.
+# The evidence for "better" was the version number.
+#
+# Reverted in 0.16.2, because production measured them inside forty minutes:
+#
+#   /diag probe   HTTP 200 in 4049ms, then HTTP 503 in 9059ms
+#   22:27 turn    18.9s to route; the invocation died before sending anything
+#   22:43 turn    3.7 and 3.6 EACH burned the full 12s per-call timeout,
+#                 leaving 3.5-flash 635ms of a 25s turn. Two reminders lost.
+#
+# "Never reached" is what a working ladder looks like when the first two rungs
+# are fast. The lower rungs are CAPACITY — a separate per-minute quota each —
+# not a queue of better answers waiting to be let in. And the failure that
+# prompted the change (a runaway `title`) happens on every rung, because it is
+# a schema problem, not a model-quality one.
+#
+# The rule this leaves behind: what leads this ladder is a model with a
+# production track record. Promote something by measuring it — deploy it low,
+# watch /diag and the `usage` table — not by reading its version number.
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 # ...and everything under them, best first. The free tier meters requests per
@@ -30,7 +62,7 @@ GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 # hours (see gemini.blockFor) and is named by /diag, so the cost of a stale
 # entry is one round trip a day and a visible line. Unset entirely, the ladder
 # falls back to gemini.DEFAULT_LADDER, which is this same list.
-GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash"
 # Past this many model calls in a local day — across the whole ladder, per
 # chat — low-priority messages (unprompted check-ins) stop calling the model
 # and ship voice.ts output directly. Reminders and nags are never throttled.

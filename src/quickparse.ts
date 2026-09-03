@@ -49,7 +49,7 @@ const EN_NUMBERS: Record<string, number> = {
   seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30,
 };
 
-function toNumber(word: string): number | null {
+export function toNumber(word: string): number | null {
   const cleaned = word.trim().toLowerCase().replace(/^ב/, '');
   if (/^\d+$/.test(cleaned)) return Number(cleaned);
   return HE_NUMBERS[cleaned] ?? EN_NUMBERS[cleaned] ?? null;
@@ -91,7 +91,7 @@ const PERIOD = String.raw`בלילה|בבוקר|בערב|בצהריי?ם|אחה"
  * they match inside "יומיים" and "שבועיים", and "תזכיר לי עוד יומיים" was
  * being read as a recurring reminder and thrown to the router every time.
  */
-const RECURRING =
+export const RECURRING =
   /כל\s+(יום|יומיים|שבוע|שבועיים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)|כל\s+\d{1,3}\s*(דקות|דקה|שעות|שעה)|מדי\s+(יום|בוקר|ערב|שבוע)|פעמיים\s+ביום|\bevery\s+(\d{1,3}\s+)?(day|week|morning|evening|night|hour|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:יומי|שבועי)[תם]?(?![א-ת])/i;
 
 /**
@@ -163,7 +163,7 @@ const TIME_ANCHOR = new RegExp(
   'gi',
 );
 
-function countTimeAnchors(t: string): number {
+export function countTimeAnchors(t: string): number {
   TIME_ANCHOR.lastIndex = 0;
   let n = 0;
   while (TIME_ANCHOR.exec(t) !== null) n++;
@@ -285,7 +285,7 @@ function halfBonus(half: string | undefined, unit: number): number {
  * word too many and turned "בעוד שעתיים להתקשר לאמא" into a reminder called
  * "לאמא".
  */
-function parseRelative(t: string): { minutes: number; matched: string } | null {
+export function parseRelative(t: string): { minutes: number; matched: string } | null {
   const dual = REL_DUAL.exec(t);
   if (dual) {
     const unit = DUALS[dual.groups!.dual];
@@ -472,7 +472,7 @@ export function scanDurations(text: string): DurationHit[] {
 
 // ------------------------------------------------------- absolute times
 
-interface Clock {
+export interface Clock {
   hour: number;
   minute: number;
   matched: string;
@@ -481,7 +481,7 @@ interface Clock {
 }
 
 /** "ב-8" · "בשעה 20:30" · "בשמונה וחצי" · "at 8pm" · "14:30". */
-function matchClock(t: string): Clock | null {
+export function matchClock(t: string): Clock | null {
   // Hebrew, digits: "ב-8", "ב8:30", "בשעה 20:30", "ב-8 וחצי", "ב-11 בלילה".
   // "ל-15:00" — how Hebrew names the new time when moving something, and the
   // form that made "בוא הזיז את התזכורת של הבשר ל15:00" (13.08.2026) parse as
@@ -578,7 +578,7 @@ function applyPeriod(hour: number, period: string | undefined): number {
   return hour; // בבוקר: leave as written.
 }
 
-interface DayHint {
+export interface DayHint {
   /** Calendar days from today, or null when he named a weekday instead. */
   offset: number | null;
   dow: number | null;
@@ -586,7 +586,7 @@ interface DayHint {
 }
 
 /** "מחר" · "מחרתיים" · "היום" · "ביום שלישי" · "בשבת". */
-function matchDay(t: string): DayHint | null {
+export function matchDay(t: string): DayHint | null {
   // מחרתיים FIRST — /מחר/ matches inside it, and testing the short form first
   // is exactly how "מחרתיים ב-9" became a reminder called "תיים", one day early.
   const twoDays = /(?:^|\s)מחרתיים|day\s+after\s+tomorrow/i.exec(t);
@@ -601,8 +601,19 @@ function matchDay(t: string): DayHint | null {
   // "ביום שלישי". The bare "בשלישי" form is left to the router on purpose:
   // "בשני" is just as readable as "in two" and guessing wrong costs a day.
   // "בשבת" is the exception — it can only ever mean Saturday.
+  //
+  // The prefix is `[בל]`, not `ב`. "ליום חמישי" is at least as natural as
+  // "ביום חמישי" and matched NOTHING, because the `(?:^|\s)` needs whitespace
+  // before the ב and "ליום" puts a ל there instead — so the day silently
+  // vanished and the clock alone decided, landing "תעביר את זה ליום חמישי
+  // ב8:00" on tomorrow. Found by the when.ts regression floor, not in
+  // production, which is the point of having one.
+  //
+  // Note the ל is NOT extended to the "בשבת" branch below. "לשבת" is also the
+  // infinitive "to sit", and a reminder about sitting down would be filed
+  // under Saturday.
   const named =
-    new RegExp(String.raw`(?:^|\s)ב?יום\s+(?<d>${WEEKDAY_ALT})(?![א-ת])`).exec(t) ??
+    new RegExp(String.raw`(?:^|\s)[בל]?יום\s+(?<d>${WEEKDAY_ALT})(?![א-ת])`).exec(t) ??
     /(?:^|\s)ב(?<d>שבת)(?![א-ת])/.exec(t);
   if (named) return { offset: null, dow: WEEKDAYS[named.groups!.d], matched: named[0] };
 
@@ -778,7 +789,7 @@ function parseClockTime(t: string, nowMs: number, tz: string): Intent | null {
  * one-tap correction. Predictable beats clever: no inference from the wording of
  * the task itself.
  */
-function resolve(
+export function resolve(
   clock: Clock,
   day: DayHint | null,
   nowMs: number,
@@ -824,7 +835,7 @@ function resolve(
  * caller uses them to OFFER something behind a button. Nothing here may reach
  * a path that writes a reminder without being tapped first.
  */
-const PERIOD_HOUR: [RegExp, number][] = [
+export const PERIOD_HOUR: [RegExp, number][] = [
   [/בוקר/, 9],
   [/צהריי?ם/, 13],
   [/אחה"צ|אחר\s+הצהריי?ם/, 16],
@@ -1078,35 +1089,24 @@ export function parseAnswerTime(text: string, nowMs: number, tz: string): number
   return resolve(clock, day, nowMs, tz)?.ts ?? null;
 }
 
-/**
- * The hour he named, anywhere in a sentence that is doing something else.
+/*
+ * `findNamedTime` USED TO LIVE HERE, and moving it out is the fix rather than
+ * a tidy-up.
  *
- * Unlike quickParse this decides nothing about WHAT he wants — the router has
- * already settled that, and already resolved which reminder. The only question
- * left is "did he say a time", and it exists because he usually did: "בוא נזיז
- * את התזכורת של הבשר ל15:00" cost two exchanges on 14.08.2026, the bot asking
- * for an hour that was sitting in the same sentence.
+ * It answered "did he name a time in this sentence" with `number | null`, and
+ * that null carried four different refusals — no time, a repeat rule, two
+ * times, an hour already gone — plus a fifth case it could not express at all.
+ * The fifth is the one that reached production: a date written in digits
+ * ("תעביר את 69 ל2.9 ב16:30") was invisible to every regex in this file, so
+ * instead of refusing it returned a confident WRONG ANSWER — 01.09, the day it
+ * was already on — and the bot reported a move it had not made.
  *
- * This is the same move `parseDuration` already makes for snooze — read the
- * number off his own words rather than letting an empty router field speak for
- * him. Three refusals, all of them about not guessing:
+ * Rule 2 at the top of this file calls a partial parse "a confident wrong
+ * answer" and calls refusing it the whole design. findNamedTime was the one
+ * path never held to that rule, because it had no residue check and no way to
+ * say "there is something here I cannot read".
  *
- *   - a repeat rule ("כל יום ב-8") is not an instant, and writing one would END
- *     the recurrence, which is far worse than asking
- *   - two times in one sentence, because nothing here can say which he meant
- *   - a time already behind us, which is never what a move is for
+ * It is now `readWhen` in src/when.ts, returning a union in which refusal is a
+ * VALUE with a reason on it. The lexers above stay here: they read tokens,
+ * when.ts reads meaning, and the dependency runs one way only.
  */
-export function findNamedTime(text: string, nowMs: number, tz: string): number | null {
-  const t = text.trim();
-  if (!t || RECURRING.test(t) || countTimeAnchors(t) > 1) return null;
-
-  const rel = parseRelative(t);
-  if (rel && rel.minutes >= 1 && rel.minutes <= 60 * 24 * 60) {
-    return nowMs + rel.minutes * 60_000;
-  }
-
-  const clock = matchClock(t);
-  if (!clock) return null;
-  const at = resolve(clock, matchDay(t), nowMs, tz)?.ts ?? null;
-  return at !== null && at > nowMs ? at : null;
-}

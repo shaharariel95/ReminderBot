@@ -420,6 +420,44 @@ tonight's remaining rows, `voice.ts` states them WITH the hour, `facts.ts`
 sweeps that hour, and "אין זנבות" is now reachable only when the evening is
 empty as well.
 
+**Time the bot GRANTED is not time he wasted.** `instances.granted_min`
+(migrations/018) accumulates every snooze the bot said yes to, and
+`facts.addElapsed` subtracts it exactly as it subtracts quiet hours. 18:03,
+chat B: *"93 דקות ש… פתוחה"* — he had pushed it to 18:02 an hour earlier, at
+the bot's own invitation. Sixty of those ninety-three minutes were the bot
+agreeing.
+
+The two discounts set **separate** flags (`elapsedSpansQuiet`,
+`elapsedSpansGranted`) because each gets its own line in the prompt and each
+line is a claim. While they shared one flag, an hour he had spent awake and
+asked for was announced to the model as "הוא ישן אז". Both lines exist for the
+same reason: the model can subtract `fired_at` from the clock itself and will
+"correct" the smaller number back up unless told why it is smaller.
+
+**A deferral with no length is a question, never a default.** `snooze` fell to
+a hardcoded 30 when the router omitted `snooze_minutes` and his words held no
+duration — and the router omits it routinely, so this was the common path.
+*"לא יקרה היום, בוא ננסה שוב מחר"* came back as *"דחיתי … ב-30 דקות"*: a number
+he never said, reported as his. It now returns `needs_time`, which reuses the
+awaiting slot already wired to route his answer through `reschedule` — one
+question, one implementation. `parseDuration` closed the "עוד שעה" case;
+nothing can close the "מחר" case by guessing, because the guess IS the bug.
+
+**"ירדה להיום" is a promise only a recurring reminder can keep.**
+`instance_skipped` carries `recurs`, read off the schedule at the moment of the
+skip — afterwards the row cannot answer it, because a fired one-off and a
+finished daily both read `status='done'`. A one-off that is skipped is gone,
+and saying so is the difference between a deferral and a deletion he did not
+know he made. The fire keyboard also gained `מחר` (`buttons.deferRow`), which
+is the answer he actually wanted twice in two days; the `tomorrow` callback had
+been wired and working the whole time, reachable only from the evening
+close-out.
+
+**The daily messages also keep out of the way of an actual reminder.** Brief at
+08:00:41, nag at 08:00:55, same tick, same two tasks. `briefDue`/`closeoutDue`
+are now guarded by `!chasing` as well as `!quiet`, on identical terms — a hold,
+not a cancellation, since `markDailySent` runs inside the senders.
+
 **Nags hold off while he is talking** (`CONVERSATION_WINDOW_MIN`). Five
 messages stacked up on 16.08.2026 while he was actively answering, and a bot
 that interrupts is not being persistent, it is being noise.
@@ -763,6 +801,8 @@ npx wrangler d1 execute nu-bot --remote --file=./migrations/013_friends.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/014_model_health.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/015_event_at.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/016_display_name.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/017_instance_due_slot.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/018_granted_minutes.sql
 npm run deploy
 ```
 

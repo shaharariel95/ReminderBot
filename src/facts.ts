@@ -18,6 +18,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
   const quotable = new Set<string>();
   const elapsed = new Set<number>();
   const elapsedRaw = new Set<number>();
+  let spansQuiet = false;
+  let spansGranted = false;
 
   const addQuotable = (s: string | null | undefined) => {
     if (typeof s === 'string' && s.trim().length > 0) quotable.add(s.trim());
@@ -42,7 +44,26 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
    * and the model is handed a number that reads as a day and a half. The
    * discount belongs to the pressure figure, not to every subtraction.
    */
-  const addElapsed = (ts: number | null | undefined, discountQuiet = true) => {
+  const addElapsed = (
+    ts: number | null | undefined,
+    discountQuiet = true,
+    /**
+     * Minutes the BOT agreed to, out of the same span.
+     *
+     * The quiet-hours discount below exists because counting his sleep as
+     * avoidance is a claim about him. Time he ASKED for and the bot said yes
+     * to is the same claim with the bot's own signature on it — production
+     * 18:03, "93 דקות ש… פתוחה", against a snooze to 18:02 granted an hour
+     * earlier. He was doing exactly what the bot offered.
+     *
+     * Separate from `discountQuiet` rather than folded into it: a grant is a
+     * fact about this instance (`instances.granted_min`) while quiet hours are
+     * a fact about the chat, and the goal spans that turn the quiet discount
+     * off still want their grants subtracted — a goal is never snoozed, so the
+     * value is 0 there and the parameter simply does not bite.
+     */
+    grantedMin = 0,
+  ) => {
     if (typeof ts !== 'number') return;
     const now = Date.now();
     const raw = Math.round((now - ts) / 60_000);
@@ -61,17 +82,24 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
      * The raw span is kept as well, but only for validate.ts — it is still a
      * true thing to say, and a rewrite that says it should not be discarded.
      */
-    const waking = discountQuiet
-      ? Math.max(
-          0,
-          raw -
-            quietMinutesBetween(
-              ts, now, tz, ctx.settings.quiet_start_hour, ctx.settings.quiet_end_hour,
-            ),
+    const quiet = discountQuiet
+      ? quietMinutesBetween(
+          ts, now, tz, ctx.settings.quiet_start_hour, ctx.settings.quiet_end_hour,
         )
-      : raw;
+      : 0;
+    // Both discounts come off the same span, and both are floored at zero
+    // together: a grant that overlaps the quiet window would otherwise be
+    // subtracted twice and hand the model a NEGATIVE number to be rude about.
+    const granted = Math.max(0, grantedMin);
+    const waking = Math.max(0, raw - Math.min(raw, quiet + granted));
     elapsed.add(waking);
     if (waking !== raw) elapsedRaw.add(raw);
+    // Which discount actually bit, tracked separately, because each one gets a
+    // DIFFERENT sentence in the prompt and the wrong sentence is a false claim
+    // about him. Folding them into one flag made a snoozed reminder announce
+    // "הוא ישן אז" about an hour he had spent awake and had asked for.
+    if (quiet > 0) spansQuiet = true;
+    if (granted > 0) spansGranted = true;
   };
 
   // Everything already on file is fair game to talk about.
@@ -93,8 +121,9 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     titles.add(i.title);
     addTime(i.fired_at);
     // An open instance is the commonest thing to be asked "how long has this
-    // been sitting there" about, and its fired_at is the only honest answer.
-    addElapsed(i.fired_at);
+    // been sitting there" about, and its fired_at is the only honest answer —
+    // less whatever of that span the bot handed him when he asked for it.
+    addElapsed(i.fired_at, true, i.granted_min ?? 0);
   }
   for (const g of ctx.goals) titles.add(g.title);
   // Item titles are shown to the model in openSummary, so it may truthfully
@@ -141,12 +170,21 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     // That failure is silent: it surfaces as a rejection count in /diag, never
     // as an error.
     if ('eventAt' in e && e.eventAt) addTime(e.eventAt);
+    // The hour a late fire says it was SUPPOSED to ring. None of the other
+    // sources here would produce it: `next_fire_at` has already been advanced
+    // by the time the effect exists, and `fired_at` is the hour it actually
+    // rang — which is the whole point of the pair. Without this line validate
+    // rule 1 finds it outside the allow-list and discards the entire rewrite
+    // for repeating something the baseline itself said, silently, as a
+    // rejection count in /diag.
+    if ('dueAt' in e && e.dueAt) addTime(e.dueAt);
     if ('until' in e) addTime(e.until);
     if ('since' in e) {
       addTime(e.since);
       // `nagged` carries the moment the thing became due, which is the exact
-      // span a nag is tempted to editorialise about.
-      addElapsed(e.since);
+      // span a nag is tempted to editorialise about — and the minutes of it
+      // the bot granted, which are the ones it may not.
+      addElapsed(e.since, true, 'granted' in e ? e.granted : 0);
     }
     if (e.kind === 'listed_reminders') {
       for (const r of e.rows) {
@@ -222,7 +260,8 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
     times: [...times],
     elapsed: [...elapsed],
     elapsedRaw: [...elapsedRaw],
-    elapsedSpansQuiet: elapsedRaw.size > 0,
+    elapsedSpansQuiet: spansQuiet,
+    elapsedSpansGranted: spansGranted,
     titles: [...titles],
     quotable: [...quotable],
     // Filled in by sendOutcome, and only when the model is actually consulted.

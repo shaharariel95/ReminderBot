@@ -50,10 +50,20 @@ CREATE TABLE instances (
   nag_count   INTEGER NOT NULL DEFAULT 0,
   status      TEXT    NOT NULL DEFAULT 'open',     -- open | done | failed | skipped
   proof       TEXT,
-  closed_at   INTEGER
+  closed_at   INTEGER,
+  -- When it was SUPPOSED to ring, against fired_at's when it did. See
+  -- migrations/017: the gap between the two is how a late reminder can say so,
+  -- and the pair (reminder_id, due_at) is what stops two overlapping ticks
+  -- opening the same dose twice.
+  due_at      INTEGER,
+  -- Minutes of this instance's open life that the BOT agreed to, accumulated
+  -- across every snooze. Subtracted from the pressure figure in facts.ts for
+  -- the same reason quiet hours are: see migrations/018.
+  granted_min INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_instances_open ON instances(status, next_nag_at);
 CREATE INDEX idx_instances_chat ON instances(chat_id, status);
+CREATE UNIQUE INDEX idx_instances_due_slot ON instances(reminder_id, due_at) WHERE due_at IS NOT NULL;
 
 CREATE TABLE messages (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,

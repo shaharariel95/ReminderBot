@@ -1,0 +1,14 @@
+-- How many minutes of this instance's open life the BOT agreed to.
+--
+-- facts.ts already discounts quiet hours from the "how long has this been
+-- open" figure, because counting his sleep as avoidance is a claim about him
+-- rather than about a reminder. Time the bot itself granted is the same claim
+-- with the bot's own signature on it, and it was not discounted:
+--
+--   18:03  "93 דקות ש… פתוחה"      — he had snoozed it to 18:02 an hour earlier
+--
+-- Sixty of those ninety-three minutes were the bot's own answer to a request
+-- it had said yes to. Accumulated rather than stored as a single "granted
+-- until", because he can push the same instance repeatedly and each grant is
+-- real; a last-writer-wins column would forgive only the final one.
+ALTER TABLE instances ADD COLUMN granted_min INTEGER NOT NULL DEFAULT 0;

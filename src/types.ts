@@ -30,6 +30,9 @@ export interface Env {
   GEMINI_TIMEOUT_MS?: string;
   /** Milliseconds a whole generate() may take, across every retry and tier. */
   GEMINI_BUDGET_MS?: string;
+  /** The whole turn's allowance, across route() and speak() together.
+   *  See index.TURN_BUDGET_MS. */
+  GEMINI_TURN_BUDGET_MS?: string;
   DEFAULT_TZ?: string;
   /**
    * Test-only override for sendBurst's inter-chunk sleep (see telegram.ts).
@@ -108,6 +111,8 @@ export interface Instance {
   status: 'open' | 'done' | 'failed' | 'skipped';
   proof: string | null;
   closed_at: number | null;
+  /** Minutes of this instance's life the bot itself granted. See migrations/018. */
+  granted_min: number;
 }
 
 export interface Goal {
@@ -301,6 +306,17 @@ export type Effect =
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
   /**
+   * He asked for the hour it is already set to. Nothing was written.
+   *
+   * `rename` has guarded `to === rem.title` since it shipped; `reschedule` had
+   * no equivalent, so retimeReminder's UPDATE matched a row, changed nothing,
+   * and returned true — and the turn reported "שיניתי" plus a `הוזזה` line in
+   * events for a move that did not happen. Same shape and same answer as
+   * `profile_known`: a separate kind OUTSIDE `WROTE`, not a flag on the write
+   * effect, because everything downstream keys off the kind.
+   */
+  | { kind: 'reminder_unchanged'; id: number; title: string; at: number }
+  /**
    * Both titles are carried because the reply has to name the one that is
    * gone as well as the one that replaced it. Neither sits at the top level
    * under the key `title`, so facts.ts must sweep them explicitly — same trap
@@ -315,7 +331,22 @@ export type Effect =
    */
   | { kind: 'reminder_duplicate'; id: number; title: string; at: number }
   | { kind: 'instance_done'; id: number; title: string; streak: number }
-  | { kind: 'instance_skipped'; id: number; title: string }
+  /**
+   * `recurs` is what separates "not today" from "not at all".
+   *
+   * voice.ts said `"X" ירדה להיום. בלי כישלון.` for every skip alike. On a
+   * daily reminder that is true and is the reason skipping is a first-class
+   * answer rather than a failure — tomorrow's dose is already on the books.
+   * On a one-off there is no tomorrow: the row is already 'done' with
+   * next_fire_at NULL, so "ירדה **להיום**" promises a return the errand will
+   * never make. Production 03.09.2026 17:45, #69: tapped, gone, never
+   * mentioned again.
+   *
+   * Read off the schedule at the moment of the skip rather than looked up
+   * later, because by then the row cannot answer the question: a one-off and a
+   * finished recurring reminder both read `status='done'`.
+   */
+  | { kind: 'instance_skipped'; id: number; title: string; recurs: boolean }
   | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }
   /**
    * This reminder is not working, said as a COUNT and an OFFER.
@@ -461,8 +492,31 @@ export type Effect =
    * nobody, about something she never asked for, which reads as a bug rather
    * than as a favour.
    */
-  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number; items?: ReminderItem[]; from?: string; eventAt?: number | null }
-  | { kind: 'nagged'; instanceId: number; title: string; since: number; round: number }
+  /**
+   * `dueAt` / `lateBy` are present only when the fire actually was late (see
+   * index.LATE_THRESHOLD_MIN), and they travel together — the hour is what
+   * makes the claim checkable, the span is what makes it readable.
+   *
+   * They exist because Cloudflare's cron drops minutes and once dropped
+   * eighty: on 01.09.2026 reminder #69 was due at 16:30, rang at 17:50, and
+   * said exactly what it would have said on time. Both are swept by facts.ts,
+   * or validate rule 1 discards any rewrite that repeats the hour the baseline
+   * itself just stated.
+   */
+  | { kind: 'reminder_fired'; id: number; title: string; instanceId: number; requiresProof: boolean; misses?: number; items?: ReminderItem[]; from?: string; eventAt?: number | null; dueAt?: number; lateBy?: number }
+  /**
+   * `granted` is how much of `since`-to-now the bot itself handed him.
+   *
+   * Carried on the effect rather than looked up in facts.ts off `instanceId`,
+   * even though the open instance is usually right there in the context: a nag
+   * is the one message whose entire subject is the length of that span, and
+   * the number it is allowed to quote must not depend on whether an unrelated
+   * query happened to include the row. See instances.granted_min.
+   */
+  | {
+      kind: 'nagged'; instanceId: number; title: string; since: number;
+      round: number; granted: number;
+    }
   | { kind: 'gave_up'; instanceId: number; title: string; rounds: number }
   | { kind: 'checkin_goal'; id: number; title: string; why: string | null; lastProgress: string | null; lastProgressAt: number | null; lastCheckinAt: number | null }
   | { kind: 'photo_accepted'; instanceId: number; title: string; reason: string; streak: number }
@@ -596,6 +650,15 @@ export interface Facts {
    * prompt's elapsed block that stops the night being narrated as avoidance.
    */
   elapsedSpansQuiet: boolean;
+  /**
+   * Did any span include time the BOT granted — a snooze it said yes to?
+   *
+   * Kept apart from `elapsedSpansQuiet` because the two get different
+   * sentences and each sentence is a claim. While they shared one flag, an
+   * hour he had asked for and spent awake was announced to the model as
+   * "הוא ישן אז".
+   */
+  elapsedSpansGranted: boolean;
   /** Every task or goal title the model may quote. */
   titles: string[];
   /**

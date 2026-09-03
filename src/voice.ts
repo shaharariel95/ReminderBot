@@ -128,6 +128,12 @@ function one(e: Effect, tz: string): string {
       return `#${e.id} "${e.title}" — נקבע ל-${when(e.at, tz)}.`;
     case 'reminder_retimed':
       return `שיניתי. #${e.id} "${e.title}" ב-${when(e.at, tz)}.`;
+    // Nothing moved, and the sentence must not be able to be read as though
+    // something had. It states the hour anyway: the reason he asked is that he
+    // was not sure what it was set to, and "it is already like that" without
+    // the hour answers the question he did not ask.
+    case 'reminder_unchanged':
+      return `#${e.id} "${e.title}" כבר על ${when(e.at, tz)}. לא נגעתי.`;
     case 'reminder_renamed':
       return `#${e.id} עכשיו "${e.to}" במקום "${e.from}". השעה לא זזה.`;
     case 'reminder_deleted':
@@ -135,7 +141,12 @@ function one(e: Effect, tz: string): string {
     case 'instance_done':
       return `נסגר: "${e.title}". רצף ${e.streak}.`;
     case 'instance_skipped':
-      return `"${e.title}" ירדה להיום. בלי כישלון.`;
+      // "להיום" is a promise about tomorrow, and only a recurring reminder can
+      // keep it. A one-off that is skipped is finished — saying so is the
+      // difference between a deferral and a deletion he did not know he made.
+      return e.recurs
+        ? `"${e.title}" ירדה להיום. בלי כישלון.`
+        : `"${e.title}" ירדה. זו הייתה חד-פעמית, אז היא לא תחזור מעצמה — תגיד לי מתי אם היא עוד רלוונטית.`;
     case 'followup_suggested':
       // A question, not a confirmation. Nothing was written and the wording
       // must not suggest otherwise.
@@ -251,7 +262,27 @@ function one(e: Effect, tz: string): string {
       // name a time the baseline never said. This is the moment the event_at
       // column exists for.
       const event = e.eventAt ? `\nהאירוע עצמו: ${when(e.eventAt, tz)}.` : '';
-      return `${head}${list}${event}${sender}${missNote(e.misses)}${proof}`;
+      /*
+       * It rang late, and it says so.
+       *
+       * On 01.09.2026 reminder #69 was due at 16:30; Cloudflare's cron dropped
+       * eighty minutes and instance 53 opened at 17:50:39 with this exact
+       * sentence minus this line — word for word what it would have said on
+       * time. A reminder that is silent about being late is making a claim
+       * about WHEN, which is the same class of untruth as a claim about what
+       * was written.
+       *
+       * The HOUR, not just the apology: "איחרתי" alone tells him nothing he
+       * can act on, while the hour tells him which part of his day the bot
+       * lost. Stated here rather than left to the persona for the usual
+       * reason — speak() may not name a time the baseline never said.
+       *
+       * Rendered on a single newline: sendBurst splits on BLANK lines, and an
+       * apology arriving as its own notification is a second ping for one
+       * event.
+       */
+      const late = e.dueAt ? `\nאיחרתי — זה היה אמור לצלצל ב-${hhmm(e.dueAt, tz)}.` : '';
+      return `${head}${list}${event}${late}${sender}${missNote(e.misses)}${proof}`;
     }
     case 'nagged':
       return untitled(e.title)

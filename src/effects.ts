@@ -3,7 +3,8 @@ import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDateKey, localDayBounds, wallParts, wallString, wallToUtc } from './time';
-import { findFutureInstant, findNamedTime, isBareTimeWord, parseDuration } from './quickparse';
+import { asksForNewReminder, findFutureInstant, isBareTimeWord, parseDuration } from './quickparse';
+import { readWhen, type TimeRef } from './when';
 import { detectPattern } from './patterns';
 
 /**
@@ -132,8 +133,26 @@ export function splitIntoItems(title: string): string[] {
  * a title at one of those would lose half an errand he wrote himself.
  */
 const FILLER = /[_=~^*|\\/<>[\]{}]/;
-/** One underscore is already a tell; everything else needs a run of two. */
-const FILLER_RUN = /_|[=~^*|\\/<>[\]{}]{2,}/;
+/**
+ * One underscore or one slash is already a tell; everything else needs a run
+ * of two.
+ *
+ * The slash was added after reminder 71, written 02.09.2026 22:27, whose title
+ * is stored as
+ *
+ *     "ללכת לישון / : ללכת לישון"
+ *
+ * — the errand, a separator he never typed, and the model's second go at the
+ * same phrase. A run of two was required, so a single "/" carried the whole
+ * spill straight through and it is now read out every time that reminder
+ * fires.
+ *
+ * Safe to loosen to one because of the guard at the top of titleFromHisWords:
+ * if HIS message contains any filler character at all, nothing is cut. A slash
+ * he typed — "ב9/9", which readWhen now parses as a date — is his and stays.
+ * This can only ever cut one he did not write.
+ */
+const FILLER_RUN = /[_/]|[=~^*|\\<>[\]{}]{2,}/;
 
 /**
  * A title the model returned, with anything he never typed taken back out.
@@ -176,11 +195,57 @@ const FILLER_RUN = /_|[=~^*|\\/<>[\]{}]{2,}/;
  * is a real production shape, and a two-character message is not licence to
  * cut the title it confirms.
  */
+/**
+ * A title that says the errand, and then says it again.
+ *
+ * Three production spills, three different punctuation shapes, one identical
+ * structure:
+ *
+ *   #13  "ללכת למוסךTrimmed to: ללכת למוסך והוא לא אמר משהו אחר. ללכת למוסך…"
+ *   #71  "ללכת לישון / : ללכת לישון"
+ *   #72  "לבדוק משימות חדשות - (, : 'לבדוק משימות חדשות') -> "לבדוק משימות…"
+ *
+ * Each was answered by adding another character to FILLER_RUN, and each time
+ * the next one arrived wearing different punctuation. issues.md §3 says why
+ * that can never converge: the model needs somewhere to deliberate, `title` is
+ * the field within reach, and the separator it happens to use is not the
+ * pattern. **Repeating the errand is.**
+ *
+ * So this looks for structure instead of characters: the leading run of real
+ * words, appearing again later in the same string. No errand says its own
+ * opening clause twice.
+ *
+ * Two guards keep it off real titles. The prefix must be substantial (a short
+ * one like "לקנות" recurs innocently in "לקנות חלב, לקנות לחם"), and if HIS
+ * message contains the repetition too then the repetition is his and stays.
+ *
+ * This is still a mop. The fix is the discriminated union in Stage 4, which
+ * removes the field the deliberation lands in.
+ */
+const REPEAT_MIN_CHARS = 10;
+
+function cutSelfRepeat(title: string, userText: string): string {
+  // The errand as stated up to the first structural punctuation — that is the
+  // part a spill copies.
+  const head = /^[^,;.:()[\]{}'"<>|/\\_=~^*-]+/.exec(title)?.[0].trim() ?? '';
+  if (head.length < REPEAT_MIN_CHARS) return title;
+
+  const rest = title.slice(title.indexOf(head) + head.length);
+  if (!rest.includes(head)) return title;
+
+  // He said it twice himself. Then it is his phrasing, not a spill.
+  const his = userText.split(head).length - 1;
+  if (his >= 2) return title;
+
+  return head;
+}
+
 export function titleFromHisWords(title: string, userText: string): string {
   // Nothing to compare against: button and cron paths have no message.
   if (!userText.trim()) return title;
 
-  let out = title;
+
+  let out = cutSelfRepeat(title, userText);
   // Filler first. It cuts a TAIL, so running it before the script filter keeps
   // the two independent — otherwise stripping Latin out of the spill could
   // erase the very run this needs to find.
@@ -191,7 +256,103 @@ export function titleFromHisWords(title: string, userText: string): string {
   if (!/[A-Za-z]/.test(userText) && /[A-Za-z]/.test(out)) {
     out = out.replace(/[A-Za-z]+/g, '');
   }
+  /*
+   * Extraction cannot grow.
+   *
+   * The router's job is to lift the errand OUT of his sentence — CLAUDE.md is
+   * explicit that dropping "תזכיר לאמנון" from the front is exactly right and
+   * that adding letters is not. So a title longer than the message it came
+   * from did not come from it, whatever it is made of.
+   *
+   * This is the guard that does not care about characters, and it exists
+   * because three that did could not keep up. Reminder #75, 03.09.2026 17:07:
+   * he typed sixteen characters, "תזכיר לי עוד שעה", and the stored title is
+   * 187 — the model thinking aloud about what the title should be, in fluent
+   * Hebrew with no punctuation and no repetition. It walked past the script
+   * filter, the filler cut and cutSelfRepeat in one go. It was the fourth
+   * distinct shape in four days; issues.md §3 predicted that adding a fourth
+   * character class would not converge either.
+   *
+   * Emptied rather than truncated, deliberately: half a deliberation is still
+   * not an errand. The caller's fallback is UNTITLED_TITLE, and voice.ts words
+   * that case properly — "קבעתי לך משהו ל-09:12. על מה להזכיר?" — with
+   * questionAsked arming the slot, so the bot asks him instead of storing
+   * something he never said and reading it back when it fires.
+   *
+   * Gated on `asksForNewReminder`, which is the whole reason this is safe. The
+   * rule only holds when the errand is IN the message being read, and there is
+   * one common shape where it is not: a bare confirmation. The router prompt
+   * tells the model that "כן" means "repeat the action you just offered,
+   * with all of its details" — so a two-character message legitimately yields
+   * a twenty-character title, pulled from the previous turn rather than from
+   * this one. Length says nothing there, and this must not judge it.
+   *
+   * Reusing that gate rather than inventing a length floor is the point.
+   * CLAUDE.md records asksForNewReminder having to be fixed twice because two
+   * places asked the same question two ways; a third implementation of "did he
+   * ask for a reminder here" would be the same mistake again.
+   */
+  if (asksForNewReminder(userText) && out.trim().length > userText.trim().length) return '';
+
   return out.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * His own words beat the model's arithmetic.
+ *
+ * This is the precedence flip Stage 1 exists for, and it is the whole of
+ * "code computes, the model classifies" expressed in four lines.
+ *
+ * `scheduleFromIntent` already refuses to let the model add five minutes to a
+ * wall clock — "asking an LLM to cross midnight/month/year boundaries
+ * correctly is a coin flip; Date does it for free" — and then hands it
+ * `once_at` and asks for exactly that arithmetic anyway. On 01.09.2026 it took
+ * the flip and lost: "תזכיר לי עוד יומיים ב16:30", typed at 00:07, became a
+ * reminder for **01.09** — the same day — and cost four more messages, two
+ * route/apply crashes and a full day of nagging about a task that was not due.
+ *
+ * Reading it off his sentence first is not a heuristic beating a model. It is
+ * the deterministic path being allowed to answer the question it can actually
+ * answer, and `readWhen` refuses rather than guesses on everything else, so
+ * every doubt still falls through to the router exactly as before.
+ *
+ * The scope is narrow, and every exclusion below is a real message that broke
+ * when it was not. What gets overridden is exactly one thing: **an absolute
+ * date the model calculated.** That is the only place it is doing arithmetic.
+ *
+ *   - `in_minutes` is NEVER overridden. The model is not computing there — it
+ *     reports a number of minutes and `scheduleFromIntent` resolves it with
+ *     Date, which is the bargain this whole function generalises. Overriding
+ *     it turned "ללכת למוסך ב8:20", typed AT 08:20, into a reminder for
+ *     tomorrow: the router correctly said `in_minutes: 1`, and readWhen read
+ *     the "ב8:20" literally, found it was not in the future, and rolled it a
+ *     day. Both readings are defensible; the router's is right.
+ *
+ *   - `event_at` present means the model has told us there are TWO times here
+ *     and which is which — "קבעתי טיפול ליום שלישי ב-8:30, תזכיר לי בשני
+ *     בערב". That is classification, not arithmetic, and it is precisely the
+ *     work we want it doing. readWhen sees one clock and cannot know it is the
+ *     appointment rather than the ring.
+ *
+ *   - a RECURRING schedule is never overridden. readWhen refuses anything
+ *     RECURRING matches, so this should be unreachable — but flattening a
+ *     repeat rule into one date ENDS the recurrence, which is the trap the
+ *     retime button was fixed for, and a guard that costs nothing belongs in
+ *     front of it.
+ *
+ *   - a `duration` from readWhen does not override anything, for the same
+ *     reason as the first exclusion: nobody is doing arithmetic.
+ */
+function preferHisWords(heard: TimeRef, intent: Intent, tz: string): Schedule | null {
+  const routed = scheduleFromIntent(intent, tz);
+  if (heard.kind !== 'instant') return routed;
+  // The model calculated a wall-clock date, which is the one thing it should
+  // never have been asked to do. Anything else it produced, it produced
+  // honestly, and his sentence is not a better source than the router for it.
+  const modelDidArithmetic = !intent.in_minutes && !!intent.once_at;
+  const mayOverride = !intent.event_at && (routed === null || modelDidArithmetic);
+  if (!mayOverride) return routed;
+  return { type: 'once', at: wallString(heard.at, tz) };
 }
 
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
@@ -633,33 +794,12 @@ export async function applyIntent(
       // one of them fixed. findNamedTime refuses rather than guesses on a
       // repeat rule, two times in one sentence, and an hour already past, so
       // every refusal still falls through to the capture below.
-      const named = findNamedTime(userText, Date.now(), tz);
-      // Third look, and the last one: a pinned DAY plus a named part of it,
-      // with no digits anywhere. "תזכיר לי מחר בערב להתכונן" parsed to nothing
-      // at all before 17.08.2026 — not to the wrong hour, to no hour — so the
-      // commonest vague phrasing in the language cost a model call and came
-      // back as a capture and a question about a time he had already roughly
-      // given.
-      //
-      // findFutureInstant + PERIOD_HOUR already did this for the
-      // appointment-offer path; it was simply never asked on the path where he
-      // requests the reminder himself.
-      //
-      // It is a convention, not a reading — ערב is 20:00 because it has to be
-      // something. That is honest here for one reason: voice.ts ALWAYS states
-      // the hour it set, so he reads "20:00" back and can move it. No hedge is
-      // added, deliberately: a hedge would sit inside the rewrite, and speak()
-      // is licensed to rephrase, so it could vanish without the validator
-      // noticing — validate.ts checks for facts INVENTED, never for words
-      // dropped. An hour that is always spoken cannot be quietly lost.
-      //
-      // Bounded by the day: findFutureInstant returns null without one, so a
-      // bare "בערב" — tonight? tomorrow? — still falls through to the capture.
-      const vague = named === null ? findFutureInstant(userText, Date.now(), tz) : null;
-      const guessed = named ?? (vague !== null && vague > Date.now() ? vague : null);
-      const schedule =
-        scheduleFromIntent(intent, tz) ??
-        (guessed === null ? null : ({ type: 'once', at: wallString(guessed, tz) } as Schedule));
+      // One resolver now, and it absorbs the "third look" this used to make
+      // separately: a pinned DAY plus a named part of it ("מחר בערב" is 20:00)
+      // lives inside readWhen alongside every other reading, so the create and
+      // reschedule paths cannot disagree about it again.
+      const heard = readWhen(userText, Date.now(), tz);
+      const schedule = preferHisWords(heard, intent, tz);
 
       // No time is not a failure any more. Capture first, schedule later.
       if (!schedule) {
@@ -870,16 +1010,32 @@ export async function applyIntent(
         if (ctx.open.length > 1) return [{ kind: 'needs_task_choice', action: 'snooze', open: ctx.open }];
         return [{ kind: 'nothing', why: 'no_open_task', userText }];
       }
-      // The router is asked for `snooze_minutes` but routinely omits it, and
-      // the fallback below is then reported back to him as a number he chose
-      // — "עוד שעה" came out as "הזזתי ב-30 דקות" on 10.08.2026. The write is
-      // real either way, so validate.ts cannot see this: the lie is upstream
-      // of the model. parseDuration reads the length off his own words before
-      // the default gets to speak for him.
-      const minutes = Math.min(
-        720,
-        Math.max(5, intent.snooze_minutes ?? parseDuration(userText) ?? 30),
-      );
+      /*
+       * The router is asked for `snooze_minutes` but routinely omits it, and
+       * the fallback was then reported back to him as a number he chose —
+       * "עוד שעה" came out as "הזזתי ב-30 דקות" on 10.08.2026. The write is
+       * real either way, so validate.ts cannot see this: the lie is upstream
+       * of the model. parseDuration reads the length off his own words before
+       * anything gets to speak for him.
+       *
+       * And when neither of them has a length, the bot ASKS. The hardcoded 30
+       * that used to sit here is the same failure one step further along:
+       * "לא יקרה היום, בוא ננסה שוב מחר" produced "דחיתי … ב-30 דקות" — a
+       * deferral to tomorrow answered with half an hour, stated as though he
+       * had asked for it. parseDuration closed the "עוד שעה" case; nothing can
+       * close the "מחר" case by guessing, because the guess IS the bug.
+       *
+       * needs_time rather than a snooze-shaped question: the awaiting slot it
+       * opens is already wired to route his answer back through `reschedule`,
+       * which supersedes the ring correctly (CLAUDE.md, "Moving a reminder
+       * that is ringing"). A second question kind would be a second
+       * implementation of one question — §13's invariant.
+       */
+      const said = intent.snooze_minutes ?? parseDuration(userText);
+      if (said === null || said === undefined) {
+        return [{ kind: 'needs_time', id: inst.reminder_id, title: inst.title }];
+      }
+      const minutes = Math.min(720, Math.max(5, said));
       await db.snoozeInstance(env, inst.id, minutes);
       const snoozed: Effect[] = [
         {
@@ -982,10 +1138,7 @@ export async function applyIntent(
       // findNamedTime refuses anything it cannot be sure of — a repeat rule, a
       // second time in the sentence, an hour already gone — so the question
       // below is still asked whenever asking is the honest answer.
-      const named = findNamedTime(userText, Date.now(), tz);
-      const schedule =
-        scheduleFromIntent(intent, tz) ??
-        (named === null ? null : ({ type: 'once', at: wallString(named, tz) } as Schedule));
+      const schedule = preferHisWords(readWhen(userText, Date.now(), tz), intent, tz);
 
       // Carries the reminder, unlike the `nothing: 'no_time'` this replaced.
       // The bot is about to ask "מתי?" and it has to still know what it asked
@@ -999,6 +1152,25 @@ export async function applyIntent(
         return [{ kind: 'nothing', why: 'bad_time', userText }];
       }
       if (next === null) return [{ kind: 'nothing', why: 'past_time', userText }];
+
+      /*
+       * He asked for the hour it already has.
+       *
+       * `rename` has guarded `to === rem.title` since it shipped and this had
+       * no equivalent, so retimeReminder's UPDATE matched the row, changed
+       * nothing, and still returned true (`changes` counts rows MATCHED, not
+       * rows altered) — and the turn reported "שיניתי" and wrote a `הוזזה`
+       * line into events for a move that did not happen. `events` is the life
+       * story of a reminder and the thing /why prints; a false line in it is
+       * not cosmetic.
+       *
+       * Both halves have to match. `next` alone is not enough: turning a daily
+       * into a one-off at the same instant IS a change, and the next day is
+       * when he would find out.
+       */
+      if (next === rem.next_fire_at && JSON.stringify(schedule) === rem.schedule) {
+        return [{ kind: 'reminder_unchanged', id: rem.id, title: rem.title, at: next }];
+      }
 
       // Captured BEFORE the write, which flips the row to 'scheduled'.
       const wasInbox = rem.status === 'inbox';

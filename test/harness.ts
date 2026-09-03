@@ -107,6 +107,17 @@ export interface GeminiCall {
    * baseline. See brain.speak and test/v14.test.ts.
    */
   contents?: { role: string; parts: { text: string }[] }[];
+  /**
+   * The generationConfig actually sent — temperature, token ceiling, and above
+   * all `thinkingConfig`.
+   *
+   * Captured because 0.16.0 set `thinkingLevel: 'high'` on the router and the
+   * cost was invisible to every other assertion: the routing was CORRECT, and
+   * it took 18.9 seconds, and the turn then died with no message and no error
+   * row. How hard a call is asked to think is a property of the request, so it
+   * has to be assertable from the request.
+   */
+  generationConfig?: any;
 }
 
 export interface Rig {
@@ -143,6 +154,22 @@ export interface Rig {
   speakQueue: (string | Error)[];
   /** Set true to make every Gemini call fail, simulating a rate limit. */
   geminiDown: boolean;
+  /**
+   * How many of the next Gemini calls come back TRUNCATED: partial text plus
+   * `finishReason: 'MAX_TOKENS'`, which is what a runaway response actually
+   * looks like on the wire.
+   *
+   * Distinct from `geminiDown` (an HTTP error) and from an empty response,
+   * because it is the one failure shape that arrives looking like a success —
+   * HTTP 200, a `candidates[0]`, and text in it. `errors` #13–#17 are all this,
+   * and the reason none of them retried is that the text was non-empty, so the
+   * `finishReason` was never read. A rig that could only produce empty
+   * responses could not express the bug at all.
+   *
+   * The partial text is deliberately unparseable JSON, cut off mid-string, the
+   * way a real truncation cuts it.
+   */
+  truncate: number;
   /**
    * Set true to make every Gemini call HANG rather than fail.
    *
@@ -240,6 +267,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     routerQueue: [],
     speakQueue: [],
     geminiDown: false,
+    truncate: 0,
     geminiHang: false,
     hangModels: new Set<string>(),
     downModels: new Set<string>(),
@@ -327,8 +355,24 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
         system: body?.systemInstruction?.parts?.[0]?.text ?? '',
         schema: body?.generationConfig?.responseSchema,
         contents: body?.contents,
+        generationConfig: body?.generationConfig,
       });
       rig.timeline.push(`gemini:${isRouter ? 'router' : 'speak'}`);
+      // A runaway that ran out of room. HTTP 200, real text, and useless —
+      // consumed BEFORE the queue, so a test can put one good answer behind it
+      // and assert that the good answer is what the caller ends up with.
+      if (rig.truncate > 0) {
+        rig.truncate--;
+        return json({
+          candidates: [
+            {
+              content: { parts: [{ text: '{"actions":[{"action":"create_reminder","title":"ללכת למוסך' }] },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+          usageMetadata: { candidatesTokenCount: 2000 },
+        });
+      }
       const queue = isRouter ? rig.routerQueue : rig.speakQueue;
       if (!queue.length) {
         throw new Error(
