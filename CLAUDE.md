@@ -458,6 +458,61 @@ close-out.
 are now guarded by `!chasing` as well as `!quiet`, on identical terms — a hold,
 not a cancellation, since `markDailySent` runs inside the senders.
 
+**A bare relative push while something is ringing is a snooze — on EVERY path.**
+CLAUDE.md has said this since 0.14.1 and `applyIntent` enforced it
+deterministically, but only inside `reschedule`. The router does not always
+route it there. 03.09.2026 17:07, with #69 fired at 16:30 and nagged at 17:00,
+"תזכיר לי עוד שעה" came back as `create_reminder`, was captured with no time,
+and the reply was "סגרנו על #75. אבל על מה להזכיר לך ובאיזו שעה בדיוק?" — a
+second row, a question, and #69 still ringing underneath it.
+
+The create path takes the same redirect now, under three conditions that are
+the whole of its safety: he named NO errand (a titled push is a second errand,
+and folding it in would lose it), EXACTLY one thing is ringing (two, and there
+is no way to tell which — the same answer `matchItem` gives on a tie), and the
+time is RELATIVE.
+
+**`preferHisWords` FILLS a gap; it never overrides.** A `duration` from
+`readWhen` is used only when `scheduleFromIntent` returned null. "עוד שעה" was
+read correctly the whole time and then thrown away, so the bot asked "באיזו
+שעה בדיוק?" about the only specific thing in the sentence. The `in_minutes`
+exclusion is untouched and must stay: overriding it turned "ללכת למוסך ב8:20",
+typed AT 08:20, into tomorrow.
+
+**Writing something down is not scheduling it.** `validate.ts` had ONE create
+group holding "רשמתי" and "קבעתי" as interchangeable, with `reminder_captured`
+in it — which is what LICENSED "סגרנו על #75" over a row with no time and no
+title. It is split into `noted` and `scheduled`, and a capture is in the first
+only. The reply agreed an appointment in one sentence and asked what the errand
+was in the next; nothing in the chain could see a contradiction.
+
+**A claim about what HE did is a claim too.** `CLAIM` was first person only, so
+every affirmation of the user sailed through: chat B, 30.08.2026 20:01, "יפה
+שסגרת את זה מוקדם" over a `no_open_task` baseline, with #68 firing 24 minutes
+later. "סגרת" and "סיימת" are policed now. "דחית", "ביטלת" and "קבעת"
+deliberately are NOT: they describe standing state as readily as this turn, and
+"דחית את X 6 מתוך 7 הפעמים האחרונות" is `pattern_pushed`'s own baseline — true,
+over a turn that wrote nothing. Only a close is an event this turn can be sure
+it owns.
+
+**`CLAIM` is not read by `validate()`.** `CLAIM_GROUPS` is, and it carries its
+own copy of every verb. Adding to one and not the other is a fix that does
+nothing and reviews as though it did. Proven by deletion rather than assumed:
+stripping the 0.19.0 additions from `CLAIM` alone left the suite green.
+
+**Rule 4 was dormant for a month.** `ELAPSED_BEFORE` wanted the marker BEFORE
+the quantity; Hebrew puts it after at least as often, so "93 דקות שהיא פתוחה"
+— the very message that exposed the granted-minutes bug — was never checked at
+all. Two frames added, both unambiguous ("X עברו", "X שזה פתוח"). Zero rule-4
+rejections in a month was not a quiet month, and a safety rule that has
+silently stopped running is worse than one never written, because it counts.
+
+**A backoff with no probe and no expiry is a deletion.** `GOAL_QUIET_AFTER` was
+`checkin_count < 8` in SQL with nothing that ever cleared it, so goal #1 (count
+11, last check-in 17.08.2026) was switched off permanently and silently. Quiet
+is now a month (`GOAL_PROBE_MS`) and then one ask. `gemini.blockFor` has had
+this right for two versions: **the expiry IS the probe.**
+
 **Nags hold off while he is talking** (`CONVERSATION_WINDOW_MIN`). Five
 messages stacked up on 16.08.2026 while he was actively answering, and a bot
 that interrupts is not being persistent, it is being noise.

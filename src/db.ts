@@ -191,20 +191,47 @@ export async function listGoals(env: Env, chatId: string): Promise<Goal[]> {
  */
 export const GOAL_QUIET_AFTER = 8;
 
+/**
+ * How long "quiet" lasts before the bot asks once more.
+ *
+ * GOAL_QUIET_AFTER was a WALL, not a backoff: `checkin_count < 8` in SQL, and
+ * nothing anywhere ever cleared it. Only `recordGoalProgress` resets the
+ * counter, and it only runs when the router files an answer as goal progress —
+ * so a goal that crossed eight was silent forever, with no expiry, no probe
+ * and no message saying it had stopped. Production, 03.09.2026: goal #1,
+ * `checkin_count = 11`, last check-in 17.08. The feature had been switched off
+ * for a fortnight and nothing could have told anyone.
+ *
+ * gemini.blockFor already has the shape this needed and the reason for it —
+ * "the expiry IS the probe": whether a thing has recovered cannot be known
+ * without asking, so the only honest backoff is one that eventually asks. A
+ * backoff with no probe and no expiry is a deletion wearing a delay's clothes.
+ *
+ * A month rather than a doubling ladder. The four-day rung below already
+ * covers "he is busy"; past eight unanswered the question is no longer about
+ * this week, and a monthly probe is roughly the cadence at which a dropped
+ * intention is worth one sentence. If he answers, recordGoalProgress resets
+ * the counter and the whole ladder starts again from the top.
+ */
+export const GOAL_PROBE_MS = 30 * 86_400_000;
+
 export async function stalestGoal(
   env: Env,
   chatId: string,
   now: number = Date.now(),
 ): Promise<Goal | null> {
   return env.DB.prepare(
+    // The `checkin_count < GOAL_QUIET_AFTER` cut that used to sit here is gone
+    // and is now the LAST RUNG of the same ladder: past eight unanswered the
+    // wait becomes a month, and then it asks. See GOAL_PROBE_MS.
     `SELECT * FROM goals WHERE chat_id = ? AND status = 'active'
-       AND checkin_count < ${GOAL_QUIET_AFTER}
        AND (last_checkin_at IS NULL OR ? - last_checkin_at >= CASE
               WHEN checkin_count <= 0 THEN 0
               WHEN checkin_count = 1 THEN 43200000
               WHEN checkin_count = 2 THEN 86400000
               WHEN checkin_count = 3 THEN 172800000
-              ELSE 345600000 END)
+              WHEN checkin_count < ${GOAL_QUIET_AFTER} THEN 345600000
+              ELSE ${GOAL_PROBE_MS} END)
       ORDER BY COALESCE(last_checkin_at, 0), COALESCE(last_progress_at, 0), id
       LIMIT 1`,
   )

@@ -237,7 +237,26 @@ section('the daily messages describe the day without claiming to have changed it
   }], TZ);
   check('the close-out counts what was closed', closeout.includes('2'), closeout);
   check('and names what was not', closeout.includes('לזרוק זבל'), closeout);
-  check('the close-out claims no write', !CLAIM.test(closeout), closeout);
+  /*
+   * This was `!CLAIM.test(closeout)` until 0.19.0, and CLAIM outgrew it.
+   *
+   * The lexicon gained the second-person forms because "יפה שסגרת את זה
+   * מוקדם" shipped over a `no_open_task` baseline — and the close-out's own
+   * wording is "סגרת N היום", which is TRUE: it is a tally read off the day's
+   * closed instances, not a claim about this turn. The two are the same three
+   * letters and opposite facts.
+   *
+   * What was being guarded here is narrower than the whole lexicon and always
+   * was: a report must not say the BOT did something. That is first person,
+   * and it is what this now asserts. The full "does the baseline pass its own
+   * validator" check lives where it belongs — the every-kind loop in
+   * test/validate.test.ts, which evening_closeout was missing from entirely.
+   */
+  const FIRST_PERSON_CLAIM = /רשמתי|קבעתי|שמרתי|שמתי לך|קלטתי|סימנתי|סגרתי|סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
+  check('the close-out claims nothing the BOT did', !FIRST_PERSON_CLAIM.test(closeout), closeout);
+  check('and "לא סגרת כלום היום" is not read as a claim either', !CLAIM.test(
+    renderBaseline([{ kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] }], TZ),
+  ));
 
   // The gap this section exists for: a task nagged the full ladder and given
   // up on used to be reachable only as a NUMBER. "2 נפלו" is not something he

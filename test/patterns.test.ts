@@ -550,11 +550,18 @@ section('the bot stops raising a goal he has never once answered about');
  * total, because an answer the router files as `chat` never resets it. He
  * replied "מחכה לנס" that morning and the counter still went up.
  *
- * Past the floor the bot simply stops bringing it up on its own. Nothing is
- * claimed and nothing is deleted: it stays in /goals, the persona may still
- * use its name, and every check-in already carried "עשיתי" and "תוריד את זה"
- * buttons. Going quiet about something ignored eight times running is not a
- * statement about him, which is why it needs no announcement to stay honest.
+ * Past the floor the bot goes quiet about it. Nothing is claimed and nothing
+ * is deleted: it stays in /goals, the persona may still use its name, and
+ * every check-in already carried "עשיתי" and "תוריד את זה" buttons. Going
+ * quiet about something ignored eight times running is not a statement about
+ * him, which is why it needs no announcement to stay honest.
+ *
+ * 0.19.0 changed what "quiet" MEANS, and this test with it. The floor was a
+ * wall — `checkin_count < 8` in SQL with nothing that ever cleared it — so
+ * production goal #1 (count 11, last check-in 17.08.2026) was switched off
+ * permanently and silently. A backoff with no probe and no expiry is a
+ * deletion; gemini.blockFor has said so in a comment for two versions
+ * ("the expiry IS the probe"). Quiet is now a MONTH, and then one ask.
  */
 async function aGoalHeNeverAnswersGoesQuiet(): Promise<void> {
   const rig = createRig({ tz: TZ });
@@ -564,14 +571,27 @@ async function aGoalHeNeverAnswersGoesQuiet(): Promise<void> {
     "INSERT INTO goals (chat_id, title, why, status, last_progress, last_progress_at," +
       " last_checkin_at, checkin_count, created_at) VALUES (?, 'להגיד לאישתי משהו יפה', NULL," +
       " 'active', NULL, NULL, ?, ?, ?)",
-  ).run(HIM, now - 30 * 86_400_000, db.GOAL_QUIET_AFTER, now - 60 * 86_400_000);
+  ).run(HIM, now - 20 * 86_400_000, db.GOAL_QUIET_AFTER, now - 60 * 86_400_000);
 
   const silent = await db.stalestGoal(rig.env, HIM, now);
   check(
-    'past the floor it is no longer offered for an unprompted check-in',
+    'past the floor it is not offered — twenty days in, still quiet',
     silent === null,
     JSON.stringify(silent),
   );
+
+  // ...but quiet is a wait, not an off switch. Production goal #1 had been in
+  // this state since 17.08 with no way out of it at all.
+  rig.db.prepare('UPDATE goals SET last_checkin_at = ? WHERE chat_id = ?')
+    .run(now - (db.GOAL_PROBE_MS + 86_400_000), HIM);
+  const probed = await db.stalestGoal(rig.env, HIM, now);
+  check(
+    'a month past the last unanswered check-in, it asks once more',
+    probed !== null,
+    JSON.stringify(probed),
+  );
+  rig.db.prepare('UPDATE goals SET last_checkin_at = ? WHERE chat_id = ?')
+    .run(now - 20 * 86_400_000, HIM);
 
   // One below the floor it is still fair game — the bot has not given up on
   // him, it has given up on ASKING about this one unprompted.

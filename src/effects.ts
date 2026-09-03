@@ -340,11 +340,24 @@ export function titleFromHisWords(title: string, userText: string): string {
  *     retime button was fixed for, and a guard that costs nothing belongs in
  *     front of it.
  *
- *   - a `duration` from readWhen does not override anything, for the same
- *     reason as the first exclusion: nobody is doing arithmetic.
+ *   - a `duration` from readWhen never OVERRIDES anything, for the same reason
+ *     as the first exclusion: nobody is doing arithmetic.
+ *
+ *     But when the router produced no time at all there is nothing to
+ *     override, and refusing to read one is not caution — it is throwing away
+ *     an hour he said out loud. Production, 03.09.2026 17:07: "תזכיר לי עוד
+ *     שעה" became an inbox capture and the reply asked "באיזו שעה בדיוק?"
+ *     about the only thing in the sentence that WAS specific. readWhen had
+ *     returned {kind:'duration',minutes:60} the whole time; this line is the
+ *     only thing that was missing.
  */
 function preferHisWords(heard: TimeRef, intent: Intent, tz: string): Schedule | null {
   const routed = scheduleFromIntent(intent, tz);
+  // FILLING a gap, never overriding: `routed` wins whenever it exists, which
+  // keeps the in_minutes exclusion above exactly as strict as it was.
+  if (heard.kind === 'duration') {
+    return routed ?? { type: 'once', at: wallString(Date.now() + heard.minutes * 60_000, tz) };
+  }
   if (heard.kind !== 'instant') return routed;
   // The model calculated a wall-clock date, which is the one thing it should
   // never have been asked to do. Anything else it produced, it produced
@@ -782,6 +795,53 @@ export async function applyIntent(
       // about HIS chat, and running them against hers would be answering a
       // question nobody asked.
       if (intent.for_friend) return friendReminder(env, chatId, ctx, intent, title, userText);
+
+      /*
+       * A bare relative push while something is RINGING is a snooze.
+       *
+       * CLAUDE.md states this as a rule and `applyIntent` enforces it
+       * deterministically rather than trusting the prompt — but only on the
+       * `reschedule` path, and the router does not always route it there.
+       * Production, 03.09.2026 17:07, with #69 fired at 16:30 and nagged at
+       * 17:00: "תזכיר לי עוד שעה" came back as `create_reminder`, was captured
+       * without a time, and the bot answered "סגרנו על #75. אבל על מה להזכיר
+       * לך ובאיזו שעה בדיוק?" — a second row, a question, and #69 still
+       * ringing underneath the whole exchange.
+       *
+       * Three conditions, and each one is what keeps this from over-reaching:
+       *
+       *  - he named NO errand. "תזכיר לי עוד שעה לקנות חלב" is a second
+       *    errand, and folding it into a snooze would lose it outright. This
+       *    is the same discriminator the ringing branch of `reschedule` does
+       *    not need, because a reschedule already names its target.
+       *  - EXACTLY one thing is ringing. Two, and there is no way to tell
+       *    which he meant — same answer as matchItem's null-on-tie: pushing
+       *    the wrong ring leaves the other one nagging and reports it handled.
+       *  - the time is RELATIVE. An absolute hour on an untitled message is
+       *    not a deferral of anything in particular.
+       */
+      const pushed =
+        intent.in_minutes && intent.in_minutes > 0
+          ? intent.in_minutes
+          : (() => {
+              const d = readWhen(userText, Date.now(), tz);
+              return d.kind === 'duration' ? d.minutes : null;
+            })();
+      if (title === UNTITLED_TITLE && ctx.open.length === 1 && pushed !== null && pushed > 0) {
+        const inst = ctx.open[0];
+        const minutes = Math.min(720, Math.max(5, pushed));
+        await db.snoozeInstance(env, inst.id, minutes);
+        const snoozed: Effect[] = [
+          {
+            kind: 'instance_snoozed', id: inst.id, title: inst.title,
+            until: Date.now() + minutes * 60_000, minutes,
+          },
+        ];
+        // Same as every other push: the moment he defers it again is the
+        // moment the question about the hour makes sense.
+        snoozed.push(...(await patternFor(env, chatId, ctx, inst.reminder_id, inst.title)));
+        return snoozed;
+      }
 
       // The same second look `reschedule` has taken since 14.08.2026
       // (see its branch below). The router returns a create with the time

@@ -245,6 +245,13 @@ section(
     { kind: 'item_done', id: 5, title: 'להחזיר ראוטר', reminderId: 1, remaining: 0 },
     { kind: 'needs_item_choice', open: [{ id: 5, reminder_id: 1, chat_id: '1', title: 'להחזיר ראוטר', position: 0, done_at: null, created_at: 0 }] },
     { kind: 'reminder_duplicate', id: 11, title: 'לקחת בגד ים', at: AT },
+    // Added in 0.19.0. It was never in this loop, and it is the one baseline
+    // that talks about closes in the SECOND person — so the moment CLAIM grew
+    // those forms it was the baseline most likely to fail its own validator,
+    // with nothing here to say so.
+    { kind: 'evening_closeout', done: 2, missed: [], dropped: [], ahead: [] },
+    { kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] },
+    { kind: 'morning_brief', rows: [], openCount: 1 },
     {
       kind: 'needs_task_choice', action: 'complete',
       open: [

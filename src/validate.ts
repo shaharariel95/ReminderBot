@@ -24,9 +24,53 @@ export interface Verdict {
  * claim-of-write principle in prose, so the model has a prompt-side reason
  * not to attempt a rewrite this lexicon will discard. If this regex changes,
  * check whether that rule's examples still cover it.
+ *
+ * Two additions in 0.19.0, both of them claims this lexicon could not see
+ * because it only knew how to hear the bot talk about ITSELF, in the singular:
+ *
+ *   סגרנו על / סיכמנו — first person PLURAL. "סגרנו על #75" shipped on
+ *   03.09.2026 over an inbox capture with no time and no title, immediately
+ *   followed by the baseline's own "אבל על מה להזכיר לך ובאיזו שעה בדיוק?".
+ *   One message that both agreed an appointment and admitted it did not know
+ *   what or when. Anchored to "על" because bare "סגרנו" is how two people
+ *   settle anything ("סגרנו שאתה מביא").
+ *
+ *   סגרת / סיימת — SECOND person. A claim about what he did is a claim about
+ *   the database exactly as much as a claim about what the bot did: chat B,
+ *   30.08.2026 20:01, "יפה שסגרת את זה מוקדם" over a `no_open_task` baseline —
+ *   praise for closing something that was still open, and #68 fired
+ *   twenty-four minutes later. Both carry the same `(?<!לא\s)` the first
+ *   person forms do, because "לא סגרת את זה" is the opposite of a claim, and a
+ *   trailing `(?![א-ת])` so "סגרת" cannot swallow "סגרתי".
+ *
+ * And note which second-person verbs are deliberately NOT here. "דחית" and
+ * "ביטלת" and "קבעת" describe standing state as readily as they describe this
+ * turn — "דחית את X 6 מתוך 7 הפעמים האחרונות" is `pattern_pushed`'s own
+ * baseline, word for word, and it is TRUE about history while nothing was
+ * written. That asymmetry is the whole reason the first-person forms are safe
+ * and their twins are not: the bot can only vouch for what it did just now,
+ * and only a close is an event this turn can be sure it owns.
+ *
+ * The residual cost is accepted with eyes open: "כבר סגרת את זה" about
+ * something he closed an hour ago is true, and will now be discarded in favour
+ * of the plainer baseline. A true sentence lost to a plainer true sentence is
+ * a worse outcome than nothing and a much better one than a phantom
+ * confirmation, which is the trade rule 2 exists to make.
+ */
+/*
+ * NOTE, before you add a verb here believing you have tightened anything:
+ * `validate()` does not read this. It reads CLAIM_GROUPS below, which carries
+ * its own copy of every verb. This constant is the documented lexicon and a
+ * test fixture, and nothing in src/ consults it.
+ *
+ * Demonstrated rather than assumed: deleting the 0.19.0 additions from HERE
+ * alone left the whole suite green, and deleting them from the groups turned
+ * it red immediately. Two lists that must agree, where only one of them bites
+ * — so a verb added to one and not the other is a fix that does nothing and
+ * reads in review as though it did.
  */
 export const CLAIM =
-  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
+  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי|סגרנו\s+על|סיכמנו|(?<!לא\s)(?:סגרת|סיימת)(?![א-ת])/;
 
 /**
  * The same verbs, grouped by WHICH write they assert — and which effects can
@@ -45,11 +89,34 @@ export const CLAIM =
  * sample and checks exactly that, which is what makes this safe to edit.
  */
 const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['kind']> }[] = [
+  /*
+   * The create group was ONE group until 0.19.0, and holding "רשמתי" and
+   * "קבעתי" as interchangeable is what licensed "סגרנו על #75" over a row
+   * that had neither a time nor a title.
+   *
+   * Writing something down and scheduling it are different claims about the
+   * database, in exactly the way "I moved it" and "I made a new one" are —
+   * which is the split this whole structure exists to express. An inbox
+   * capture IS written down; it is not set. The reply that shipped agreed an
+   * appointment in one sentence and asked what the errand was in the next.
+   */
   {
-    name: 'create',
-    verbs: /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי/,
+    name: 'noted',
+    verbs: /רשמתי|קלטתי|שמרתי|נשמר/,
     kinds: new Set<Effect['kind']>([
       'reminder_created', 'friend_reminder_created', 'reminder_captured',
+      'reminder_scheduled', 'reminder_annotated', 'goal_created', 'profile_noted',
+    ]),
+  },
+  {
+    name: 'scheduled',
+    verbs: /קבעתי|שמתי לך|נקבע|תזכורת נוצרה|סגרנו\s+על|סיכמנו/,
+    // reminder_captured is deliberately ABSENT. Everything else that was in
+    // the old create group stays: a goal, a note and an annotation are all
+    // things it is fair to say were "set", and narrowing those would discard
+    // true sentences for no gain.
+    kinds: new Set<Effect['kind']>([
+      'reminder_created', 'friend_reminder_created',
       'reminder_scheduled', 'reminder_annotated', 'goal_created', 'profile_noted',
     ]),
   },
@@ -95,7 +162,11 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
      * sentence, and especially killing the one sentence that ships when
      * everything else has already gone wrong, is not.
      */
-    verbs: /סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי/,
+    // The second-person forms sit here for the same reason their first-person
+    // twins do — "יפה שסגרת" asserts a close, whoever is credited with it —
+    // and carry the same scoping: not after "לא", and not swallowing "סגרתי".
+    verbs:
+      /סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|(?<!לא\s)(?:סגרת|סיימת)(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))(?![א-ת])/,
     // `gave_up` earns its place here by the CLAIM invariant, not by taste:
     // voice.ts words it "סגרתי את X ככישלון", so without it the deterministic
     // baseline would fail its own validator. The every-kind loop in
@@ -103,6 +174,17 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
     kinds: new Set<Effect['kind']>([
       'instance_done', 'item_done', 'goal_closed', 'photo_accepted', 'instance_skipped',
       'gave_up',
+      // Same reason as `gave_up`, one verb later: voice.ts words the close-out
+      // "סגרת N היום", so the moment the second-person forms joined this group
+      // the deterministic baseline failed its own validator — caught, within a
+      // minute, by the every-kind loop in test/validate.test.ts.
+      //
+      // It is not a fudge to keep it green. A close-out is BUILT from the
+      // day's closed instances; a turn that is reporting them is exactly a
+      // turn entitled to use close verbs. The failure this rule was widened
+      // for ("יפה שסגרת את זה מוקדם") happened over `no_open_task`, where
+      // nothing of the kind is in play.
+      'evening_closeout',
     ]),
   },
   {
@@ -183,7 +265,24 @@ function mentions(text: string, titles: string[]): boolean {
  * lie is the acceptable failure here; killing a true sentence is not.
  */
 const ELAPSED_BEFORE = /(?:כבר|עברו|מזה)\s*$/;
-const ELAPSED_AFTER = /^\s*(?:אתה|את)(?![א-ת])/;
+/*
+ * Hebrew puts the marker AFTER the quantity at least as often as before it,
+ * and until 0.19.0 only the "אתה" frame was here. The consequence was that
+ * rule 4 fired essentially never — zero rejections in a month, against a
+ * production nag that read "93 דקות שהיא פתוחה", which is the exact shape it
+ * could not see. A safety rule that has quietly stopped running is worse than
+ * one that was never written, because it is counted.
+ *
+ * Both additions are as unambiguous as the frames already here. "X עברו" is
+ * "X passed" and nothing else; "X שזה פתוח" is "X that it has been open".
+ * Everything vaguer is still left alone — "קח 90 דקות" is not an accusation,
+ * and killing it would cost a true sentence to catch nothing.
+ */
+const ELAPSED_AFTER = /^\s*(?:אתה|את|עברו|עברה|עבר)(?![א-ת])/;
+/** "…שזה פתוח", "…שהיא פתוחה" — the openness predicate, spelled out rather
+ *  than approximated as ש+anything, which would swallow "90 דקות שיהיה לך". */
+const ELAPSED_OPEN_AFTER =
+  /^\s*ש(?:זה|היא|הוא|הם|הן)\s+(?:פתוח|פתוחה|פתוחים|פתוחות|מחכה|מחכים|תלוי|תלויה|תקוע|תקועה)/;
 
 /**
  * The model is allowed to round. It is reading a wall clock and writing
@@ -294,7 +393,13 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
   ];
 
   for (const hit of scanDurations(text)) {
-    if (!ELAPSED_BEFORE.test(hit.before) && !ELAPSED_AFTER.test(hit.after)) continue;
+    if (
+      !ELAPSED_BEFORE.test(hit.before) &&
+      !ELAPSED_AFTER.test(hit.after) &&
+      !ELAPSED_OPEN_AFTER.test(hit.after)
+    ) {
+      continue;
+    }
     if (!allowedElapsed.some((actual) => nearEnough(hit.minutes, actual))) {
       return {
         ok: false,
