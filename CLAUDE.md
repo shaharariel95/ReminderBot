@@ -697,6 +697,55 @@ decline button that changes something is worse than no decline button. It also
 gained `rdrop`, which had to move off the `x:` prefix — that is `skip`, and the
 collision silently round-tripped a DELETE into skipping an unrelated instance.
 
+**A day with no hour is not "no time at all".** `readWhen` reported a bare
+"מחר" as `{kind:'none'}` — identical to a message with no time word in it —
+which threw away what the parser actually knew. Production, chat B,
+03.09.2026 23:46:
+
+```
+him  תזכיר לי מחר לבדוק כמה אתה טיפש
+bot  רשמתי. מחר בודקים.
+bot  בלי שעה:  #77 תזכורת
+```
+
+The baseline said "לא אמרת על מה ולא מתי" about a message whose fourth word was
+"מחר", and the persona resolved that contradiction the only way it could: by
+asserting the schedule the same sentence denied. `#77` has no `next_fire_at`
+and is still in the inbox.
+
+There is now a `'no-hour'` arm on `Ambiguity`, carrying his own wording, and
+`reminder_captured` takes a `dayHint` off it so the question asks for the half
+that is actually missing. It stays AMBIGUOUS and never becomes an instant: the
+only guess this file may make is a pinned day plus a NAMED PART of it
+("מחר בערב" is 20:00), and that is honest solely because voice.ts always states
+the hour it chose. A bare day has no hour to state.
+
+**When the router gives no title, his own words beat the generic.**
+`titleFromHisWords` exists on the premise that his words are the safer source,
+and it was only ever applied to a title the model HAD supplied; when the model
+supplied none the premise was dropped and `"תזכורת"` went into the database
+over an errand he had typed in full.
+
+`titleFromMessage` reads from the first INFINITIVE ל to the end, and that
+choice is the whole safety of it. The obvious implementation — strip the
+lead-in, strip a leading time word — was tried and is wrong: it turns
+"תזכיר לי עוד 5 דקות" into the title "עוד 5 דקות". Trimming harder does not fix
+it, because "עוד שעה לקנות חלב" has the errand AFTER the time and "לתכנן את
+היום" has a time word INSIDE the errand. No prefix rule separates those three.
+`splitIntoItems` already answers exactly this question with the infinitive, so
+this uses the same test: everything before the first one is dropped without
+having to be recognised, and everything inside the errand survives.
+
+Two exclusions, both closed lists of whole words for the reason
+`isBareTimeWord` is one — there is no shape separating "לי" from "לימד" or
+"להם" from "להיכנס": the ל-PRONOUNS (`לי`, `לך`, `לו`…), without which every
+title began "לי …", and the bare day words, so "להיום" is not an errand.
+
+It is deliberately conservative. A request with no infinitive
+("תזכיר לי מחר את הכביסה") returns null and the generic stands, which is
+exactly the old behaviour. A miss costs a question; a wrong title is read back
+to him every time it fires.
+
 ## Letters he never typed
 
 `titleFromHisWords` (effects.ts) removes from a model-supplied title any SCRIPT

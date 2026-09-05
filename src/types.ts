@@ -308,7 +308,20 @@ export type Effect =
        */
       to: string;
     }
-  | { kind: 'reminder_captured'; id: number; title: string }
+  /**
+   *  is the day he named when he named one and no hour — his own
+   * wording, straight off readWhen's 'no-hour' arm. Without it the question is
+   * "you didn't say what OR when" about a message whose first word was "מחר",
+   * and the persona papers over the contradiction rather than repeating it.
+   */
+  /**
+   * `dayHint` is the day he named when he named one and no hour — his own
+   * wording, straight off readWhen's 'no-hour' arm. Without it the question is
+   * "you didn't say what OR when" about a message whose fourth word was "מחר",
+   * and the persona resolves that contradiction by asserting the schedule the
+   * baseline just denied ("רשמתי. מחר בודקים.", over a row with no fire time).
+   */
+  | { kind: 'reminder_captured'; id: number; title: string; dayHint?: string }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
   /**

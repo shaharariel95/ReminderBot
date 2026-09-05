@@ -75,6 +75,16 @@ function one(e: Effect, tz: string): string {
         tz,
       )}.${e.requiresProof ? ' דורש תמונה.' : ''}`;
     case 'reminder_captured':
+      // The day, when he gave one. Asking "ולא מתי" about a message that
+      // opened with "מחר" is the bot asking for something it was handed, and
+      // the persona's way out of that contradiction was to assert the schedule
+      // this very sentence denies — "רשמתי. מחר בודקים." over a row with no
+      // fire time. Naming the day removes the contradiction at the source.
+      if (e.dayHint) {
+        return untitled(e.title)
+          ? `תפסתי ל${e.dayHint}, אבל לא אמרת על מה ובאיזו שעה.`
+          : `תפסתי #${e.id}: "${e.title}" ל${e.dayHint}. באיזו שעה?`;
+      }
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
         : `תפסתי #${e.id}: "${e.title}". בלי שעה בינתיים — תגיד לי מתי.`;

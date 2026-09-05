@@ -155,6 +155,75 @@ const FILLER = /[_=~^*|\\/<>[\]{}]/;
 const FILLER_RUN = /[_/]|[=~^*|\\<>[\]{}]{2,}/;
 
 /**
+ * A title built from HIS OWN sentence, for when the router supplied none.
+ *
+ * `titleFromHisWords` below exists on the premise that his words are the safer
+ * source — but it was only ever applied to a title the model HAD produced.
+ * When the model produced nothing the premise was dropped and the generic
+ * fallback went into the database instead. Production, chat B, 03.09.2026:
+ * "תזכיר לי מחר לבדוק כמה אתה טיפש" was stored as `#77 "תזכורת"`, and the
+ * reply then asked him what it was about.
+ *
+ * It reads from the first INFINITIVE ל to the end, and that choice is the
+ * whole safety of it.
+ *
+ * The obvious implementation — strip the lead-in, strip a leading time word —
+ * was tried and is wrong: "תזכיר לי עוד 5 דקות" becomes the title "עוד 5
+ * דקות", a time phrase filed as an errand. Trimming harder does not fix it
+ * either, because "עוד שעה לקנות חלב" has the errand AFTER the time and
+ * "לתכנן את היום" has a time word inside the errand. There is no prefix rule
+ * that separates those three.
+ *
+ * `splitIntoItems` already answers exactly this question — "is this an errand
+ * or is it something else he typed" — with the infinitive ל, and it is the
+ * test this codebase already trusts. Taking the sentence from that word
+ * onwards drops every lead-in and every time phrase in front of it without
+ * needing to recognise any of them, and keeps the ones inside the errand.
+ *
+ * Conservative by construction: a request with no infinitive at all
+ * ("תזכיר לי מחר את הכביסה") returns null and the generic fallback stands,
+ * which is exactly today's behaviour. A miss costs a question; a wrong title
+ * is read back to him every time it fires.
+ */
+/**
+ * ל-words that are PRONOUNS, not infinitives. "תזכיר לי" is the request itself.
+ *
+ * A closed list of whole words, for the same reason `isBareTimeWord` is one:
+ * there is no shape that separates "לי" from "לימד" or "להם" from "להיכנס", so
+ * a prefix rule would eat real errands. This is the same exclusion
+ * `addressesSomeoneElse` makes and for the same word.
+ */
+const L_PRONOUN = /^(?:לי|לך|לו|לה|לנו|לכם|לכן|להם|להן)$/;
+
+export function titleFromMessage(userText: string): string | null {
+  /*
+   * No `asksForNewReminder` gate here, and its absence is deliberate.
+   *
+   * It was in the first version, copied from the length guard in
+   * titleFromHisWords — and the red-proof showed that deleting it changed
+   * nothing, because the infinitive rule below already refuses everything it
+   * refused. Worse than dead weight: this only ever runs when the ROUTER has
+   * already decided the turn is a create, so the gate could only suppress a
+   * good title on a request phrased outside the grammar ("אני צריך ללכת
+   * למוסך"), handing back the generic instead of his own words.
+   *
+   * It would also have been a third caller of a gate CLAUDE.md keeps to two
+   * on purpose.
+   */
+  const s = userText.replace(/\s+/g, ' ').trim();
+  // The infinitive marker followed by a real letter — the same shape
+  // splitIntoItems counts, and `isBareTimeWord` discounts "להיום" for the same
+  // reason it does there: ל also glues onto a day.
+  const words = s.split(' ');
+  const start = words.findIndex(
+    (w) => /^ל[א-ת]/.test(w) && !isBareTimeWord(w) && !L_PRONOUN.test(w),
+  );
+  if (start < 0) return null;
+  const out = words.slice(start).join(' ').trim();
+  return out.length >= 3 ? out.slice(0, 120) : null;
+}
+
+/**
  * A title the model returned, with anything he never typed taken back out.
  *
  * Two rules, both learned in production, both about the same thing: the router
@@ -798,7 +867,13 @@ export async function applyIntent(
 
   switch (intent.action) {
     case 'create_reminder': {
-      const title = titleFromHisWords(intent.title?.trim() ?? '', userText) || UNTITLED_TITLE;
+      // His own sentence sits between the model's title and the generic
+      // fallback: the router returning nothing is not a reason to throw away
+      // the errand he typed. See titleFromMessage.
+      const title =
+        titleFromHisWords(intent.title?.trim() ?? '', userText) ||
+        titleFromMessage(userText) ||
+        UNTITLED_TITLE;
 
       // "תזכיר לדנה..." — a row in somebody else's account. Handled before
       // anything else in this branch, because almost nothing below it applies:
@@ -875,7 +950,11 @@ export async function applyIntent(
       // No time is not a failure any more. Capture first, schedule later.
       if (!schedule) {
         const id = await db.addInboxItem(env, chatId, title, tz);
-        return [{ kind: 'reminder_captured', id, title }];
+        // He named a day and no hour: say so, and ask only for the half that
+        // is actually missing. See readWhen's 'no-hour' arm.
+        const dayHint =
+          heard.kind === 'ambiguous' && heard.why === 'no-hour' ? heard.seen[0] : undefined;
+        return [{ kind: 'reminder_captured', id, title, ...(dayHint ? { dayHint } : {}) }];
       }
 
       let next: number | null;

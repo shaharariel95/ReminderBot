@@ -88,7 +88,24 @@ export type Ambiguity =
   /** The moment he named has already gone. */
   | 'past'
   /** A token that looks like a time and could not be read. THE new arm. */
-  | 'unparsed';
+  | 'unparsed'
+  /**
+   * A DAY, pinned, with no hour on it — a bare "מחר", "ביום שלישי".
+   *
+   * Distinct from `none`, and that distinction is the whole point: the parser
+   * knows strictly more than nothing here, and reporting `none` threw the
+   * knowledge away at the seam. Production, chat B, 03.09.2026 23:46 —
+   * "תזכיר לי מחר לבדוק כמה אתה טיפש" was captured and answered with a baseline
+   * saying "לא אמרת על מה ולא מתי", about a day he had named in the first three
+   * words. The persona resolved the contradiction by asserting "מחר בודקים"
+   * over a row with no next_fire_at.
+   *
+   * It stays AMBIGUOUS rather than becoming an instant. The only guess this
+   * file is allowed is a pinned day plus a named part of it ("מחר בערב" is
+   * 20:00), and that is honest solely because voice.ts always states the hour
+   * it chose so he can move it. A bare day has no hour to state.
+   */
+  | 'no-hour';
 
 const ambiguous = (why: Ambiguity, ...seen: string[]): TimeRef => ({ kind: 'ambiguous', why, seen });
 
@@ -307,6 +324,10 @@ export function readWhen(text: string, nowMs: number, tz: string): TimeRef {
       if (hit === null || hit.ts <= nowMs) return ambiguous('past', rest.trim());
       return { kind: 'instant', at: hit.ts };
     }
+    // A day, and nothing on it. Reported rather than discarded — see 'no-hour'.
+    // `matched` is his own wording, so the question can quote the day back at
+    // him instead of asking about a time he already gave half of.
+    return ambiguous('no-hour', day.matched.trim());
   }
 
   return { kind: 'none' };
