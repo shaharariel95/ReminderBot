@@ -1269,10 +1269,36 @@ export async function applyIntent(
        * failure to tidy the old ring must not turn a successful move into a
        * reported failure.
        */
+      /*
+       * `superseded`, not `skipped`, since 0.21.0 — and it EMITS.
+       *
+       * The status was the same word he gets for tapping "לא היום", and
+       * `missStreak` counts every skipped row as a miss on the reasoning that
+       * a decline and a give-up are the same fact from outside. Moving it is
+       * not: #69's two superseded rings plus one real decline put that counter
+       * at MISS_THRESHOLD, so the next fire would have told him "3 פעמים
+       * ברצף שזה לא קורה… אולי זה לא באמת חשוב לך" over two retimes he made
+       * himself. See migrations/019.
+       *
+       * And the close is reported, because effects are the write log: this ran
+       * as a bare db call for five versions, so it produced no `events` row and
+       * no `/why` line, and instances 53 and 54 of #69 read from the history
+       * like rings that simply never closed.
+       */
+      const superseded: Effect[] = [];
       if (ringing) {
-        await db
-          .closeInstance(env, ringing.id, 'skipped')
-          .catch((e) => console.error('closing the ring a retime superseded', e));
+        // Best-effort still: the reminder really has been retimed either way,
+        // and failing to tidy the old ring must not turn a successful move
+        // into a reported failure. The effect is pushed only if the write
+        // actually happened — a claim is not allowed to outrun its row.
+        try {
+          await db.closeInstance(env, ringing.id, 'superseded');
+          superseded.push({
+            kind: 'instance_superseded', id: ringing.id, title: ringing.title,
+          });
+        } catch (e) {
+          console.error('closing the ring a retime superseded', e);
+        }
       }
 
       // Giving an inbox capture its FIRST hour is not a move, and saying
@@ -1306,9 +1332,18 @@ export async function applyIntent(
             console.error('addItems on promotion', e),
           );
         }
-        return [{ kind: 'reminder_scheduled', id: rem.id, title: rem.title, at: next }];
+        // An inbox capture has no ringing instance by construction — it has
+        // never fired — so `superseded` is empty here. Spread anyway rather
+        // than relying on that: the day it stops being true, this arm should
+        // report the close like the other one does.
+        return [...superseded, { kind: 'reminder_scheduled', id: rem.id, title: rem.title, at: next }];
       }
-      return [{ kind: 'reminder_retimed', id: rem.id, title: rem.title, at: next }];
+      // The move first, the tidy-up after: he asked for the move, and the
+      // closed ring is a consequence of it.
+      return [
+        { kind: 'reminder_retimed', id: rem.id, title: rem.title, at: next },
+        ...superseded,
+      ];
     }
 
     case 'rename': {

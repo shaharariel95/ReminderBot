@@ -147,6 +147,10 @@ function one(e: Effect, tz: string): string {
       return e.recurs
         ? `"${e.title}" ירדה להיום. בלי כישלון.`
         : `"${e.title}" ירדה. זו הייתה חד-פעמית, אז היא לא תחזור מעצמה — תגיד לי מתי אם היא עוד רלוונטית.`;
+    case 'instance_superseded':
+      // Short, and it names no hour: the reminder_retimed line it always rides
+      // beside has just said the new one, and repeating it reads as two moves.
+      return 'הצלצול הקודם ירד. השעה החדשה מחליפה אותו.';
     case 'followup_suggested':
       // A question, not a confirmation. Nothing was written and the wording
       // must not suggest otherwise.

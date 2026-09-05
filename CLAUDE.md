@@ -194,6 +194,45 @@ One trip to the garage, two streak points, four messages inside ten seconds.
   `failed`: he did not do it and he did not flake, and `db.stats` counts only
   those two, so a superseded ring cannot pay him a streak point.
 
+**One word cannot mean "he declined" and "the bot tidied up".** `instances.status`
+had `skipped` written from four places with three meanings:
+
+```
+closeIfOpen(..., 'skipped', 'כפתור')       he tapped "לא היום"        — he declined
+closeIfOpen(..., 'skipped', 'נדחה למחר')   he tapped "מחר"            — he deferred
+closeInstance(ringing.id, 'skipped')       a retime superseded a ring — the BOT
+deleteReminder                             the reminder is cancelled  — the BOT
+```
+
+`missStreak` counted all four, on the reasoning in its own comment that a
+decline and a give-up are "the same fact from the outside: it isn't happening".
+True of the first two. False of the last two, where he MOVED it or DELETED it —
+both of which are engagement. Reminder #69 had exactly that shape: two rings
+superseded by his own retimes plus one real decline, so `missStreak` returned 3
+= `MISS_THRESHOLD`, and the next fire would have carried *"3 פעמים ברצף שזה לא
+קורה. אולי השעה לא נכונה, אולי זה לא באמת חשוב לך"* — an accusation whose
+evidence was two-thirds the bot's own housekeeping.
+
+The bot-side closes are `superseded` now (migrations/019). The backfill is
+exact rather than approximate because `closeIfOpen` stamps `proof` on every
+genuine decline and both bot-side closes leave it NULL — verified against
+production before it was written, and it moved exactly the two rows predicted.
+
+**The supersede EMITS.** It ran as a bare `db.closeInstance` for five versions,
+so it produced no `events` row and no `/why` line: instances 53 and 54 of #69
+read from the history like rings that simply never closed. Effects are the write
+log and `sendOutcome` is the one point every path converges on — a write that
+does not go through it is invisible to the only record there is. The effect is
+pushed **inside** the try, only when the write actually happened, because a
+claim may not outrun its row.
+
+**Its event word is `נדחק`, deliberately not `דילג`.** `behaviourOf` counts
+`דילג` toward `failing` since 0.20.0, so sharing the word would have fed the
+pattern detector evidence against him for engaging with a reminder. Two writes
+that mean opposite things need two words at every layer they pass through —
+status, event, effect kind — and the moment one layer collapses them, some
+reader downstream draws the wrong conclusion silently.
+
 Note what was NOT done: `dueReminders` still has no "skip if an instance is
 open" guard, and must not get one. A daily reminder he never closed should
 still ring tomorrow — that is a new day's dose, not a duplicate.
@@ -905,6 +944,7 @@ npx wrangler d1 execute nu-bot --remote --file=./migrations/015_event_at.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/016_display_name.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/017_instance_due_slot.sql
 npx wrangler d1 execute nu-bot --remote --file=./migrations/018_granted_minutes.sql
+npx wrangler d1 execute nu-bot --remote --file=./migrations/019_superseded_instances.sql
 npm run deploy
 ```
 

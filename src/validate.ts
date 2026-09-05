@@ -185,6 +185,9 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
       // for ("יפה שסגרת את זה מוקדם") happened over `no_open_task`, where
       // nothing of the kind is in play.
       'evening_closeout',
+      // The bot really did close a ring. Without this, a persona that says
+      // "סגרתי את הצלצול הקודם" over a true supersede is discarded.
+      'instance_superseded',
     ]),
   },
   {

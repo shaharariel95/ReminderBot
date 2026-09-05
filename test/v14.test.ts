@@ -287,7 +287,12 @@ async function main() {
 
     const afterMove = instances(rig);
     eq('the ring it superseded is closed', afterMove.filter((i) => i.status === 'open').length, 0);
-    eq('and closed as superseded, not as done or failed', afterMove[0].status, 'skipped');
+    // This asserted 'skipped' until 0.21.0, and the label was already asking
+    // for a word the schema did not have: `skipped` was ALSO what he gets for
+    // tapping "לא היום", and missStreak counted both against him. See
+    // migrations/019 — #69's two superseded rings plus one real decline reached
+    // MISS_THRESHOLD and would have produced "3 פעמים ברצף שזה לא קורה".
+    eq('and closed as superseded, not as done or failed', afterMove[0].status, 'superseded');
 
     await withNow(wallToUtc(2026, 8, 23, 9, 0, TZ) + 1000, async () => {
       rig.speakQueue.push('נו? ללכת למוסך.');

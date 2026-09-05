@@ -1,0 +1,31 @@
+-- `skipped` was answering two opposite questions.
+--
+-- Four places wrote it, with three meanings:
+--
+--   closeIfOpen(..., 'skipped', 'כפתור')       he tapped "לא היום"        — he declined
+--   closeIfOpen(..., 'skipped', 'נדחה למחר')   he tapped "מחר"            — he deferred
+--   closeInstance(ringing.id, 'skipped')       a retime superseded a ring — the BOT tidied up
+--   deleteReminder                             the reminder is cancelled  — the BOT tidied up
+--
+-- `missStreak` counts every one of them as a miss, on the reasoning in its own
+-- comment that a decline and a give-up are "the same fact from the outside: it
+-- isn't happening". True of the first two. False of the last two, where he
+-- MOVED it or DELETED it — both of which are engagement.
+--
+-- Reminder #69 in production had exactly that shape: instances 53 and 54
+-- superseded by his own retimes, 55 genuinely declined. missStreak returned 3,
+-- which is MISS_THRESHOLD, so the next fire would have carried
+--
+--   "3 פעמים ברצף שזה לא קורה. אולי השעה לא נכונה, אולי זה לא באמת חשוב לך"
+--
+-- — a claim about HIM, two thirds of whose evidence was the bot's own tidy-up.
+--
+-- No ALTER: instances.status is TEXT with no CHECK, so the new value needs no
+-- schema change. What this migration does is the BACKFILL, and it can be exact
+-- rather than approximate because closeIfOpen stamps `proof` on every genuine
+-- decline ('כפתור' or 'נדחה למחר') while both bot-side closes leave it NULL.
+--
+-- Verified against production before it was written: 3 rows with 'כפתור', 1
+-- with 'נדחה למחר', 2 with NULL — and the two NULLs are instances 53 and 54,
+-- precisely the two with no 'דילג' event in the events table.
+UPDATE instances SET status = 'superseded' WHERE status = 'skipped' AND proof IS NULL;

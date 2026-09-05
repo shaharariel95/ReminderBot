@@ -108,7 +108,13 @@ export interface Instance {
   fired_at: number;
   next_nag_at: number | null;
   nag_count: number;
-  status: 'open' | 'done' | 'failed' | 'skipped';
+  /**
+   * 'skipped' is HIM declining ("לא היום", "מחר"). 'superseded' is the BOT
+   * tidying up — a retime that landed on a ringing instance, or a reminder he
+   * cancelled. They were one word until 0.21.0 and missStreak counted both
+   * against him; see migrations/019.
+   */
+  status: 'open' | 'done' | 'failed' | 'skipped' | 'superseded';
   proof: string | null;
   closed_at: number | null;
   /** Minutes of this instance's life the bot itself granted. See migrations/018. */
@@ -347,6 +353,22 @@ export type Effect =
    * finished recurring reminder both read `status='done'`.
    */
   | { kind: 'instance_skipped'; id: number; title: string; recurs: boolean }
+  /**
+   * An absolute retime landed on a ringing reminder and closed the ring it
+   * replaced. The BOT did this, not him.
+   *
+   * It exists because the close was happening anyway and emitting nothing for
+   * it broke the one guarantee the effects layer makes: `sendOutcome` is the
+   * single point every path converges on, so a write with no effect gets no
+   * `events` row and no `/why` line. Production #69 — instances 53 and 54 both
+   * `skipped`, both with zero `דילג` events, both looking from the history
+   * like rings that never closed.
+   *
+   * A separate kind from `instance_skipped` rather than a flag on it, because
+   * everything downstream keys off the kind and the two mean opposite things:
+   * a skip is him saying no, this is the bot cleaning up after him saying yes.
+   */
+  | { kind: 'instance_superseded'; id: number; title: string }
   | { kind: 'instance_snoozed'; id: number; title: string; until: number; minutes: number }
   /**
    * This reminder is not working, said as a COUNT and an OFFER.
@@ -586,6 +608,9 @@ export const WROTE: ReadonlySet<Effect['kind']> = new Set<Effect['kind']>([
   'reminder_created', 'friend_reminder_created',
   'reminder_captured', 'reminder_scheduled', 'reminder_retimed',
   'reminder_renamed', 'reminder_deleted', 'instance_done', 'instance_skipped', 'instance_snoozed',
+  // The ring really was closed. It is the bot's own write rather than his, but
+  // WROTE asks whether anything happened, not whose idea it was.
+  'instance_superseded',
   'instance_started', 'reminder_annotated',
   'goal_created', 'goal_progress', 'goal_closed', 'checkins_set', 'muted',
   'intensity_set', 'photo_accepted', 'profile_noted', 'profile_forgotten', 'item_done',

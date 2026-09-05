@@ -577,7 +577,7 @@ export async function deleteReminder(env: Env, chatId: string, id: number): Prom
     .bind(id, chatId)
     .run();
   await env.DB.prepare(
-    "UPDATE instances SET status = 'skipped', closed_at = ? WHERE reminder_id = ? AND status = 'open'",
+    "UPDATE instances SET status = 'superseded', closed_at = ? WHERE reminder_id = ? AND status = 'open'",
   )
     .bind(Date.now(), id)
     .run();
@@ -743,7 +743,7 @@ export async function bumpNag(env: Env, id: number, nextNagAt: number | null): P
 export async function closeInstance(
   env: Env,
   id: number,
-  status: 'done' | 'failed' | 'skipped',
+  status: 'done' | 'failed' | 'skipped' | 'superseded',
   proof: string | null = null,
 ): Promise<void> {
   await env.DB.prepare(
@@ -793,7 +793,7 @@ export async function getReminder(env: Env, id: number): Promise<Reminder | null
 export async function closeIfOpen(
   env: Env,
   id: number,
-  status: 'done' | 'failed' | 'skipped',
+  status: 'done' | 'failed' | 'skipped' | 'superseded',
   proof: string | null = null,
 ): Promise<boolean> {
   const res = await env.DB.prepare(
@@ -1465,6 +1465,11 @@ const EVENT_OF: Record<string, string> = {
   nagged: 'נדנוד',
   instance_done: 'נסגרה',
   instance_skipped: 'דילג',
+  // Deliberately NOT 'דילג'. behaviourOf counts that word toward 
+  // (0.20.0), and a ring the bot replaced after HE moved something is the
+  // opposite of an abandonment. One word for both would have fed the pattern
+  // detector evidence against him for engaging with it.
+  instance_superseded: 'נדחק',
   instance_snoozed: 'נדחתה',
   instance_started: 'בדרך',
   gave_up: 'ויתרתי',
