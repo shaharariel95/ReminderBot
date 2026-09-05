@@ -1484,6 +1484,23 @@ const EVENT_OF: Record<string, string> = {
   // working" a day after declining the first.
   pattern_pushed: 'הצעתי שינוי',
   pattern_failing: 'הצעתי שינוי',
+  /*
+   * The three unprompted messages that used to leave no trace at all.
+   *
+   * `events` is how "why is this bot talking to me" gets answered, and it was
+   * answering short. Production 04.09.2026: reminder #78 drew four bot
+   * messages after it fired and three were recorded, so /diag reported
+   * "נדנודים: 2" on a day he had received three pressure messages — the
+   * missing one being the evening close-out, which 0.22.0 caught behaving like
+   * a nag and could only fix the REGISTER of.
+   *
+   * They are CHAT_LEVEL: a daily message names several reminders or none, and
+   * filing it under one of them would put a line in that reminder's /why story
+   * that is not about it.
+   */
+  morning_brief: 'סיכום בוקר',
+  evening_closeout: 'סיכום ערב',
+  checkin_goal: 'בדיקת מטרה',
 };
 
 /**
@@ -1573,9 +1590,28 @@ export async function patternOfferedSince(
  */
 const ID_IS_INSTANCE = new Set([
   'instance_done', 'instance_skipped', 'instance_snoozed', 'instance_started',
+  // Added in 0.24.0, and it was wrong from the moment instance_superseded
+  // shipped in 0.21.0: its `id` is a ringing INSTANCE, so the default branch
+  // below filed it as a reminder_id and /why attributed the row to whatever
+  // reminder happened to carry that number.
+  //
+  // The 0.21.0 test could not see it. A fresh rig numbers the first reminder 1
+  // and the first instance 1, so `WHERE reminder_id = 1` was true either way —
+  // test/v24.test.ts forces the ids apart, which is the only way to tell.
+  'instance_superseded',
 ]);
 /** Effects that name only an instance, via `instanceId`. */
 const INSTANCE_ONLY = new Set(['nagged', 'gave_up', 'photo_accepted']);
+/**
+ * Effects that belong to the CHAT, not to any single row.
+ *
+ * The daily messages name several reminders or none, and a goal check-in names
+ * a GOAL — whose id, in the default branch below, would be read as a reminder
+ * id and filed into some unrelated reminder's history. That is the same
+ * mistake as instance_superseded above, pointing the other way, and it is the
+ * trap in the obvious version of this fix.
+ */
+const CHAT_LEVEL = new Set(['morning_brief', 'evening_closeout', 'checkin_goal']);
 
 function numOrNull(v: unknown): number | null {
   const n = Number(v);
@@ -1607,7 +1643,10 @@ export async function recordEvents(
   for (const e of rows) {
     let reminderId: number | null = null;
     let instanceId: number | null = null;
-    if (ID_IS_INSTANCE.has(e.kind)) {
+    if (CHAT_LEVEL.has(e.kind)) {
+      // Both stay null. The row records that the message went out; there is no
+      // reminder whose story it belongs in.
+    } else if (ID_IS_INSTANCE.has(e.kind)) {
       instanceId = numOrNull(e.id);
     } else if (INSTANCE_ONLY.has(e.kind)) {
       instanceId = numOrNull(e.instanceId);

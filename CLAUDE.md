@@ -137,6 +137,35 @@ Three separate readers, on purpose:
 - `meta.last_tick` — stamped at the START of a tick, so "the scheduler is dead"
   and "the scheduler ran and something inside it threw" are distinguishable.
 
+**Every unprompted message leaves a row in `events`, filed under the right
+row.** Stated as an invariant because it was being broken two different ways at
+once, and `events` is how "why is this bot talking to me" gets answered.
+
+Three unprompted kinds wrote nothing at all — `morning_brief`,
+`evening_closeout`, `checkin_goal`. Production 04.09.2026: reminder #78 drew
+four bot messages after it fired, `events` recorded three, and `/diag` said
+"נדנודים: 2" on a day he had received three pressure messages. The missing one
+was the close-out, which 0.22.0 caught behaving like a nag and could only fix
+the register of.
+
+They are **CHAT_LEVEL**: both ids stay null. A daily message names several
+reminders or none, so filing it under one would put a line in that reminder's
+`/why` story that is not about it. This matters more than it looks —
+`checkin_goal` carries `id: goal.id`, and `recordEvents`' default branch reads
+`e.id` as a REMINDER id, so the obvious version of this fix files a goal's
+number into some unrelated reminder's history.
+
+**And `instance_superseded` had been misfiled since it shipped.** Its `id` is a
+ringing INSTANCE; it was not in `ID_IS_INSTANCE`, so 0.21.0 wrote `נדחק` rows
+under `reminder_id = <instance id>`.
+
+The 0.21.0 test could not have caught it: a fresh rig numbers the first
+reminder 1 and the first instance 1, so `WHERE reminder_id = 1` was true
+whichever id had been written. `test/v24.test.ts` burns six instance rows first
+so the two ids differ, which is the only way to tell them apart. **When a test
+asserts on an id, check that the ids in the fixture are actually distinct** —
+otherwise it is asserting that a number equals itself.
+
 Keep them separate. They have different writers, readers and retention, and the
 day errors arrive fastest must not be the day reminder history is pushed out of
 the window. The event for a fired reminder is `צלצלה` (came due), never

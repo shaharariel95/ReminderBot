@@ -547,6 +547,12 @@ export async function handleSlash(
         `צלצלו היום: ${counts['צלצלה'] ?? 0} · לא נמסרו: ${counts['לא נמסרה'] ?? 0} · ` +
           `נדנודים: ${counts['נדנוד'] ?? 0} · נסגרו: ${counts['נסגרה'] ?? 0} · ` +
           `ירדו: ${counts['דילג'] ?? 0}`,
+        // The unprompted messages that are not about one reminder. Counted
+        // here because the line above was the whole answer to "how much did
+        // this thing talk to me today", and on 04.09.2026 it was short by one:
+        // he got three pressure messages and it reported two.
+        `הודעות יומיות: בוקר ${counts['סיכום בוקר'] ?? 0} · ערב ${counts['סיכום ערב'] ?? 0} · ` +
+          `מטרות ${counts['בדיקת מטרה'] ?? 0}`,
       );
 
       /*
