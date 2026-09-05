@@ -426,6 +426,39 @@ It changes exactly one thing, and the thing it does NOT change is the point:
   16.08.2026 that block produced "למה לקח לך 69 דקות להבין מתי זה?" — aimed at
   a cooperative answer to the bot's own question.
 
+**A summary is not a nag, and `stance` is where that is said.** There are three
+stances now, and the third exists because of one message.
+
+Production 04.09.2026 21:00, the evening close-out over #78, open since 14:59:
+
+> נו? "להזמין אוכל ללילה" פתוח כבר 361 דקות. כמה זמן לוקח לבחור המבורגר?
+> תזמין משהו עכשיו ותסגור את הפינה הזאת.
+
+Every fact in it is true. 14:59:03 to 21:00:43 is 361 minutes, `facts.elapsed`
+had it, and rule 4 rightly passed it. It is a NAG, sent from the summary slot,
+and three things are wrong with that:
+
+- a close-out REPORTS a day — a tally, what is still open, what is still ahead.
+  This looked at one task and pushed.
+- it bypasses the ladder. `NAG_BACKOFF_MIN` is `[30, 120, 360]`, so after the
+  17:31 nag the next was due at 23:31 — inside quiet hours, where it would have
+  been held. He got the pressure two and a half hours early through a path with
+  no ladder, no `nag_count` and no ceiling.
+- `nag_count` said 2. He had received three, and `/why` and `/diag` both agree
+  with the counter rather than with his chat.
+
+**The fix is permission, never suppression.** Withholding the number was tried
+on 17.08.2026 for the reply stance and is worse: `openSummary` carries
+`fired_at`, so the model does the subtraction anyway and does it badly, and
+every catch costs the whole rewrite. `'summarising'` therefore says what
+`'replying'` says — the span is background, not a charge — without the false
+claim that he has just answered. Three stances, three sentences about the same
+number; sharing one between any two of them puts an untrue line in the prompt,
+which is exactly what "הוא ישן אז" did for granted minutes in 0.18.0.
+
+Note what this does NOT do: the close-out still names what is open, because
+that is its job. What it may not do is chase it.
+
 **The number is the span he was AWAKE for.** `facts.addElapsed` subtracts the
 quiet window (`time.quietMinutesBetween`). Instance 44 fired at 22:00 and was
 nagged again at 08:03, so a flat subtraction handed the model 630 and he woke

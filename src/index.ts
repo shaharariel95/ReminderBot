@@ -1227,7 +1227,7 @@ async function sendOutcome(
    * Defaults to 'chasing' so every cron path keeps behaving exactly as it did;
    * the reply paths opt out explicitly.
    */
-  stance: 'chasing' | 'replying' = 'chasing',
+  stance: 'chasing' | 'replying' | 'summarising' = 'chasing',
   /**
    * When the turn this belongs to runs out of time.
    *
@@ -1926,9 +1926,13 @@ async function sendMorningBrief(env: Env, chatId: string, now: number, tz: strin
   // is how a useful message turns into one that gets muted.
   if (!rows.length && !open.length) return;
   const ctx = await buildContext(env, chatId);
-  await sendOutcome(env, chatId, ctx, [
-    { kind: 'morning_brief', rows, openCount: open.length },
-  ]);
+  await sendOutcome(
+    env, chatId, ctx,
+    [{ kind: 'morning_brief', rows, openCount: open.length }],
+    // 'summarising': this REPORTS a day, it does not chase. See the close-out
+    // below, and brain.ts where the stance is spent.
+    undefined, 'high', undefined, 'summarising',
+  );
 }
 
 async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: string): Promise<void> {
@@ -1948,9 +1952,20 @@ async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: st
   // useful message, and it is the one the old guard suppressed entirely.
   if (!tally.done && !missed.length && !dropped.length && !ahead.length) return;
   const ctx = await buildContext(env, chatId);
-  await sendOutcome(env, chatId, ctx, [
-    { kind: 'evening_closeout', done: tally.done, missed, dropped, ahead },
-  ]);
+  await sendOutcome(
+    env, chatId, ctx,
+    [{ kind: 'evening_closeout', done: tally.done, missed, dropped, ahead }],
+    /*
+     * 'summarising', not the default 'chasing'.
+     *
+     * 04.09.2026 21:00, over #78 which had been open since 14:59: "נו? 'להזמין
+     * אוכל ללילה' פתוח כבר 361 דקות. כמה זמן לוקח לבחור המבורגר?" — a nag, sent
+     * from the summary slot, two hours before the nag ladder would have
+     * allowed one (NAG_BACKOFF_MIN had backed off to 360, putting the next at
+     * 23:31, inside quiet hours). nag_count said 2; he had received three.
+     */
+    undefined, 'high', undefined, 'summarising',
+  );
 }
 
 /**

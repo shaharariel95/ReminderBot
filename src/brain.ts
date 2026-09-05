@@ -560,8 +560,8 @@ export async function speak(
   history: { role: 'user' | 'bot'; text: string }[],
   baseline: string,
   toneNote?: string,
-  /** See sendOutcome. 'replying' withholds the elapsed-minutes block. */
-  stance: 'chasing' | 'replying' = 'chasing',
+  /** See sendOutcome. Decides what the turn may DO with the elapsed block. */
+  stance: 'chasing' | 'replying' | 'summarising' = 'chasing',
   /** What is left of the turn. This call is the one that gives way — the
    *  baseline it rewrites is already true and already shippable. */
   deadline?: number,
@@ -600,6 +600,31 @@ export async function speak(
           .join(' · ')}` +
         (stance === 'replying'
           ? '\nהוא ענה לך עכשיו — המספר הזה הוא רקע בלבד. אל תשאל אותו למה זה לקח כל כך הרבה, ואל תנקר לו בזה. אם הוא לא רלוונטי לתשובה, אל תזכיר אותו בכלל.'
+          : '') +
+        /*
+         * The third stance, and it exists because of one message.
+         *
+         * Production 04.09.2026 21:00, the evening close-out over #78, which
+         * had been open since 14:59: "נו? 'להזמין אוכל ללילה' פתוח כבר 361
+         * דקות. כמה זמן לוקח לבחור המבורגר?" Every fact in it is true — 361 is
+         * the exact span, and rule 4 rightly passed it. It is a NAG, sent from
+         * the summary slot.
+         *
+         * Two things are wrong with that and neither is the number. A close-out
+         * reports a day; and the nag ladder had deliberately backed off to 360
+         * minutes, so the next real nag was due at 23:31 — inside quiet hours,
+         * where it would have been held. He got the pressure anyway, through a
+         * path with no ladder, no nag_count and no ceiling. `nag_count` said 2.
+         * He had received three.
+         *
+         * Withholding the number instead was tried on 17.08.2026 for the reply
+         * stance and is worse: openSummary carries fired_at, so the model does
+         * the subtraction regardless and does it badly. So this says the same
+         * thing 'replying' says — the span is context, not a charge — without
+         * the false claim that he has just answered.
+         */
+        (stance === 'summarising'
+          ? '\nזה סיכום — לא נדנוד. המספר הזה הוא רקע: תזכיר מה פתוח, אל תלחץ עליו על זה עכשיו ואל תשאל אותו כמה זמן זה לוקח. הנדנודים קורים בזמנים שלהם, לא כאן.'
           : '') +
         // The span crossed his quiet hours, so the number above already has
         // the night taken out of it (facts.addElapsed). Said out loud because
