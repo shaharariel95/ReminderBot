@@ -536,30 +536,41 @@ export async function patternFor(
   reminderId: number,
   title: string,
   /**
-   * A give-up that is committing in this very turn.
+   * An abandonment that is committing in this very turn.
    *
-   * `behaviourOf` counts rows in `events`, and the `ויתרתי` row for the
-   * current give-up is written by `sendOutcome` — which runs AFTER this
-   * decision is made. Without this the in-flight failure is invisible and
-   * FAILURE_FLOOR silently becomes one higher than patterns.ts says it is.
-   * The instance is already closed by the time this is called, so counting it
-   * is a statement about a write that has happened, not a prediction.
+   * `behaviourOf` counts rows in `events`, and the row for what is happening
+   * right now is written by `sendOutcome` — which runs AFTER this decision is
+   * made. Without this the in-flight event is invisible and FAILURE_FLOOR
+   * silently becomes one higher than patterns.ts says it is. The instance is
+   * already closed by the time this is called, so counting it is a statement
+   * about a write that has happened, not a prediction.
+   *
+   * Was a bare `alsoFailed` boolean until 0.20.0, when the skip path started
+   * asking too and needed the same thing for a different row. A second boolean
+   * would have been two flags that must never both be true; naming the event
+   * makes that unrepresentable.
    */
-  alsoFailed = false,
+  pending?: 'failed' | 'skipped',
 ): Promise<Effect[]> {
   try {
     const now = Date.now();
     if (await db.patternOfferedSince(env, chatId, reminderId, now - PATTERN_COOLDOWN_MS)) return [];
 
     const counted = await db.behaviourOf(env, chatId, reminderId, ctx.settings.tz, now - PATTERN_WINDOW_MS);
-    const b = alsoFailed
-      ? { ...counted, fires: counted.fires + 1, failures: counted.failures + 1 }
-      : counted;
+    const b =
+      pending === 'failed'
+        ? { ...counted, fires: counted.fires + 1, failures: counted.failures + 1 }
+        : pending === 'skipped'
+          // Only the skip. Unlike the give-up above, a skip's `צלצלה` row is
+          // already in the table — it was written when the thing rang, and the
+          // tap is a separate, later event.
+          ? { ...counted, skips: counted.skips + 1 }
+          : counted;
     const p = detectPattern(b);
     if (!p) return [];
 
     if (p.kind === 'failing') {
-      return [{ kind: 'pattern_failing', id: reminderId, title, failures: p.failures, fires: p.fires }];
+      return [{ kind: 'pattern_failing', id: reminderId, title, dropped: p.dropped, fires: p.fires }];
     }
     // The suggested hour as an INSTANT — its next occurrence — so facts.ts
     // sweeps it through the existing `at` rule and validate.ts allows the

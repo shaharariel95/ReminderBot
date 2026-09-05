@@ -545,7 +545,27 @@ export async function handleSlash(
       lines.push(
         `טיק אחרון: ${tickLine(tick, tz)}`,
         `צלצלו היום: ${counts['צלצלה'] ?? 0} · לא נמסרו: ${counts['לא נמסרה'] ?? 0} · ` +
-          `נדנודים: ${counts['נדנוד'] ?? 0} · נסגרו: ${counts['נסגרה'] ?? 0}`,
+          `נדנודים: ${counts['נדנוד'] ?? 0} · נסגרו: ${counts['נסגרה'] ?? 0} · ` +
+          `ירדו: ${counts['דילג'] ?? 0}`,
+      );
+
+      /*
+       * Whether patterns.ts has ever said anything, and when.
+       *
+       * It had not — not once, across 55 instances in a month — and no reader
+       * anywhere could have shown that. A whole file (a mode calculation, a
+       * cooldown, three effect kinds, button wiring) was inert and silent,
+       * which is exactly the shape of the goal-check-in bug 0.19.0 closed one
+       * file over.
+       *
+       * /diag already names blocked models for this reason: an optimisation
+       * or a threshold that has quietly switched a feature off is invisible
+       * until something counts it out loud. "מעולם לא" is the whole point of
+       * the line — a zero here is the finding, not the absence of one.
+       */
+      const lastPattern = await db.lastPatternOffer(env, chatId).catch(() => null);
+      lines.push(
+        `הצעות דפוס: ${lastPattern === null ? 'מעולם לא' : formatLocal(lastPattern, tz)}`,
       );
 
       // The count above says how often the model lied; these say what it said.

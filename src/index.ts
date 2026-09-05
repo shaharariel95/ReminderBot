@@ -756,6 +756,25 @@ async function handleCallback(update: any, env: Env): Promise<void> {
             kind: 'instance_skipped', id: inst.id, title: inst.title,
             recurs: await reminderRecurs(env, inst.reminder_id),
           });
+          /*
+           * Declining it is the plainest statement in the product that a
+           * reminder is not working — and until 0.20.0 it was the one path
+           * that never asked the question. patternFor hung off `snooze` and
+           * off the give-up, so a reminder he said no to three times running
+           * produced nothing at all. Combined with behaviourOf not counting
+           * `דילג` either, that is most of why patterns.ts had never once
+           * fired in production. See issues.md §8.
+           *
+           * The cooldown inside patternFor is what keeps this from becoming
+           * the noise it exists to reduce, and the appended question rides on
+           * a reply he was already getting — no extra notification.
+           */
+          effects.push(
+            ...(await patternFor(
+              env, chatId, await buildContext(env, chatId), inst.reminder_id, inst.title,
+              'skipped',
+            )),
+          );
         }
         break;
       }
@@ -1805,7 +1824,7 @@ async function tickChat(
       // rides along on a message he was already getting. `true` counts the
       // give-up committing right now — sendOutcome writes its event after this
       // line, so without it FAILURE_FLOOR would quietly be one higher.
-      const alsoAsk = await patternFor(env, chatId, ctx, inst.reminder_id, inst.title, true);
+      const alsoAsk = await patternFor(env, chatId, ctx, inst.reminder_id, inst.title, 'failed');
       await sendOutcome(env, chatId, ctx,
         [{ kind: 'gave_up', instanceId: inst.id, title: inst.title, rounds: inst.nag_count }, ...alsoAsk],
         GIVE_UP);

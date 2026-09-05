@@ -1505,11 +1505,16 @@ export async function behaviourOf(
     .all<{ kind: string; at: number }>();
 
   const rows = res.results ?? [];
-  const b = { fires: 0, snoozes: 0, dones: 0, failures: 0, doneHours: [] as number[] };
+  const b = { fires: 0, snoozes: 0, dones: 0, failures: 0, skips: 0, doneHours: [] as number[] };
   for (const r of rows) {
     if (r.kind === EVENT_OF.reminder_fired) b.fires++;
     else if (r.kind === EVENT_OF.instance_snoozed) b.snoozes++;
     else if (r.kind === EVENT_OF.gave_up) b.failures++;
+    // Counted since 0.20.0, and its absence is most of why patterns.ts had
+    // never once produced a row. `דילג` is him saying no — the plainest
+    // evidence in the table that a reminder is not working — and it was
+    // falling through this chain into nothing.
+    else if (r.kind === EVENT_OF.instance_skipped) b.skips++;
     else if (r.kind === EVENT_OF.instance_done) {
       b.dones++;
       // The LOCAL hour, because the question is "when in his day", and a
@@ -1518,6 +1523,23 @@ export async function behaviourOf(
     }
   }
   return b;
+}
+
+/**
+ * When patterns.ts last said anything at all, across every reminder — or null
+ * if it never has.
+ *
+ * Read by /diag. Chat-scoped rather than global for the usual reason
+ * (usageTodayFor vs usageToday): the owner must not be shown a guest's row and
+ * conclude the feature works for him.
+ */
+export async function lastPatternOffer(env: Env, chatId: string): Promise<number | null> {
+  const row = await env.DB.prepare(
+    'SELECT MAX(at) AS at FROM events WHERE chat_id = ? AND kind = ?',
+  )
+    .bind(chatId, EVENT_OF.pattern_offered)
+    .first<{ at: number | null }>();
+  return row?.at ?? null;
 }
 
 /** Has this reminder's pattern already been raised inside the window? */

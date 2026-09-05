@@ -12,7 +12,7 @@ import { detectPattern, usualHour, MIN_SAMPLE, type Behaviour } from '../src/pat
 import { check, eq, done, section } from './harness';
 
 function b(over: Partial<Behaviour> = {}): Behaviour {
-  return { fires: 0, snoozes: 0, dones: 0, failures: 0, doneHours: [], ...over };
+  return { fires: 0, snoozes: 0, dones: 0, failures: 0, skips: 0, doneHours: [], ...over };
 }
 
 // --------------------------------------------------------------------------
@@ -75,7 +75,19 @@ section('a reminder that has never once worked');
 {
   const p = detectPattern(b({ fires: 5, failures: 3, dones: 0 }));
   check('is reported as failing, not as pushing', p?.kind === 'failing', JSON.stringify(p));
-  eq('with the real count', (p as any)?.failures, 3);
+  // `failures` on the pattern became `dropped` in 0.20.0, because it no longer
+  // counts only the ladder running out: a skip is him saying no, and that is
+  // the same fact for this file's purposes. The name had to move with the
+  // meaning — see Behaviour.skips.
+  eq('with the real count', (p as any)?.dropped, 3);
+}
+
+{
+  // The 0.20.0 addition, stated here beside its twin rather than only in
+  // v20.test.ts: both kinds of abandonment reach the same floor.
+  const p = detectPattern(b({ fires: 3, skips: 2, failures: 1, dones: 0 }));
+  eq('skips and give-ups count towards the same floor', p?.kind, 'failing');
+  eq('and the count is the sum of both', (p as any)?.dropped, 3);
 }
 
 check(

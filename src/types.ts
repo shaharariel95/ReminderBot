@@ -361,7 +361,7 @@ export type Effect =
    * ask rather than to name an hour he has never used.
    */
   | { kind: 'pattern_pushed'; id: number; title: string; snoozes: number; fires: number; at?: number }
-  | { kind: 'pattern_failing'; id: number; title: string; failures: number; fires: number }
+  | { kind: 'pattern_failing'; id: number; title: string; dropped: number; fires: number }
   /**
    * He tapped "leave it as it is" on one of the two offers above.
    *

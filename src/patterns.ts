@@ -45,6 +45,20 @@ export interface Behaviour {
   /** Times the ladder ran out and gave up (`gave_up`). */
   failures: number;
   /**
+   * Times he pushed it off the table himself (`instance_skipped` — the
+   * "לא היום" and "מחר" buttons).
+   *
+   * Not counted at all until 0.20.0, and it is the single loudest signal in
+   * the table. Production #69: three fires, never once closed, DECLINED every
+   * time — and `behaviourOf` reported `failures: 0`, so the one thing he
+   * actually said about that reminder was the one thing nothing read.
+   *
+   * A give-up is the bot running out of patience; a skip is him saying no.
+   * They are different events and they are the same fact for this file's
+   * purposes: the errand did not happen and he did not want it then.
+   */
+  skips: number;
+  /**
    * The local hours at which he actually CLOSED it, one per completion. The
    * useful signal inside a snooze habit: a reminder pushed every morning and
    * closed every evening is not a discipline problem, it is set an hour wrong.
@@ -64,7 +78,7 @@ export type Pattern =
    * The offer here is to DROP it. A reminder that has never worked is not
    * evidence about him; it is a reminder that is wrong.
    */
-  | { kind: 'failing'; failures: number; fires: number };
+  | { kind: 'failing'; dropped: number; fires: number };
 
 /**
  * Below this there is no pattern, only a bad week.
@@ -116,14 +130,31 @@ export function usualHour(hours: number[]): number | null {
  * the whole point is a single question with a button under it.
  */
 export function detectPattern(b: Behaviour): Pattern | null {
-  if (b.fires < MIN_SAMPLE) return null;
-
-  // Failing is checked first: a reminder he has never once completed is a
-  // worse problem than one he completes late, and offering to retime it would
-  // be treating a wrong reminder as a scheduling detail.
-  if (b.dones === 0 && b.failures >= FAILURE_FLOOR) {
-    return { kind: 'failing', failures: b.failures, fires: b.fires };
+  /*
+   * Failing is checked first: a reminder he has never once completed is a
+   * worse problem than one he completes late, and offering to retime it would
+   * be treating a wrong reminder as a scheduling detail.
+   *
+   * And it is checked BEFORE the MIN_SAMPLE gate, which used to sit above the
+   * whole function. That gate is the astrology guard, and astrology is what
+   * `pushed` risks: "you always push this" is a claim about HIM, and four is
+   * the floor at which it stops being a bad week. `failing` makes no such
+   * claim. It is `dones === 0` — a fact with no interpretation in it — plus a
+   * count that FAILURE_FLOOR already governs. Gating it on MIN_SAMPLE as well
+   * meant a reminder abandoned 3 times out of 3 was invisible while one
+   * abandoned 3 out of 4 was raised, and the first of those is the worse
+   * reminder. Production #69 sat in exactly that hole.
+   *
+   * Both kinds of abandonment count. A give-up is the bot running out of
+   * patience and a skip is him saying no; either way the errand did not
+   * happen and he has never once closed it, which is the entire claim.
+   */
+  const dropped = b.failures + b.skips;
+  if (b.dones === 0 && dropped >= FAILURE_FLOOR) {
+    return { kind: 'failing', dropped, fires: b.fires };
   }
+
+  if (b.fires < MIN_SAMPLE) return null;
 
   if (b.snoozes >= MIN_SAMPLE && b.snoozes / b.fires >= PUSH_RATE) {
     return { kind: 'pushed', snoozes: b.snoozes, fires: b.fires, hour: usualHour(b.doneHours) };

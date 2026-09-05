@@ -550,6 +550,53 @@ makes it more persuasive and no more true. "דחית 6 מתוך 7" is checkable 
 rows; "אתה נמנע מזה" is a claim about HIM that he cannot open a list and check,
 and a wrong one costs more than a wrong claim about a reminder.
 
+**A feature can be switched off by a threshold and nobody finds out.** This is
+the second time in two versions, so it is written down as a class rather than
+an incident. `GOAL_QUIET_AFTER` did it to goal check-ins; `patterns.ts` did it
+to itself, and in a month of production it had produced **zero** rows:
+
+```
+55 instances across 46 reminders          1.2 fires per reminder
+reminders that ever reached 3+ fires: 2   #63 (5, all done), #69 (3, all skipped)
+'הצעתי שינוי' events, all time:       0
+```
+
+Three causes, all in the reading rather than the arithmetic:
+
+- **`behaviourOf` did not count `דילג` at all.** Only `ויתרתי` counted as a
+  failure, so #69 — three fires, never once closed, DECLINED every time — read
+  as no evidence whatsoever. A give-up is the bot running out of patience; a
+  skip is him saying no. Different events, same fact for this file.
+- **`patternFor` was never CALLED on a skip.** It hung off `snooze` and the
+  give-up, so the plainest "this reminder is not working" signal in the product
+  never asked the question. It takes `pending: 'failed' | 'skipped'` now — the
+  row for what is happening right now is written by `sendOutcome`, AFTER the
+  decision, so without it FAILURE_FLOOR is silently one higher than it says.
+- **`MIN_SAMPLE` gated `failing`, and it should not.** Four is the floor for a
+  HABIT claim — "you always push this" is about HIM, and off three data points
+  it is astrology. `failing` makes no such claim: it is `dones === 0` plus a
+  count `FAILURE_FLOOR` already governs. Gating it as well meant abandoned 3
+  out of 3 was invisible while abandoned 3 out of 4 was raised, and the first
+  is the worse reminder.
+
+The gate still guards the `pushed` arm and is NOT redundant with the `snoozes
+>= MIN_SAMPLE` beside it: one fire can be snoozed four times, which satisfies
+the snoozes floor at a ratio of 4.0 and would announce a habit off one morning.
+
+**`/diag` now says when patterns.ts last spoke, or "מעולם לא".** Same argument
+as naming blocked models: a threshold that has quietly switched a feature off
+is invisible until something counts it out loud. A zero there is the finding.
+
+**Errand identity is deliberately NOT merged.** #56 "לנקות פילטרים למזגנים" and
+#69 "לנקות את הפילטרים של המזגנים" are one errand under two ids, and merging
+them is the only way patterns.ts gets a sample out of 1.2 fires per reminder.
+It is still refused. Every count this file produces is quoted back at him
+("דחית את X 6 מתוך 7"), and the reason counts are safe where motives are not is
+that a count is CHECKABLE against rows he can open. A merged history is a count
+about a row that does not exist. The honest fix is fewer duplicate rows, not
+fuzzier arithmetic over them.
+
+
 Four things are load-bearing:
 
 - **`MIN_SAMPLE` is 4, not 2.** A habit announced off two data points is
