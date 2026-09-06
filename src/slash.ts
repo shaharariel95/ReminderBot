@@ -320,6 +320,7 @@ export async function handleSlash(
         '/id — המספר שלך, זה מה שחבר צריך כדי להוסיף אותך',
         '/friend [chat_id] [כינוי] — מבקש להוסיף מישהו. הוא צריך לאשר.',
         '/friends — מי ברשימה, ומי מחכה לתשובה שלך',
+        '/rename — משנה איך אתה קורא למישהו ברשימה',
         '/unfriend [כינוי] — מוריד, לשני הכיוונים',
         'ואז פשוט: "תזכיר לדנה מחר ב-8 לקחת את הרכב לטסט"',
         '',
@@ -362,6 +363,53 @@ export async function handleSlash(
      * go off at 07:00, and that is not a thing anyone gets to hand out on
      * somebody else's behalf.
      */
+    /*
+     * Repair a name he cannot type — which is every reverse edge written
+     * before 0.29.0, and any whose owner skipped the question at accept time.
+     *
+     * It exists because `/friend <name> <new>` cannot do this job. That path
+     * resolves <name> through matchFriend FIRST, so renaming a book entry
+     * spelled "Shahar" required typing "Shahar" — the repair for a name he
+     * could not type required typing it. Copy-pasting out of /friends was the
+     * only way through and nothing said so.
+     *
+     * With exactly one friend there is nothing to disambiguate, so it asks
+     * the same question the accept flow asks and reuses the same slot. With
+     * more it LISTS rather than picking: matchFriend returns null on a tie
+     * because sending to the wrong friend is a message in a stranger's chat,
+     * and this must not become the one place that guesses instead.
+     */
+    case '/rename': {
+      const friends = await db.friendsOf(env, chatId);
+      if (!friends.length) {
+        return 'אין לך עדיין חברים ברשימה. /friend [chat_id] [כינוי] מוסיף אחד.';
+      }
+      const rest = text.trim().slice(cmd.length).trim();
+      if (!rest && friends.length === 1) {
+        await db.setAwaiting(env, chatId, { k: 'fname', c: friends[0].friend_chat_id, at: Date.now() });
+        return `עכשיו הוא "${friends[0].nickname}". איך תקרא לו? תכתוב לי שם.`;
+      }
+      if (!rest) {
+        return (
+          'למי? ' +
+          friends.map((f) => `"${f.nickname}"`).join(', ') +
+          '\n/rename [השם הנוכחי] [השם החדש]'
+        );
+      }
+      const [first, ...tail] = rest.split(/\s+/);
+      const nickname = tail.join(' ').trim();
+      const existing = db.matchFriend(friends, first);
+      if (!existing) {
+        return `אין לי "${first}" ברשימה. יש: ${friends.map((f) => `"${f.nickname}"`).join(', ')}`;
+      }
+      if (!nickname) {
+        await db.setAwaiting(env, chatId, { k: 'fname', c: existing.friend_chat_id, at: Date.now() });
+        return `איך תקרא ל"${existing.nickname}"? תכתוב לי שם.`;
+      }
+      await db.renameFriend(env, chatId, existing.friend_chat_id, nickname);
+      return `מעכשיו הוא "${nickname}" אצלי.`;
+    }
+
     case '/friend': {
       const rest = text.trim().slice(cmd.length).trim();
       const [first, ...tail] = rest.split(/\s+/);

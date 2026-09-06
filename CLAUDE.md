@@ -307,8 +307,22 @@ Check what it was shown before blaming the router.
   → `db.acceptFriend`
 - `matchFriend` returns null on a tie. Sending to the wrong friend is a message
   in a stranger's chat, which he cannot even see to correct. → `db.matchFriend`
-- The nickname is a **guess, usually in the wrong script** (Latin profile name vs
-  his Hebrew). Nothing bridges them and nothing may try. → `db.matchFriend`
+- **The accepter names his own edge.** `acceptFriend` writes it from the
+  requester's Telegram profile — a name its owner never chose and often cannot
+  type — so the accept now ASKS, through the awaiting slot, and `/rename`
+  repairs the edges written before that. → `db.Awaiting` (`fname`), `slash.ts`
+  (`/rename`)
+- That was the whole of "friends does not work": the requester's side resolved
+  (he picked the nickname) and the accepter's side did not. `matchFriend` is
+  exact, so a book holding "Shahar" against an owner who types "שחר" returned
+  null every time, and `friend_unknown` reported it as a polite refusal.
+- **`/rename` must not resolve through `matchFriend` alone.** `/friend <name>
+  <new>` does, which meant repairing a name he could not type required typing
+  it. With one friend `/rename` asks; with several it LISTS rather than
+  guessing. → `slash.ts` (`/rename`)
+- The nickname is still a **guess when nobody answers**, and usually in the
+  wrong script. Nothing bridges Latin and Hebrew and nothing may try — the
+  provisional name is a fallback, not a resolution. → `db.matchFriend`
 - The model reports the name he USED, verbatim, even when it recognises nothing;
   `friendReminder` decides whether it resolves. The inversion is the fix — the
   old "omit it if unknown" rule silently wrote the reminder to HIM.

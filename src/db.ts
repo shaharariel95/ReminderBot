@@ -1954,7 +1954,27 @@ export type Awaiting =
    * nothing registered it, so on 16.08.2026 "על זה" reached the router with
    * nothing to bind to and came back "אין לי משימה פתוחה שמתאימה לזה".
    */
-  | { k: 'title'; r: number; at: number };
+  | { k: 'title'; r: number; at: number }
+  /**
+   * fname — "איך תקרא לו?" was asked after he ACCEPTED a friend request from
+   * chat `c`. His answer is the nickname for that edge.
+   *
+   * The reverse edge is the only row in this bot named by somebody other than
+   * the person who has to type it: acceptFriend writes it from the requester's
+   * Telegram profile string (or, failing that, the raw chat_id), while
+   * matchFriend is exact-match because guessing puts a message in a stranger's
+   * chat. So one direction of every friendship worked and the other did not —
+   * a book holding "Shahar" against an owner who types "שחר" resolves to null
+   * every time, and `friend_unknown` reports that as a polite refusal, which
+   * reads as "the feature is broken" rather than "rename the row".
+   *
+   * Carries the CHAT ID, not the current nickname. The nickname is the thing
+   * being replaced, and looking it back up through matchFriend is the exact
+   * catch-22 that made `/friend <name> <new>` useless for this: it resolved
+   * the old name first, so repairing a name he could not type required typing
+   * it.
+   */
+  | { k: 'fname'; c: string; at: number };
 
 export async function setAwaiting(
   env: Env,
@@ -1991,6 +2011,10 @@ export function readAwaiting(raw: string | null, now: number = Date.now()): Awai
         return typeof a.t === 'string' && a.t.length > 0 && Number.isFinite(a.w) ? a : null;
       case 'title':
         return Number.isInteger(a.r) ? a : null;
+      case 'fname':
+        // A chat id is the whole payload, so a slot without one is not half a
+        // question, it is a rename with no target.
+        return typeof a.c === 'string' && a.c.length > 0 ? a : null;
       default: {
         const _never: never = a;
         return _never ?? null;

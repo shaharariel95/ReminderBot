@@ -461,6 +461,45 @@ async function respondToOwner(
         ? { target: awaiting.r, title: text.slice(0, 120) }
         : null;
 
+    // The nickname for a friendship he has just accepted — the answer to
+    // "איך תקרא לו?".
+    //
+    // Gated on asksForNewReminder for the same reason `title` is: if he opened
+    // a request instead of answering, taking it as a nickname would lose the
+    // request AND write nonsense into the book. Carries the target for the
+    // same reason too — the narrowing happens here, where the `k === 'fname'`
+    // check is.
+    const answeredFriendName =
+      awaiting?.k === 'fname' && text && !asksForNewReminder(text)
+        ? { friend: awaiting.c, nickname: text.trim().slice(0, 40) }
+        : null;
+
+    // Applied here and not as an Intent, deliberately. This is an edit to his
+    // address book, not a write against a reminder: `/friend <name> <new>`
+    // — its sibling — is likewise a plain reply with no effect and no events
+    // row, and inventing a router action for it would put a name-changing verb
+    // in front of the model, which is the one thing matchFriend's exactness
+    // exists to keep it away from.
+    if (answeredFriendName) {
+      await db.setAwaiting(env, chatId, null).catch((e) => console.error('setAwaiting', e));
+      const ok = await db
+        .renameFriend(env, chatId, answeredFriendName.friend, answeredFriendName.nickname)
+        .then(() => true)
+        .catch((e) => {
+          console.error('renameFriend', e);
+          return false;
+        });
+      await sendMessage(
+        env,
+        chatId,
+        ok
+          ? `מעכשיו הוא "${answeredFriendName.nickname}" אצלי. ` +
+            `"תזכיר ל${answeredFriendName.nickname}..." יעבוד.`
+          : 'משהו נפל לי באמצע. /friends יראה לך מה יש, ו-/rename ישנה שם.',
+      ).catch((e) => console.error('friend named', e));
+      return;
+    }
+
     // Common reminder phrasings never touch the router — see quickparse.ts.
     // The friends' names go in so this can REFUSE. Every parse in that file
     // assumes the reminder is his own, so "תזכיר לדנה" has to reach the router
@@ -1014,7 +1053,26 @@ async function handleCallback(update: any, env: Env): Promise<void> {
       case 'facc': {
         if (await db.acceptFriend(env, chatId, cb.from)) {
           const mine = await db.friendName(env, chatId, cb.from);
-          note = `${mine ?? cb.from} בפנים. עכשיו אפשר "תזכיר ל${mine ?? cb.from}...".`;
+          // ASK what to call him, rather than leaving him under the name
+          // acceptFriend just wrote.
+          //
+          // That name is the requester's Telegram profile string — "Shahar",
+          // "amnon" — or the raw chat_id when Telegram gave no name at all. It
+          // is the only row in this bot named by somebody other than the
+          // person who has to type it, and db.matchFriend is exact-match
+          // because guessing sends a message to the wrong chat. The result was
+          // that the requester's side of every friendship worked (he chose the
+          // nickname in /friend) and the accepter's side did not.
+          //
+          // The provisional name is left in place on purpose: an unanswered
+          // question must leave a usable edge, not a blank one. This refines
+          // it, it does not create it.
+          note =
+            `${mine ?? cb.from} בפנים. איך תקרא לו? תכתוב לי שם עכשיו ` +
+            `— זה השם שתשתמש בו כדי לקבוע לו תזכורות.`;
+          await db
+            .setAwaiting(env, chatId, { k: 'fname', c: cb.from, at: Date.now() })
+            .catch((e) => console.error('setAwaiting fname', e));
           // Best-effort: the person who has been waiting has to hear it, but a
           // blocked bot on his side must not undo her acceptance.
           const theirs = await db.friendName(env, cb.from, chatId);

@@ -23,7 +23,7 @@
     "test:whoami": "tsx test/whoami.test.ts",
     "test:v14": "npx tsx test/v14.test.ts",
     "test:patterns": "npx tsx test/patterns.test.ts",
-    "test": "npm run test:time && npm run test:parse && npm run test:when && npm run test:voice && npm run test:validate && npm run test:buttons && npm run test:bot && npm run test:facts && npm run test:effects && npm run test:v08 && npm run test:friends && npm run test:models && npm run test:comprehension && npm run test:patterns && npm run test:whoami && npm run test:v14 && npm run test:v15 && npm run test:ringing && npm run test:v18 && npm run test:v19 && npm run test:v20 && npm run test:v21 && npm run test:v22 && npm run test:v23 && npm run test:v24 && npm run test:v25 && npm run test:v26 && npm run test:v27 && npm run test:v28 && npm run test:docs",
+    "test": "npm run test:time && npm run test:parse && npm run test:when && npm run test:voice && npm run test:validate && npm run test:buttons && npm run test:bot && npm run test:facts && npm run test:effects && npm run test:v08 && npm run test:friends && npm run test:models && npm run test:comprehension && npm run test:patterns && npm run test:whoami && npm run test:v14 && npm run test:v15 && npm run test:ringing && npm run test:v18 && npm run test:v19 && npm run test:v20 && npm run test:v21 && npm run test:v22 && npm run test:v23 && npm run test:v24 && npm run test:v25 && npm run test:v26 && npm run test:v27 && npm run test:v28 && npm run test:v29 && npm run test:docs",
     "test:v15": "npx tsx test/v15.test.ts",
     "test:when": "npx tsx test/when.test.ts",
     "test:ringing": "npx tsx test/ringing.test.ts",
@@ -38,6 +38,7 @@
     "test:v26": "npx tsx test/v26.test.ts",
     "test:v27": "npx tsx test/v27.test.ts",
     "test:v28": "npx tsx test/v28.test.ts",
+    "test:v29": "npx tsx test/v29.test.ts",
     "test:docs": "npx tsx test/docs.test.ts"
   },
   "devDependencies": {
