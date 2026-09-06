@@ -341,6 +341,28 @@ been shown #35 at all.** Creating another row was the only move it had.
   new reminder. It is capped, and the remainder is COUNTED rather than dropped:
   inbox rows have no `next_fire_at` to age out on, so the list only ever grows,
   and a model that believes it has seen everything duplicates what was trimmed.
+**A ringing reminder is not "already finished" either.** 0.17.0 taught the
+ACTIVE list to show a fired one-off (`status='done'` the moment it rings). It
+left `recentlyDone` saying the opposite about the same row, under a heading
+that reads "כבר קרו והסתיימו". The router was handed both, three paragraphs
+apart:
+
+```
+תזכורות פעילות:              #78 "..." — צלצלה כבר, מחכה לדיווח
+כבר קרו והסתיימו:            #78 "..." — כבר נסגרה
+משימות פתוחות שמחכות לדיווח: instance 56 → "..."
+```
+
+A contradiction the model has to resolve is the failure this whole section is
+about. `recentlyDone` now excludes rows with an OPEN instance.
+
+**An OPEN instance, not "has an instance".** A reminder the bot gave up on is
+closed as `failed` and genuinely belongs in that block — there is nothing left
+waiting for a report, and he may well want it again. The red-proof tests both
+directions, because over-excluding empties the block that exists so
+"ללכת למוסך ב10:30" about this morning's task is a `reschedule` and not a
+second row.
+
 - **Promoting a capture emits `reminder_scheduled`, never `reminder_retimed`.**
   voice.ts words the latter "שיניתי" — a claim about a previous time the row
   never had — and it sits in the `move` CLAIM_GROUP alone, so the persona can

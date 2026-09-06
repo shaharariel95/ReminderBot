@@ -376,11 +376,32 @@ export async function recentlyDone(
    * back to it preserves exactly the old behaviour for them instead of
    * silently dropping a class of row while fixing another.
    */
+  /*
+   * ...and it is not finished while it is still RINGING.
+   *
+   * `setNextFire(id, null)` flips a one-off to status='done' the moment it
+   * fires, so for the whole window in which the bot is chasing him the row
+   * reads as finished (issues.md §4). 0.17.0 taught the ACTIVE list to show it
+   * anyway; this block was left saying the opposite about the same row, under
+   * a heading that reads "כבר קרו והסתיימו" — already happened and ended.
+   *
+   * The router was therefore handed a contradiction and asked to resolve it:
+   * "צלצלה כבר — מחכה לדיווח" in one block, "כבר נסגרה" in another, three
+   * paragraphs apart. That is the failure mode the whole "What the model can
+   * SEE" section of CLAUDE.md exists to prevent.
+   *
+   * An OPEN instance is the test, not "has an instance": a reminder the bot
+   * gave up on is closed as 'failed' and genuinely does belong here — there is
+   * nothing left waiting for a report.
+   */
   const res = await env.DB.prepare(
     `SELECT r.*, COALESCE(MAX(i.closed_at), r.created_at) AS finished_at
        FROM reminders r
        LEFT JOIN instances i ON i.reminder_id = r.id AND i.closed_at IS NOT NULL
       WHERE r.chat_id = ? AND r.status = 'done'
+        AND NOT EXISTS (
+          SELECT 1 FROM instances o WHERE o.reminder_id = r.id AND o.status = 'open'
+        )
       GROUP BY r.id
      HAVING finished_at >= ?
       ORDER BY finished_at DESC LIMIT ?`,
