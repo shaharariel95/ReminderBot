@@ -423,9 +423,15 @@ Check what it was shown before blaming the router.
 
 ## Testing
 
-`npm test` runs thirty files against a real in-memory SQLite behind a D1-shaped
-facade (`test/harness.ts`). The webhook and cron paths run end to end, so "the
-reminder never arrived" is reproducible rather than arguable.
+`npm test` runs thirty-one files against a real in-memory SQLite behind a
+D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end,
+so "the reminder never arrived" is reproducible rather than arguable.
+
+**The pointers in this file are tested** (`test/docs.test.ts`). A renamed export
+would otherwise leave a rule here aiming at a symbol that no longer exists, and
+nothing else in the suite reads this file — the drift would be silent, which is
+the failure mode half the rules above exist to prevent. Four pointers were
+already wrong the first time it ran.
 
 `npm run typecheck` is part of the deal and was red for a while without anyone
 noticing. A permanently red typecheck is how a real type error hides.
