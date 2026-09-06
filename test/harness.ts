@@ -198,6 +198,21 @@ export interface Rig {
    */
   notFoundModels: Set<string>;
   /**
+   * Refuse a request whose responseSchema uses `anyOf`, with the 400 the real
+   * API returns for a schema construct it does not accept.
+   *
+   * `'once'` refuses the union and accepts the flat retry — the shape of a
+   * working degradation. `'always'` refuses both, which is what an outage
+   * would look like and is how the fallback is held to firing once rather
+   * than becoming a retry loop.
+   *
+   * This exists because `anyOf` support cannot be verified from the test rig
+   * against the real endpoint: the documentation says it is supported, and a
+   * documentation page is a claim. The rig's job is to make the consequence of
+   * that claim being wrong a tested path rather than an outage.
+   */
+  rejectAnyOf: false | 'once' | 'always';
+  /**
    * Seconds Google's 429 body asks the caller to wait, or null for a bare
    * quota error with no advice in it. Real 429s usually carry RetryInfo, and
    * honouring it is the difference between a one-minute detour and a
@@ -272,6 +287,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     hangModels: new Set<string>(),
     downModels: new Set<string>(),
     notFoundModels: new Set<string>(),
+    rejectAnyOf: false as false | 'once' | 'always',
     retryDelaySeconds: null,
     modelsCalled: [],
     get dbFailOn() {
@@ -358,6 +374,18 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
         generationConfig: body?.generationConfig,
       });
       rig.timeline.push(`gemini:${isRouter ? 'router' : 'speak'}`);
+      // Recorded BEFORE it is refused, so a test can see what was actually
+      // sent on each attempt — which is the whole question when the point of
+      // the retry is that it carries a different schema.
+      if (rig.rejectAnyOf) {
+        const usesAnyOf = JSON.stringify(body?.generationConfig?.responseSchema ?? '').includes('"anyOf"');
+        if (rig.rejectAnyOf === 'always' || usesAnyOf) {
+          return new Response(
+            '{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Invalid JSON payload received. Unknown name \\"anyOf\\""}}',
+            { status: 400 },
+          );
+        }
+      }
       // A runaway that ran out of room. HTTP 200, real text, and useless —
       // consumed BEFORE the queue, so a test can put one good answer behind it
       // and assert that the good answer is what the caller ends up with.

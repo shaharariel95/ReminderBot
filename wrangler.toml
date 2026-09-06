@@ -61,8 +61,20 @@ GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 # that no longer exists is not a silent failure: it 404s, writes itself off for
 # hours (see gemini.blockFor) and is named by /diag, so the cost of a stale
 # entry is one round trip a day and a visible line. Unset entirely, the ladder
-# falls back to gemini.DEFAULT_LADDER, which is this same list.
-GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash"
+# falls back to gemini.DEFAULT_LADDER, which is this same list — and
+# test/v26.test.ts asserts that, because for nine versions it was not: the
+# 0.16.2 demotion of 3.7/3.6 was applied here and not there.
+#
+# Re-verified 06.09.2026 against ai.google.dev's model and pricing pages. Eight
+# Flash / Flash-Lite ids carry a free tier; four of them were configured. Since
+# the free tier meters per minute PER MODEL against one key, the four missing
+# were not idle redundancy — they were capacity that did not exist.
+#
+# 3.1-flash-lite and 3.8-flash are new here and have no production record, so
+# they sit below the two that have one. The 2.5 pair were removed on 19.08.2026
+# for 404ing and are last: the docs say they are free-tier again, a docs page
+# is a claim, and a 404 costs one round trip per six hours and a /diag line.
+GEMINI_MODELS = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.1-flash-lite,gemini-3.8-flash,gemini-2.5-flash-lite,gemini-2.5-flash"
 # Past this many model calls in a local day — across the whole ladder, per
 # chat — low-priority messages (unprompted check-ins) stop calling the model
 # and ship voice.ts output directly. Reminders and nags are never throttled.

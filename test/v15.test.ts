@@ -297,7 +297,15 @@ section('0.3 — /diag says the scheduler is dead, instead of printing a timesta
   const out = (await withNow(now, () => handleSlash(rig.env, CHAT, '/diag'))) ?? '';
 
   check('the age is stated, not just the hour', /28 דקות/.test(out), out);
-  check('and it is called out as a failure', /לא רץ|מת|תקוע/.test(out), out);
+  // Matched on the wording slash.ts actually emits ("הקרון לא רץ!" /
+  // "מעולם לא רץ!"). It used to read /לא רץ|מת|תקוע/, and the last two
+  // alternatives never matched anything this bot has ever said — they were
+  // guesses at synonyms. `מת` then started matching "סכיMת הראוטר" when 0.27.0
+  // added a schema line to /diag, so the healthy-tick assertion below failed
+  // over a word that has nothing to do with the cron. A regex alternative that
+  // matches no real output is not extra safety; it is an unexploded false
+  // positive waiting for the next line added to the same message.
+  check('and it is called out as a failure', /לא רץ/.test(out), out);
   rig.restore();
 }
 
@@ -315,7 +323,7 @@ section('0.3 — /diag says the scheduler is dead, instead of printing a timesta
   rig.speakQueue.push('probe');
 
   const out = (await withNow(now, () => handleSlash(rig.env, CHAT, '/diag'))) ?? '';
-  check('a ninety-second-old tick raises nothing', !/לא רץ|מת|תקוע/.test(out), out);
+  check('a ninety-second-old tick raises nothing', !/לא רץ/.test(out), out);
   rig.restore();
 }
 

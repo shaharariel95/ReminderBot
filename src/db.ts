@@ -1813,6 +1813,53 @@ export async function recentErrors(env: Env, chatId: string, limit = 5): Promise
   return res.results ?? [];
 }
 
+/**
+ * The last time the API REFUSED the router's response schema, or null.
+ *
+ * 0.27.0 made that schema an `anyOf` union so an action which reads no free
+ * text cannot emit any. `anyOf` is documented as supported and that could not
+ * be verified against the real endpoint before deploying, so gemini.generate
+ * falls back to the flat schema on a 400 — and the fallback WORKS, which is
+ * the problem this row exists for. A refused union costs one extra round trip
+ * and produces a perfectly good reply, no error row, no visible symptom. The
+ * guarantee would simply not be in effect, silently, for as long as nobody
+ * looked.
+ *
+ * That is the class CLAUDE.md now names outright: `GOAL_QUIET_AFTER` switched
+ * goal check-ins off for a month, `patterns.ts` had never once run, and in
+ * both cases nothing could have shown it. So /diag says whether this has ever
+ * happened, on the same argument as naming blocked models — a feature that has
+ * quietly stopped applying is invisible until something counts it out loud.
+ *
+ * A row here means the union is not in force and the deploy needs looking at.
+ * Never cleared automatically: unlike a quota, a refused schema does not
+ * recover on its own, and the next deploy is what should clear it.
+ */
+export async function schemaRefusal(
+  env: Env,
+): Promise<{ at: number; model: string } | null> {
+  const row = await env.DB.prepare("SELECT value FROM meta WHERE key = 'schema_refused'")
+    .first<{ value: string }>();
+  if (!row?.value) return null;
+  const [at, ...rest] = row.value.split('|');
+  const n = Number(at);
+  return Number.isFinite(n) ? { at: n, model: rest.join('|') } : null;
+}
+
+/** Best-effort — a bookkeeping failure must never break a working reply. */
+export async function noteSchemaRefusal(
+  env: Env,
+  model: string,
+  at: number = Date.now(),
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO meta (key, value) VALUES ('schema_refused', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  )
+    .bind(`${at}|${model}`)
+    .run();
+}
+
 /** When the cron last ran, as epoch ms, or null if it never has. */
 export async function lastTick(env: Env): Promise<number | null> {
   const row = await env.DB.prepare("SELECT value FROM meta WHERE key = 'last_tick'").first<{

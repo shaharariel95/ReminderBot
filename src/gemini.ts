@@ -16,6 +16,24 @@ interface GenerateOpts {
   maxOutputTokens?: number;
   /** Pass a responseSchema to force structured JSON out. */
   jsonSchema?: Record<string, unknown>;
+  /**
+   * A simpler schema to fall back to when the API REFUSES `jsonSchema` — a 400,
+   * which means the construct is not accepted rather than the request being
+   * unlucky.
+   *
+   * 0.27.0 made the router schema an `anyOf` union so that an action which
+   * reads no free text cannot emit any (three of the five runaway-title
+   * failures on record are reschedules, which never read a title). `anyOf` is
+   * documented as supported and that cannot be verified from here against the
+   * real endpoint — and the cost of being wrong is not a degraded turn, it is
+   * `if (!res.ok) throw` below firing on the first rung of the ladder, on
+   * every call, for every user, until somebody redeploys.
+   *
+   * So it degrades like everything else in this file. One retry, same model —
+   * the model is not what refused — and if the fallback is refused too, that
+   * is a real error and says so rather than looping.
+   */
+  jsonSchemaFallback?: Record<string, unknown>;
   /** Gemini 3.x reasoning effort. We want speed and brevity, so: low. */
   thinkingLevel?: 'low' | 'high';
   /** Gemini 2.5 equivalent, in tokens. 0 disables reasoning entirely. */
@@ -239,6 +257,14 @@ async function callOnce(
       console.warn(`gemini: ${model} rejected thinkingConfig, continuing without it`);
       return retry;
     }
+    // A 400 that survives dropping thinkingConfig may be about the SCHEMA
+    // instead — see GenerateOpts.jsonSchemaFallback. generate() owns that
+    // fallback rather than this function, because it has to narrow the schema
+    // for the rest of the LADDER and not merely for this one call. So hand the
+    // refusal back instead of ending the turn here. When there is nothing left
+    // to fall back to, the throw below is still the right answer and still
+    // carries both bodies, which is what made this diagnosable at all.
+    if (opts.jsonSchemaFallback && opts.jsonSchema !== opts.jsonSchemaFallback) return retry;
     throw new Error(
       `gemini 400 for model "${model}": ${first.slice(0, 400)} ` +
         `| retry without thinkingConfig: ${(await retry.text()).slice(0, 400)}`,
@@ -281,22 +307,49 @@ const TIER_DOWN = new Set([429, 503, 404]);
  * failure. That is the trade this default is chosen under — verify the current
  * free-tier list before editing, because the published names move.
  *
- * `gemini-2.5-flash` and `gemini-2.5-flash-lite` were the bottom two rungs
- * until 19.08.2026 and are gone because production said so: `model_health`
- * held a 404 against BOTH, six hours at a time, which means the ladder had
- * been four deep rather than six for as long as anyone had been counting on
- * it. Self-pruning worked exactly as designed — it just cannot edit this file.
- *
  * The moral for whoever adds a rung: it is not enough to believe an id is
  * real. Deploy it, then read /diag. A dead id costs a round trip a day and
  * silently shortens the ladder underneath a busy minute, which is precisely
  * the minute the extra rungs exist for.
+ *
+ * THIS LIST AND `wrangler.toml` MUST AGREE, RUNG FOR RUNG.
+ *
+ * They did not, for nine versions. 0.16.2 measured 3.7 and 3.6 burning the
+ * full 12s per-call timeout, cost two reminders, and demoted them — in
+ * wrangler.toml. This array kept them at the top, under a comment reading
+ * "best first", and it is the ladder any deployment without GEMINI_MODEL and
+ * GEMINI_MODELS actually walks. Two lists that must agree and only one of
+ * which anyone edits is the `CLAIM` / `CLAIM_GROUPS` shape from 0.19.0, and
+ * `test/v26.test.ts` now asserts the two produce an identical ladder rather
+ * than merely holding the same names.
+ *
+ * The order below is measurement, then evidence, then a docs page:
+ *
+ *   3.5-flash, 3.5-flash-lite   measured fast, and carry ~all the traffic
+ *   3.7-flash, 3.6-flash        slow (12s), but have answered in production
+ *   3.1-flash-lite, 3.8-flash   published free-tier, never called here
+ *   2.5-flash-lite, 2.5-flash   404'd in production on 19.08.2026
+ *
+ * The 2.5 pair were deleted for those 404s and are back at the bottom because
+ * the published list carries them with a free tier again (checked 06.09.2026).
+ * A previous 404 is evidence and a docs page is only a claim, so they go last:
+ * if they are still dead, blockFor writes them off for six hours and /diag
+ * names them, which is exactly what makes a stale id here cheap.
+ *
+ * `gemini-3.8-flash` is the highest number published and is deliberately sixth
+ * — the docs describe it as built for "long-horizon software engineering",
+ * which is a thinking model, which is the 18.9-second failure mode this bot
+ * has already paid for once. Promote by measuring, never by version number.
  */
 const DEFAULT_LADDER = [
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
   'gemini-3.5-flash',
   'gemini-3.5-flash-lite',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
 ];
 
 /**
@@ -361,6 +414,11 @@ function retryDelayMs(body: string): number | null {
 
 export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
   let lastDetail = '';
+  // The schema actually in flight. Starts as the caller's and is narrowed to
+  // jsonSchemaFallback if the endpoint refuses it — for the rest of the ladder,
+  // not just the retry, so a turn that also drops a tier does not rediscover
+  // the same refusal on the next model.
+  let schema = opts.jsonSchema;
   const { perCall, total } = budgets(env);
 
   // One read of the health table per generate(), against a table with as many
@@ -415,7 +473,7 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
         console.warn(`gemini: ${lastDetail}`);
         break;
       }
-      const tuned: GenerateOpts = { ...opts };
+      const tuned: GenerateOpts = { ...opts, jsonSchema: schema };
       if (attempt > 0) {
         // Nudge off the deterministic path, and widen the ceiling.
         const base = opts.temperature ?? (opts.jsonSchema ? 0.2 : 1.0);
@@ -471,6 +529,45 @@ export async function generate(env: Env, opts: GenerateOpts): Promise<string> {
           .catch((err) => console.error('blockModel', err));
         console.warn(`gemini: ${lastDetail}, dropping a tier and resting it ${Math.round(wait / 1000)}s`);
         break; // next model, not next attempt — retrying a quota error is pointless
+      }
+      /*
+       * A 400 on a request carrying the union schema is the API saying it will
+       * not accept that SHAPE — not that the model is busy, and not that this
+       * message was bad. Dropping a tier would be pointless (every rung would
+       * refuse it identically) and throwing would take the whole turn down.
+       *
+       * Retry once, same model, with the flat schema this file shipped up to
+       * 0.26.0. `schema` is narrowed for the remainder of the ladder as well,
+       * so a turn that also falls through to a second model does not rediscover
+       * the same refusal there.
+       *
+       * Deliberately NOT remembered across turns. A schema the endpoint refuses
+       * is a deploy-time mistake, and the cost of rediscovering it is one round
+       * trip; the cost of hiding it is a broken deploy that looks healthy. The
+       * model-health table exists for conditions that CLEAR on their own, and
+       * this one does not.
+       *
+       * `schema !== opts.jsonSchemaFallback` is the same rule callOnce states
+       * one level down, and callOnce's copy is the one that BITES: it only
+       * hands a 400 back when there is still something to fall back to, so by
+       * the time this line runs the condition already holds. Removing either
+       * alone leaves the suite green. Removing both turns one refused schema
+       * into 48 round trips — three attempts on each of eight rungs, twice
+       * over — which is the loop the pair exists to prevent, and why the
+       * red-proof for this version removes them together.
+       */
+      if (res.status === 400 && schema && opts.jsonSchemaFallback && schema !== opts.jsonSchemaFallback) {
+        lastDetail = `${model} refused the response schema (400)`;
+        console.warn(`gemini: ${lastDetail}, retrying with the flat schema`);
+        // Written down, not just logged. The fallback WORKS, so a refused
+        // union produces a good reply and no symptom whatsoever — the
+        // guarantee would simply be off, silently, until somebody looked.
+        // /diag reads this. Same argument as naming blocked models.
+        await db.noteSchemaRefusal(env, model).catch((err) =>
+          console.error('noteSchemaRefusal', err),
+        );
+        schema = opts.jsonSchemaFallback;
+        continue; // same model, same attempt budget — the model is not at fault
       }
       if (!res.ok) {
         throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 500)}`);

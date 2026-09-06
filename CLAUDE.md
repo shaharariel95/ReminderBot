@@ -7,6 +7,42 @@ streaks, and brings up goals on its own.
 Read `README.md` for setup and the product story. This file is about how to
 change the code without breaking the thing that makes it worth having.
 
+## The invariants, and what actually enforces each
+
+Everything below this section is organised by incident: a rule, then the
+production message that bought it. That is the file's value and it is why the
+code has survived well-meaning simplification. It is also why the same class of
+bug got written up three times under three names before anyone noticed it was
+one class. This table is the index by class. The middle column is the part that
+matters — an invariant nothing enforces is one the next change will break.
+
+| Invariant | Enforced by | Read |
+|---|---|---|
+| Never claim a write that did not happen | `validate.ts` (six rules), over `voice.ts` output that is true by construction | *The one rule*, *The pipeline* |
+| A guarantee is a field's **absence**, never a constraint on it | `brain.ts` — the router schema is a union, and an action that reads no free text has no free-text property | *What the model may not be asked to hold* |
+| The model classifies; **code computes** | `when.ts`, `effects.preferHisWords`, `applyIntent` | *Times the bot is allowed to guess*, *When it happens vs when to ring* |
+| One question has **one implementation** | *nothing* | *What the model can SEE*, *Friends*, *Questions the bot asks* |
+| Every write the bot makes is visible in `events` | *nothing* — `sendOutcome` is the single point every path converges on, by convention | *Observability* |
+| A threshold can switch a feature off, silently and for months | `/diag` (`slash.ts`), which says when each feature last spoke | *Reading the behavioural record* |
+| A green test can be vacuous | the red-proof: delete the guarded line, watch it go red **for the right reason** | *Testing* |
+
+Two of those say *nothing*, and that is the finding rather than an omission.
+
+**"One question, one implementation"** is violated whenever the same question
+gets answered in two places and only one gets fixed. It has cost, so far:
+`asksForNewReminder` (two bare-noun regexes), `findNamedTime` (wired into
+`reschedule`, not `create_reminder`), `namesSomeoneElse` / `addressesSomeoneElse`,
+`DAY_OFFSET`'s second number parser beside `toNumber`, `snooze` nearly growing a
+second question kind beside the awaiting slot, and — in 0.26.0 — the model
+ladder, demoted in `wrangler.toml` and left inverted in `gemini.DEFAULT_LADDER`
+for nine versions. When you fix a rule, grep for the second place it lives.
+
+**"Every write is visible in `events`"** is enforced by nobody looking. The
+known holes have been closed one at a time (0.21.0 the superseded ring, 0.24.0
+the three unprompted kinds) and the seam that would make it structural —
+`applyIntent` pure, one `commit()` — is still open. Until then: a write that
+does not go through `sendOutcome` is invisible to the only record there is.
+
 ## The one rule
 
 **The bot must never claim something it did not do.**
@@ -983,13 +1019,75 @@ messages, word for word.
 `titleFromHisWords` cannot catch this: it runs on the PARSED intent, and there
 is no parse. Every free-text field in `ACTION_SCHEMA` now carries a
 `maxLength` (title 120, note 200, reason 400 — matching what the code slices
-them to anyway). The lesson is the one `why` taught, one level up: **an
-unbounded free-text field WILL become a scratchpad, and the bound belongs in
-the schema, where decoding enforces it.** If you add a STRING here, bound it.
+them to anyway). Half of that lesson holds: **an unbounded free-text field WILL
+become a scratchpad.** The other half — that the bound in the schema is what
+stops it — is FALSE, and the section below is what replaced it.
 
 Not supported, and deliberately: he cannot cancel or move a reminder he set for
 her. Every mutation path resolves through a chat-scoped read, and it is her row
 now.
+
+## What the model may not be asked to hold
+
+**`maxLength` is not enforced.** 0.14.1 put `maxLength: 120` on `title` and
+called it a guarantee, reasoning that `responseSchema` drives constrained
+decoding so a bound in it cannot be exceeded. Production answered twice inside
+nine days, both in that field, both over that bound:
+
+```
+errors #16  reschedule #69   6296 chars   31.08.2026 21:08
+errors #17  reschedule #69   3112 chars   31.08.2026 21:10
+```
+
+Google's structured-output documentation lists the schema fields it supports
+and `maxLength` is not among them — for strings, only `enum` and `format`
+(checked 06.09.2026). The numbers stay in `brain.ts` because they document what
+`effects.ts` slices to. The belief that they bind does not.
+
+**The only guarantee this schema offers is ABSENCE.** That is what removing
+`why` in 0.14.0 actually bought, and it was mis-generalised into "bound your
+strings" for three versions. A property that is not in the schema cannot be
+emitted. A property that is in it can hold anything.
+
+So the router schema is a UNION (0.27.0), split on one question: does this
+action read free text? `reschedule` does not — `resolveReminder` matches on
+`target_id` and otherwise on "he has exactly one reminder", and the title is
+never consulted on that path. **Three of the five runaway titles on record are
+reschedules.** They are now decoded against a branch in which `title` does not
+exist.
+
+**TWO branches, not twenty-one.** `issues.md` §3 proposed one per action. The
+evidence draws a different line, and a two-way choice with disjoint `action`
+enums is a far smaller ask of constrained decoding than a twenty-one-way one —
+which matters because branch-selection quality cannot be measured here at
+eleven messages a week, and every regression this repository has shipped came
+from a change reasoned into existence rather than measured.
+
+Three things hold it up, and each was a round trip:
+
+- **The fallback is mandatory, not belt-and-braces.** `anyOf` is documented as
+  supported and that cannot be checked from the test rig against the real
+  endpoint. If the endpoint refuses it, the code path is `if (!res.ok) throw`
+  on the FIRST rung of the ladder, on every call, for every user, until
+  somebody redeploys. `GenerateOpts.jsonSchemaFallback` retries once, same
+  model — the model is not what refused — with the flat schema that shipped up
+  to 0.26.0.
+- **Two guards stop that fallback becoming a loop**, and they are the same rule
+  in two places: `callOnce` only hands a 400 back when there is still something
+  to fall back to, and `generate` only switches when it has not already. The
+  `callOnce` copy is the one that bites; removing either alone leaves the suite
+  green, and removing both turns one refused schema into 48 round trips.
+- **`/diag` says whether the union is in force.** This is the important one.
+  The fallback WORKS, so a refused schema produces a good reply, no error row
+  and no symptom whatsoever — the guarantee would simply be off, silently, for
+  as long as nobody looked. That is `patterns.ts` and `GOAL_QUIET_AFTER` for
+  the third time, so it is counted out loud (`db.schemaRefusal`, written from
+  the fallback, never cleared automatically — unlike a quota, a refused schema
+  does not recover on its own).
+
+What this does NOT close: the two spills that were `create_reminder`, where the
+title is the point and no schema can help. That is `titleFromHisWords`' job and
+specifically the "extraction cannot grow" guard from 0.17.1.
 
 ## The model ladder
 
@@ -1026,10 +1124,43 @@ Because a day's calls now spread across the ladder, anything measured against
 "the model's usage" has to be a SUM (`db.usageTodayAll`). `GEMINI_SOFT_LIMIT`
 was per-model and would simply have stopped binding.
 
+**The ladder is defined in TWO places and they must agree, rung for rung.**
+`wrangler.toml` is what production walks; `gemini.DEFAULT_LADDER` is what a
+deployment with none of those vars set walks. 0.16.2 measured 3.7 and 3.6
+burning the full 12s per-call timeout, cost two reminders and demoted them — in
+`wrangler.toml` only. `DEFAULT_LADDER` kept them at the top, under a comment
+reading "best first", for nine versions. Same shape as `CLAIM` / `CLAIM_GROUPS`:
+two lists that must agree and only one of which anybody edits.
+`test/v26.test.ts` asserts the two produce an identical ladder, in order,
+because the old default held all four of the right models and led with the
+wrong one.
+
+**Re-verified against the published free tier on 06.09.2026** (`ai.google.dev`
+models + pricing): eight Flash / Flash-Lite ids carry a free tier and four of
+them were configured. Since the tier meters per minute PER MODEL, the four
+missing were not idle redundancy — they were capacity that did not exist. The
+order is measurement, then evidence, then a docs page:
+
+```
+gemini-3.5-flash, gemini-3.5-flash-lite     measured fast, carry ~all traffic
+gemini-3.7-flash, gemini-3.6-flash          slow (12s) but have answered here
+gemini-3.1-flash-lite, gemini-3.8-flash     published, never called here
+gemini-2.5-flash-lite, gemini-2.5-flash     404'd in production on 19.08.2026
+```
+
+`gemini-3.8-flash` is the highest number published and sits sixth deliberately:
+the docs describe it as built for long-horizon software engineering, which is a
+thinking model, which is the 18.9-second failure mode this bot has already paid
+for once. The 2.5 pair were deleted for those 404s and are back at the BOTTOM,
+because the published list carries them again and **a previous 404 is evidence
+where a docs page is only a claim.** If they are still dead, `blockFor` writes
+them off for six hours and `/diag` names them, which is the whole reason a
+stale id here is cheap. Read `model_health` a day after any change to this list.
+
 ## Testing
 
-`npm test` runs fifteen files with a real in-memory SQLite behind a D1-shaped
-facade (`test/harness.ts`). The webhook and cron paths run end to end, so
+`npm test` runs twenty-eight files with a real in-memory SQLite behind a
+D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end, so
 "the reminder never arrived" is reproducible rather than arguable.
 
 `npm run typecheck` is part of the deal and was red for a while without anyone
@@ -1042,14 +1173,39 @@ that actually matters here:
 
 > **Prove each new test goes red when you delete the line it guards.**
 
-This has repeatedly caught tests that asserted on something incidentally
-true — a title that already contained the word being checked, an assertion
-that only proved "a message was sent" when any message would do. A test that
-stays green with its guard removed is worse than no test, because it is
-counted as coverage.
+A test that stays green with its guard removed is worse than no test, because
+it is counted as coverage. **Seven distinct ways one has been vacuous here**,
+each found by the red-proof rather than by review:
 
-Where two guards independently prevent the same bug, removing either alone
-proves nothing. Remove both.
+1. **It matched the wrong block.** Three 0.17.0 tests asserted
+   `system.includes(title)` and passed against the exact bug they guarded,
+   because `doneSummary` renders the same title a few lines further down the
+   same prompt. Scope the assertion to block boundaries.
+2. **Two guards, one bug.** 0.18.0's `edited_message` fix: the early return and
+   the narrowed `const msg = update.message` each independently stop the
+   duplicate. Removing either alone proves nothing. Remove both.
+3. **Two lists, only one of which bites.** `CLAIM` is not read by `validate()`;
+   `CLAIM_GROUPS` is, and carries its own copy of every verb. The 0.19.0
+   additions were stripped out of `CLAIM` alone and the suite stayed green.
+4. **A guard hiding behind a redundant-looking neighbour.** 0.20.0's
+   `fires < MIN_SAMPLE`: every case had enough fires, and `snoozes >=
+   MIN_SAMPLE` masked the rest. The case it guards is one fire snoozed four
+   times.
+5. **Colliding ids in the fixture.** A fresh rig numbers the first reminder 1
+   and the first instance 1, so `WHERE reminder_id = 1` was true whichever id
+   had been written. When a test asserts on an id, check the fixture's ids are
+   actually distinct, or it is asserting that a number equals itself.
+6. **The assertion ran outside the pinned clock.** 0.25.0's first draft awaited
+   the `ctx.waitUntil` queue OUTSIDE `withNow`, so `buildContext` and every
+   `Date.now() - WINDOW` ran on the real wall clock. That made a FAILING check
+   pass and nearly buried a real bug.
+7. **A refactor left it reading nothing.** 0.27.0 turned the router schema into
+   an `anyOf`, and `friends.test.ts` went on reading `items.properties` —
+   now `undefined`, so `!('why' in {})` was true whatever the schema said. If
+   an assertion navigates into a structure, assert first that it found one.
+
+Numbers 3 and 7 are the same failure at different times: an assertion that
+survives a change by ceasing to look at anything.
 
 Useful rig facts: `rig.speakQueue.push(new Error(...))` fails only the
 persona call (`geminiDown` kills the router too, which usually is not what you
@@ -1057,8 +1213,11 @@ want); `rig.dbFailOn` traps one write by SQL pattern; `rig.geminiHang` makes the
 never answer unless the caller aborts it (race it against a timer, or a
 regression hangs the suite instead of failing it); `rig.downModels` /
 `rig.notFoundModels` / `rig.retryDelaySeconds` shape what a named model
-answers, which is how the ladder is testable at all; `deployed(rig)` simulates
-a deploy; a fresh rig is a bot that is already running the current version.
+answers, which is how the ladder is testable at all; `rig.rejectAnyOf` returns
+the 400 a real endpoint gives for a schema construct it will not accept, which
+is the only way the union's fallback is testable at all; `deployed(rig)`
+simulates a deploy; a fresh rig is a bot that is already running the current
+version.
 
 One trap the friends tests hit and you will too: the router PROMPT contains
 worked examples, so `system.includes('דנה')` passes with the whole context

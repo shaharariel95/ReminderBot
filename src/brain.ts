@@ -12,122 +12,200 @@ import type { Friend } from './db';
  * and the scheduler can never accidentally sound like a form letter.
  */
 
+/**
+ * Every action the router may return. ONE list, because the union below is
+ * built by partitioning it — an action that falls out of both branches cannot
+ * be emitted at all, and `test/v27.test.ts` compares the partition against
+ * this list for exactly that reason.
+ */
+const ALL_ACTIONS = [
+  'create_reminder',
+  'complete',
+  'complete_item',
+  'snooze',
+  'on_my_way',
+  'annotate',
+  'list',
+  'delete',
+  'reschedule',
+  'rename',
+  'remember',
+  'forget',
+  'set_intensity',
+  'chill',
+  'create_goal',
+  'goal_progress',
+  'complete_goal',
+  'drop_goal',
+  'list_goals',
+  'set_checkins',
+  'chat',
+] as const;
+
+/**
+ * The actions that READ a free-text field, verified against `applyIntent`
+ * rather than assumed:
+ *
+ *   title   create_reminder, complete_item, annotate, rename, remember,
+ *           forget, create_goal
+ *   note    complete_item, annotate, remember, forget, create_goal
+ *   reason  goal_progress
+ *
+ * Everything else is `ALL_ACTIONS` minus this list, and gets a schema with no
+ * free-text property in it at all. See TEXT_FIELDS for why that matters.
+ */
+const TEXT_ACTIONS = [
+  'create_reminder',
+  'complete_item',
+  'annotate',
+  'rename',
+  'remember',
+  'forget',
+  'create_goal',
+  'goal_progress',
+] as const;
+
+const NO_TEXT_ACTIONS = ALL_ACTIONS.filter(
+  (a) => !(TEXT_ACTIONS as readonly string[]).includes(a),
+);
+
+/*
+ * The fields the model writes prose into — and the fields it runs away in.
+ *
+ * `maxLength` IS NOT A GUARANTEE, and this file used to say it was. The claim
+ * was that responseSchema drives constrained decoding, so a bound here cannot
+ * be exceeded — the same argument that makes removing a property (see `why`
+ * below) a real fix. It does not transfer. `maxLength` is absent from the
+ * supported-field list in Google's structured-output documentation (checked
+ * 06.09.2026: for strings, only `enum` and `format` are listed), and
+ * production had already said so:
+ *
+ *   errors #16  reschedule #69  "לנקות את הפילטרים של המזגנים_resche…"  6296
+ *   errors #17  reschedule #69  "לנקות את הפילטרים של המזגנים…"         3112
+ *
+ * Both AFTER 0.14.1 added `maxLength: 120`, both in the field it was added to,
+ * both running until the response truncated mid-string so `JSON.parse` threw
+ * and the turn died. The numbers stay because they document what the code
+ * slices to; the belief that they are enforced does not.
+ *
+ * What IS a guarantee is absence, which is the whole of the union below: three
+ * of the five runaway titles on record are RESCHEDULES, and `reschedule` never
+ * reads a title — `resolveReminder` matches on `target_id` and otherwise on
+ * "he has exactly one reminder". The field was pure attack surface on that
+ * path, and now it is not on that path.
+ */
+const TEXT_FIELDS = {
+  title: { type: 'STRING', maxLength: 120 },
+  /** One short sentence in his words — a profile fact, a detail on a
+   *  reminder, a goal's reason. */
+  note: { type: 'STRING', maxLength: 200 },
+  /** What he said about a goal, briefly. 400 is what effects.ts slices it to. */
+  reason: { type: 'STRING', maxLength: 400 },
+} as const;
+
+/*
+ * `why` USED TO BE A FIELD HERE, and removing it is the fix, not an omission.
+ *
+ * It was read by exactly one action (create_goal, effects.ts) and offered to
+ * all twenty, unbounded. Every route/apply failure between 15 and 17.08.2026
+ * carried a long one — including two plain reschedules with no friend in them
+ * — and the worst of them was the model writing "for_friend=אמנון.
+ * in_minutes=2. schedule_type=once. for_friend=אמנון." as PROSE inside it,
+ * repeating until the response truncated mid-string and JSON.parse threw. The
+ * turn died and the catch-block filed the raw message as an inbox item.
+ *
+ * It was first "fixed" by asking the model in the prompt to leave it alone.
+ * That is a request. A property that is not in the schema CANNOT be emitted,
+ * which is a guarantee — and it is the ONLY guarantee this schema offers, as
+ * TEXT_FIELDS above records at some cost. A goal's reason now travels in
+ * `note`, which was already here and which create_goal did not use.
+ */
+const CORE_FIELDS = {
+  goal_id: { type: 'INTEGER' },
+  checkins_enabled: { type: 'BOOLEAN' },
+  checkin_per_day: { type: 'INTEGER' },
+  schedule_type: { type: 'STRING', enum: ['once', 'daily', 'weekly', 'interval'] },
+  time: { type: 'STRING' },
+  days: { type: 'ARRAY', items: { type: 'INTEGER' } },
+  interval_minutes: { type: 'INTEGER' },
+  once_at: { type: 'STRING' },
+  /** When the THING happens — never when to ring. See the rule below. */
+  event_at: { type: 'STRING' },
+  in_minutes: { type: 'INTEGER' },
+  requires_proof: { type: 'BOOLEAN' },
+  proof_type: { type: 'STRING', enum: ['text', 'photo', 'any'] },
+  target_id: { type: 'INTEGER' },
+  item_id: { type: 'INTEGER' },
+  /** A nickname off the friends list above — never a chat_id. See the rule. */
+  for_friend: { type: 'STRING' },
+  snooze_minutes: { type: 'INTEGER' },
+  chill_hours: { type: 'INTEGER' },
+  intensity: { type: 'INTEGER' },
+  distress: { type: 'BOOLEAN' },
+} as const;
+
+const branch = (actions: readonly string[], extra: object) => ({
+  type: 'OBJECT',
+  properties: { action: { type: 'STRING', enum: [...actions] }, ...extra, ...CORE_FIELDS },
+  required: ['action'],
+});
+
+/*
+ * TWO branches, not twenty-one, and the count is the design.
+ *
+ * issues.md §3 proposed a per-action discriminated union. The evidence
+ * supports a much narrower cut: the failures are free text appearing on
+ * actions that do not read free text, so the line to draw is that one. A
+ * two-way choice with disjoint `action` enums is determined by the action
+ * alone and is a far smaller ask of constrained decoding than a twenty-one-way
+ * one — which matters because branch-selection quality is not something this
+ * repository can measure at eleven messages a week, and every regression it
+ * has shipped came from a change reasoned into existence rather than measured.
+ */
 const ACTION_SCHEMA = {
+  anyOf: [branch(TEXT_ACTIONS, TEXT_FIELDS), branch(NO_TEXT_ACTIONS, {})],
+};
+
+/**
+ * The schema as it shipped up to 0.26.0: one flat object, every property
+ * available to every action.
+ *
+ * Kept as the FALLBACK, and it is not dead code. `anyOf` is documented as
+ * supported and cannot be verified from the test rig against the real
+ * endpoint; if the endpoint refuses it, `if (!res.ok) throw` in gemini.ts
+ * fires on the first rung of the ladder, on every call, for every user, until
+ * somebody redeploys. gemini.generate retries a 400 once with this, on the
+ * same model. An optimisation is never a good enough reason for silence —
+ * the same rule the model-health table is ignored under when it blocks
+ * everything.
+ */
+const FLAT_ACTION_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    action: {
-      type: 'STRING',
-      enum: [
-        'create_reminder',
-        'complete',
-        'complete_item',
-        'snooze',
-        'on_my_way',
-        'annotate',
-        'list',
-        'delete',
-        'reschedule',
-        'rename',
-        'remember',
-        'forget',
-        'set_intensity',
-        'chill',
-        'create_goal',
-        'goal_progress',
-        'complete_goal',
-        'drop_goal',
-        'list_goals',
-        'set_checkins',
-        'chat',
-      ],
-    },
-    /*
-     * BOUNDED, and the bound is the fix.
-     *
-     * Removing `why` from this schema (see the block below) closed one
-     * scratchpad and the model simply moved into the next unbounded STRING it
-     * could find. All three route/apply failures since 0.14.0 are `title`:
-     *
-     *   errors #13  "ללכת למוסךTrimmed to: ללכת למוסך והוא לא אמר משהו אחר.
-     *                ללכת למוסך. ללכת למוסך…"                    3022 chars
-     *   errors #14  "ללכת למוסך24.08.2026, 07:30 — הבא: יום ב׳…"  4345 chars
-     *   errors #15  "להזמין רכב לאוסטריה Lights-out-time-limit-
-     *                reached-or-similar-context-implied-by…"     4800 chars
-     *
-     * The first is the model reciting titleFromHisWords' own prompt rule back
-     * into the field it governs; the second is the rendered context block.
-     * Each ran until the response truncated mid-string, so JSON.parse threw,
-     * the turn died, and the catch-block filed his raw sentence as a reminder
-     * (reminder #62's title is one of his messages, word for word).
-     *
-     * titleFromHisWords cannot catch this — it runs on the parsed intent, and
-     * there is no parse. The lesson `why` taught is the one that applies:
-     * asking the model to be brief is a request, `maxLength` under constrained
-     * decoding is a guarantee. 120 is what effects.ts and quickparse.ts
-     * already slice titles to, so the schema now describes what gets stored.
-     */
-    title: { type: 'STRING', maxLength: 120 },
-    /** One short sentence in his words — a profile fact, a detail on a
-     *  reminder, a goal's reason. Bounded for the same reason `title` is. */
-    note: { type: 'STRING', maxLength: 200 },
-    /*
-     * `why` USED TO BE HERE, and removing it is the fix, not an omission.
-     *
-     * It was read by exactly one action (create_goal, effects.ts) and offered
-     * to all twenty, unbounded. Every route/apply failure between 15 and
-     * 17.08.2026 carried a long one — including two plain reschedules with no
-     * friend in them — and the worst of them was the model writing
-     * "for_friend=אמנון. in_minutes=2. schedule_type=once. for_friend=אמנון."
-     * as PROSE inside it, repeating until the response truncated mid-string
-     * and JSON.parse threw. The turn died and the catch-block filed the raw
-     * message as an inbox item.
-     *
-     * It was first "fixed" by asking the model in the prompt to leave it
-     * alone. That is a request. responseSchema drives constrained decoding, so
-     * a property that is not here CANNOT be emitted — which is a guarantee.
-     * This codebase already records prompt-only rules failing to hold (the
-     * "#28" instruction below has nothing behind it), so the guarantee is the
-     * one to take. A goal's reason now travels in `note`, which was already in
-     * this schema and which create_goal did not use.
-     */
-    goal_id: { type: 'INTEGER' },
-    checkins_enabled: { type: 'BOOLEAN' },
-    checkin_per_day: { type: 'INTEGER' },
-    schedule_type: { type: 'STRING', enum: ['once', 'daily', 'weekly', 'interval'] },
-    time: { type: 'STRING' },
-    days: { type: 'ARRAY', items: { type: 'INTEGER' } },
-    interval_minutes: { type: 'INTEGER' },
-    once_at: { type: 'STRING' },
-    /** When the THING happens — never when to ring. See the rule below. */
-    event_at: { type: 'STRING' },
-    in_minutes: { type: 'INTEGER' },
-    requires_proof: { type: 'BOOLEAN' },
-    proof_type: { type: 'STRING', enum: ['text', 'photo', 'any'] },
-    target_id: { type: 'INTEGER' },
-    item_id: { type: 'INTEGER' },
-    /** A nickname off the friends list above — never a chat_id. See the rule. */
-    for_friend: { type: 'STRING' },
-    snooze_minutes: { type: 'INTEGER' },
-    chill_hours: { type: 'INTEGER' },
-    intensity: { type: 'INTEGER' },
-    distress: { type: 'BOOLEAN' },
-    /** What he said about a goal, briefly. 400 is what effects.ts slices it
-     *  to; the bound belongs here too, where it cannot be exceeded at all. */
-    reason: { type: 'STRING', maxLength: 400 },
+    action: { type: 'STRING', enum: [...ALL_ACTIONS] },
+    ...TEXT_FIELDS,
+    ...CORE_FIELDS,
   },
   required: ['action'],
-} as const;
+};
 
 /**
  * One message can ask for more than one thing — "תזכיר לי ב-7 לקום ובערב
  * להתקשר לאמא" is two reminders, not one. The router therefore always returns a
  * list, even when it has a single entry.
  */
-const ROUTER_SCHEMA = {
+export const ROUTER_SCHEMA = {
   type: 'OBJECT',
   properties: { actions: { type: 'ARRAY', items: ACTION_SCHEMA } },
   required: ['actions'],
-} as const;
+};
+
+/** @see FLAT_ACTION_SCHEMA — the shape a 400 on the union falls back to. */
+export const ROUTER_SCHEMA_FLAT = {
+  type: 'OBJECT',
+  properties: { actions: { type: 'ARRAY', items: FLAT_ACTION_SCHEMA } },
+  required: ['actions'],
+};
 
 /** More than this in one message is a misparse, not a request. */
 const MAX_ACTIONS = 5;
@@ -451,6 +529,7 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
     system,
     contents: [{ role: 'user', parts }],
     jsonSchema: ROUTER_SCHEMA as unknown as Record<string, unknown>,
+    jsonSchemaFallback: ROUTER_SCHEMA_FLAT as unknown as Record<string, unknown>,
     maxOutputTokens: 2000,
     /*
      * `thinkingLevel: 'high'` WAS HERE, in 0.16.0, and reverting it is the

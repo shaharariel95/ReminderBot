@@ -394,8 +394,25 @@ async function main() {
   // reminder #62's title is.
   //
   // titleFromHisWords cannot help here: it runs on the PARSED intent, and
-  // there was never a parse. The bound has to be on the schema, where
-  // constrained decoding makes it a guarantee rather than a request.
+  // there was never a parse.
+  //
+  // 0.14.1 put a `maxLength` on the field and called it a guarantee, on the
+  // reasoning that constrained decoding cannot exceed a bound in the schema.
+  // THAT WAS WRONG, and production said so twice within nine days:
+  //
+  //   errors #16  reschedule #69   6296 chars   31.08.2026 21:08
+  //   errors #17  reschedule #69   3112 chars   31.08.2026 21:10
+  //
+  // both in `title`, both over `maxLength: 120`. Google's structured-output
+  // documentation lists the supported schema fields and `maxLength` is not
+  // among them (checked 06.09.2026 — for strings, only `enum` and `format`).
+  //
+  // What this section still asserts is therefore narrower and honest: the
+  // bound is DECLARED, because it documents what effects.ts slices to. The
+  // enforcement is 0.27.0's union — `reschedule` is decoded against a branch
+  // in which `title` does not exist — and absence is the only guarantee this
+  // schema has ever actually offered. That is the lesson `why` taught in
+  // 0.14.0, mis-generalised for three versions.
   {
     const rig = createRig();
     seedSettings(rig);
@@ -405,7 +422,14 @@ async function main() {
 
     const router = rig.geminiCalls.find((c) => c.kind === 'router');
     check('the router was consulted', !!router, JSON.stringify(rig.geminiCalls.map((c) => c.kind)));
-    const props = router?.schema?.properties?.actions?.items?.properties ?? {};
+    // Across both branches of the union. Reading `items.properties` directly
+    // returns undefined since 0.27.0, and `undefined?.maxLength` would have
+    // made every assertion below a comparison against nothing.
+    const items = router?.schema?.properties?.actions?.items;
+    const props: Record<string, any> = Object.assign(
+      {},
+      ...((items?.anyOf ?? [items]) as any[]).map((b) => b?.properties ?? {}),
+    );
 
     // Asserted on the schema that actually went over the wire, not on the
     // exported constant — the same reason the rig captures `schema` at all.

@@ -578,8 +578,24 @@ section('the router is told to report a name it does not recognise');
   // `why` — including two plain reschedules with no friend in them. It was
   // never a friends bug; it was any turn where the model rambled into a field
   // that only create_goal has ever read.
-  const props = rig.geminiCalls.find((c) => c.kind === 'router')?.schema
-    ?.properties?.actions?.items?.properties ?? {};
+  //
+  // Read across BOTH branches of the union, and asserted to be non-empty
+  // first. 0.27.0 turned `items` into an `anyOf` and this line went on reading
+  // `items.properties` — which is now undefined, so `!('why' in {})` was true
+  // whatever the schema said. A guard that passes against an empty object is
+  // not a guard, and it is the same shape as `CLAIM` in 0.19.0: the assertion
+  // survived a refactor by ceasing to look at anything.
+  const items = rig.geminiCalls.find((c) => c.kind === 'router')?.schema
+    ?.properties?.actions?.items;
+  const props = Object.assign(
+    {},
+    ...((items?.anyOf ?? [items]) as any[]).map((b) => b?.properties ?? {}),
+  ) as Record<string, unknown>;
+  check(
+    'the schema was actually read — otherwise the next two prove nothing',
+    Object.keys(props).length > 5,
+    Object.keys(props).join(', '),
+  );
   check(
     'the router schema cannot express `why` at all',
     !('why' in props),

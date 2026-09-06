@@ -511,6 +511,20 @@ export async function handleSlash(
         .map((h) => `${h.model} (${h.reason ?? '?'}) עד ${formatLocal(h.blocked_until, tz)}`);
       lines.push(blocked.length ? `חסומים כרגע: ${blocked.join(' · ')}` : 'חסומים כרגע: אין');
 
+      // Whether the router's union schema is actually in force.
+      //
+      // It degrades to the flat schema on a 400 and the reply still arrives,
+      // so this is the one symptom there is. A date here means the `anyOf`
+      // union was refused and the guarantee it buys — an action that reads no
+      // free text cannot emit any — is not applying. "לא קרה" is the healthy
+      // answer, and it is the same reason blocked models are named above.
+      const refused = await db.schemaRefusal(env).catch(() => null);
+      lines.push(
+        refused
+          ? `סכימת הראוטר נדחתה: ${refused.model} ב-${formatLocal(refused.at, tz)} — רץ על הסכימה השטוחה`
+          : 'סכימת הראוטר: תקינה (לא נדחתה מעולם)',
+      );
+
       // Two numbers, because they answer two questions. His own is the one
       // that reconciles with the rejection list printed below and the one his
       // check-in budget is measured against; the total is what protects the
