@@ -101,6 +101,32 @@ binned a good rewrite because he had typed a stray apostrophe ("עוד 'שעה
 בערך") and the quote was compared with a raw `includes`. Both quote tests now
 fold quote marks, geresh/gershayim and whitespace first (`normQuote`).
 
+**Rule 3 is the one that over-fires, and the numbers say by how much.** All
+thirteen rejections on record, scored: rules 1, 2 and 6 were right every time
+they fired. Rule 3 fired six times — twice correctly, on the `(המשך)` phantom
+that is now fixed at its root, and **four times on a quote that was not a claim
+at all**: a button label (#6), its own earlier offer (#7), his own words (#9),
+a hypothetical excuse (#13). Hebrew uses quotation marks for scare-quotes and
+reported speech at least as often as for naming a thing.
+
+Only #6 has a deterministic answer and only #6 is fixed. `buttons.FIXED_LABELS`
+is a closed list of the labels this bot renders with no interpolation in them,
+folded into rule 3's PROSE branch — a phrase he can literally tap is not a task
+the model invented, and admitting it cannot admit a false claim. **The prose
+branch matches one direction only** (a known entry may contain the quote, never
+the reverse), which is what keeps a two-letter entry like "מחר" from becoming a
+wildcard; make it bidirectional and "הכל" starts admitting "להוציא את הכלב".
+An INTERPOLATED label ("✓ ${title}", "כן, 08:30") must never go in that list —
+the title and the hour are already allow-listed per turn by `facts.ts`, where
+they can be checked against the row they came from.
+
+#7 and #13 are left firing on purpose, and the reason is the trade this whole
+file is written under: **a rejection costs prose, a miss costs the one rule.**
+A discarded rewrite ships the baseline, which is flatter and true. There is no
+structural difference between quoting a rhetorical excuse and naming a task
+that does not exist, so the only way to catch those four is to weaken the rule,
+and being wrong in that direction is much more expensive.
+
 **The failed turn never reaches the model at all.** `sendOutcome` skips
 `speak()` when the effects carry `nothing: 'failed'`. The failure wording is
 written to confirm and deny nothing; handing it to something whose licence is

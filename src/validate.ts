@@ -1,3 +1,4 @@
+import { FIXED_LABELS } from './buttons';
 import type { Effect, Facts } from './types';
 import { UNTITLED_TITLE, WROTE } from './types';
 import { scanDurations } from './quickparse';
@@ -378,7 +379,15 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
     // Prose (reasons, notes, the user's own words): one direction only. These are
     // never paraphrased, so letting `quoted` be the longer side would turn a short
     // entry like reason = "חתול" into a wildcard that swallows any longer quote.
-    const knownProse = facts.quotable.some((q) => normQuote(q).includes(quoted));
+    //
+    // FIXED_LABELS is folded in here rather than in facts.ts because it is not a
+    // fact about this turn — it is a property of the validator, like `baseline`
+    // above, and it has to hold for every caller rather than only for the ones
+    // that went through buildFacts. See buttons.ts for why a button label cannot
+    // be an invented task, and `rejections` #6 for what it cost.
+    const knownProse = [...facts.quotable, ...FIXED_LABELS].some(
+      (q) => normQuote(q).includes(quoted),
+    );
     if (!knownTitle && !knownProse) return { ok: false, reason: `invented task "${quoted}"` };
   }
 

@@ -220,6 +220,45 @@ const deferRow = (instance: number): Button[] => [
   { text: 'לא היום', data: { t: 'skip', instance } },
 ];
 
+/**
+ * Every button label this file renders that is a FIXED string — no title, no
+ * hour, no interpolation of any kind.
+ *
+ * Exported for `validate.ts`, and the reason is `rejections` #6, 18.08.2026:
+ *
+ *   או שאתה פותר סעיף אחד קטן עכשיו, או שאתה אומר לי "לא היום" ונשחרר
+ *
+ * scored `invented task "לא היום"` and discarded for the flat baseline. The
+ * persona was quoting the button sitting directly underneath the message. A
+ * phrase the bot itself puts in front of him, in that chat, in that turn, and
+ * that he can literally tap, is not a task it made up — and admitting it
+ * cannot admit a false claim, which is the only test a change to that file has
+ * to pass.
+ *
+ * Deliberately a CLOSED list of whole labels, not a rule about short quotes.
+ * Rule 3's prose branch matches one direction only (a known entry may contain
+ * the quote, never the reverse), so "מחר" admits "מחר" and nothing longer —
+ * which is what keeps a two-letter entry from becoming the wildcard validate.ts
+ * already warns about. If you add a fixed label to a keyboard, add it here.
+ * An interpolated one ("✓ ${title}", "כן, 08:30") must NOT go here: the title
+ * and the hour are already allow-listed per turn, by facts.ts, where they can
+ * be checked against the row they came from.
+ */
+export const FIXED_LABELS: readonly string[] = [
+  'מחר',
+  'לא היום',
+  'עשיתי',
+  'הכל',
+  'עוד 10 דק׳',
+  '10 דק׳',
+  'תשאיר',
+  'תמחק את זה',
+  'תוריד את זה',
+  'בלי זמן',
+  'עוד שעה',
+  'הערב',
+];
+
 export function buttonsFor(
   effects: { kind: string; [k: string]: unknown }[],
   /** Only the inbox slots need these; every other keyboard is time-free. */
