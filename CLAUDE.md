@@ -543,6 +543,13 @@ Check what it was shown before blaming the router.
   exactly that. Same rule as `finishReason`, one level out.
 - Usage IS recorded. The probe really does spend quota, and a `/diag` number
   that quietly excluded it would be wrong.
+- **A measured span renders through one helper, and its unit is Latin.** `ש׳`
+  is the abbreviation for שעה, and this bot writes hours in that vocabulary
+  everywhere else — so the report called 4.1 seconds four hours, and the
+  timeout line, which had its own arithmetic, called twelve seconds twelve.
+  → `time.formatDuration`
+- A slice with no mark on it claims the sentence ended there. The 140-character
+  cut landed mid-URL. → `gemini.errorMessage`
 - `rig.emptyModels` is how the empty-200 path is testable at all, and the hang
   path is RACED against a timer: a probe that lost its timeout makes the suite
   hang rather than go red, and the red-proof scored that GREEN until the race
@@ -604,7 +611,7 @@ actually matters here:
 > **Prove each new test goes red when you delete the line it guards.**
 
 A test that stays green with its guard removed is worse than no test, because it
-is counted as coverage. **Seven distinct ways one has been vacuous here**, each
+is counted as coverage. **Eight distinct ways one has been vacuous here**, each
 found by the red-proof rather than by review:
 
 1. **It matched the wrong block.** `system.includes(title)` passed against the
@@ -625,8 +632,16 @@ found by the red-proof rather than by review:
    so `!('why' in {})` was true whatever the schema said. **If an assertion
    navigates into a structure, assert first that it found one.**
 
+8. **The branch could not execute.** The duration regex accepted milliseconds
+   OR seconds and looked thorough; `withNow` pins `Date.now`, so every probe in
+   every test measured 0ms and only the first branch ever ran. The second
+   shipped saying `4.1ש׳` — 4.1 HOURS. **An assertion offering alternatives is
+   passed by the easiest one.** `rig.slowModels` exists to make the other
+   reachable.
+
 3 and 7 are the same failure at different times: an assertion that survives a
-change by ceasing to look at anything.
+change by ceasing to look at anything. 8 is its opposite and just as quiet — an
+assertion that looks at a thing the suite cannot produce.
 
 Useful rig facts:
 
@@ -638,6 +653,7 @@ Useful rig facts:
 | `rig.downModels` / `rig.notFoundModels` / `rig.retryDelaySeconds` | shape what a named model answers; the only way the ladder is testable |
 | `rig.rejectAnyOf` | the 400 a real endpoint gives for a schema construct it refuses |
 | `rig.emptyModels` | HTTP 200 with no candidates — what a safety block looks like |
+| `rig.slowModels` | fakes elapsed ms by ADVANCING the pinned clock, not by sleeping |
 | `deployed(rig)` | simulates a deploy |
 | a fresh rig | a bot already running the current version |
 

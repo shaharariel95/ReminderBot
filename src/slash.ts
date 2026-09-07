@@ -1,5 +1,5 @@
 import * as db from './db';
-import { describeSchedule, formatLocal, localDayBounds, scheduleWithNext } from './time';
+import { describeSchedule, formatDuration, formatLocal, localDayBounds, scheduleWithNext } from './time';
 import type { Env, ReminderItem, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
@@ -740,10 +740,6 @@ export async function handleSlash(
         .getSettings(env, chatId)
         .then((s) => s.tz)
         .catch(() => env.DEFAULT_TZ || 'Asia/Jerusalem');
-      // Milliseconds under a second, seconds above it. "0.4ש׳" and "0.0ש׳"
-      // are the same line to a tired reader, and the whole point of this
-      // command is comparing two numbers at a glance.
-      const secs = (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}ש׳`);
 
       const lines = [`בדיקת מודלים — ${probes.length} בסולם`, ''];
       probes.forEach((p, i) => {
@@ -753,7 +749,7 @@ export async function handleSlash(
         const role = i === 0 ? ' ★' : i === 1 ? ' ☆' : '';
         const blocked = (health.get(p.model)?.blocked_until ?? 0) > Date.now();
         const head = p.ok
-          ? `${i + 1}. ${p.model} · ${secs(p.ms)} ✓${role}`
+          ? `${i + 1}. ${p.model} · ${formatDuration(p.ms)} ✓${role}`
           : `${i + 1}. ${p.model} · ${p.status ?? '—'} ✗${role}`;
         lines.push(head);
         if (!p.ok) lines.push(`    ${p.detail}`);
@@ -767,7 +763,7 @@ export async function handleSlash(
       lines.push('', `ענו: ${ok.length}/${probes.length}`);
       if (ok.length) {
         const fastest = ok.reduce((a, b) => (a.ms <= b.ms ? a : b));
-        lines.push(`הכי מהיר: ${fastest.model} — ${secs(fastest.ms)}`);
+        lines.push(`הכי מהיר: ${fastest.model} — ${formatDuration(fastest.ms)}`);
         // The actionable sentence, and the only reason to run this twice.
         // Deliberately worded as a prompt to go and measure properly rather
         // than as advice: one probe is one sample, and promoting on a single

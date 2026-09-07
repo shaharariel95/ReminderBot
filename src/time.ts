@@ -352,3 +352,28 @@ export function planSlotInstant(
   }
   return wallToUtc(p.year, p.month, p.day + 1, 9, 0, tz);
 }
+
+/**
+ * A measured span, for a human reading a diagnostic. Milliseconds under a
+ * second, seconds above it.
+ *
+ * The unit is LATIN in both branches, in an otherwise Hebrew report, and that
+ * is the point rather than an oversight. It shipped as `1.6ש׳` on 08.09.2026:
+ *
+ *   4. gemini-3.6-flash · 1.6ש׳ ✓
+ *   6. gemini-3.8-flash · 4.1ש׳ ✓
+ *
+ * `ש׳` is the abbreviation for שעה, and this bot writes hours in exactly that
+ * vocabulary everywhere else — /chill, /quiet, "שקט ל-4 שעות". So the one
+ * number on the screen whose whole purpose is being compared at a glance said
+ * four HOURS. There is no Hebrew abbreviation for a second that is not read as
+ * something else by somebody; `ms` was already there in the branch below, and
+ * `s` is the unit that agrees with its own neighbour.
+ *
+ * One function, because the second site had its own arithmetic and its own
+ * bug: `Math.round(ms / 1000)` rendered a 12-second timeout as "12ש׳" and
+ * anything under half a second as "0ש׳" — zero hours.
+ */
+export function formatDuration(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}

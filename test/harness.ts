@@ -191,6 +191,20 @@ export interface Rig {
   /** Models that should return 429, by exact id. */
   downModels: Set<string>;
   /**
+   * Milliseconds each named model appears to take, by exact id.
+   *
+   * It ADVANCES THE PINNED CLOCK rather than sleeping — a real sleep would put
+   * a second and a half of wall time into the suite to test a string. The
+   * elapsed number is the thing under test, so faking it is not a shortcut
+   * here, it is the measurement.
+   *
+   * It exists because `withNow` pins `Date.now` to a constant, so every probe
+   * in every test measured exactly 0ms and rendered "0ms" — which meant the
+   * over-a-second branch of the report had never once been executed by the
+   * suite. It shipped reading "4.1ש׳", the abbreviation for HOURS.
+   */
+  slowModels: Map<string, number>;
+  /**
    * Models that should return 404, by exact id — a retired id, or a typo in
    * wrangler.toml. Separate from `downModels` because the bot treats them
    * differently on purpose: a quota clears in a minute, a model that does not
@@ -296,6 +310,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     geminiHang: false,
     hangModels: new Set<string>(),
     downModels: new Set<string>(),
+    slowModels: new Map<string, number>(),
     notFoundModels: new Set<string>(),
     rejectAnyOf: false as false | 'once' | 'always',
     emptyModels: new Set<string>(),
@@ -348,6 +363,9 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     if (url.includes('generativelanguage.googleapis.com')) {
       const model = /models\/([^:]+):/.exec(url)?.[1] ?? '';
       rig.modelsCalled.push(model);
+      // Before every outcome below, so a slow model can also be a failing one.
+      const slow = rig.slowModels.get(model);
+      if (slow) advanceNow(slow);
       if (rig.emptyModels.has(model)) {
         return json({ promptFeedback: { blockReason: 'SAFETY' } });
       }
@@ -477,12 +495,37 @@ export function done(): void {
 /** Run `fn` with the wall clock pinned to `ms`, so a tick can be tested at 07:05. */
 export async function withNow<T>(ms: number, fn: () => Promise<T>): Promise<T> {
   const real = Date.now;
-  Date.now = () => ms;
+  pinned = ms;
+  Date.now = () => pinned!;
   try {
     return await fn();
   } finally {
     Date.now = real;
+    pinned = null;
   }
+}
+
+/**
+ * The pinned instant, held in a variable rather than closed over, so that
+ * `advanceNow` can move it. Null outside `withNow`.
+ */
+let pinned: number | null = null;
+
+/**
+ * Move the pinned clock forward, mid-turn.
+ *
+ * For the one thing a frozen clock cannot express: elapsed time. Anything the
+ * bot MEASURES rather than reads — a probe's round trip, a turn's budget — is
+ * identically zero under `withNow`, so an assertion about how it renders is
+ * an assertion about the string "0".
+ *
+ * It throws outside `withNow` on purpose. That is trap 6 from CLAUDE.md, the
+ * assertion that quietly ran on the real wall clock and made a failing check
+ * pass; here the same mistake would silently do nothing at all.
+ */
+export function advanceNow(ms: number): void {
+  if (pinned === null) throw new Error('advanceNow() outside withNow() — the clock is not pinned');
+  pinned += ms;
 }
 
 /** A Telegram update carrying a text message from the owner. */

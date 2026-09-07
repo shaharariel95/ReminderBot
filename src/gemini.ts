@@ -1,4 +1,5 @@
 import * as db from './db';
+import { formatDuration } from './time';
 import type { Env } from './types';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -271,7 +272,12 @@ const PROBE_TIMEOUT_MS = 12_000;
 export function errorMessage(body: string): string {
   const m = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
   const raw = m ? m[1].replace(/\\n/g, ' ').replace(/\\"/g, '"') : body;
-  return raw.replace(/\s+/g, ' ').trim().slice(0, 140);
+  const one = raw.replace(/\s+/g, ' ').trim();
+  // Marked when it is cut. The 429 that arrived on 08.09.2026 ended, on
+  // screen, "...head to: https://ai.google." — a complete-looking address that
+  // goes nowhere, because 140 characters landed mid-URL. A slice with no mark
+  // on it is a small false claim about where the sentence ended.
+  return one.length > 140 ? `${one.slice(0, 140)}…` : one;
 }
 
 /**
@@ -370,7 +376,11 @@ export async function probeModel(
       status: null,
       ms,
       ok: false,
-      detail: isTimeout(err) ? `נגמר הזמן אחרי ${Math.round(ms / 1000)}ש׳` : String(err).slice(0, 90),
+      // Same helper as the table this line appears under. It had its own
+      // arithmetic and its own bug: Math.round(ms / 1000) turned a 12-second
+      // timeout into "12ש׳" — twelve hours — and anything under half a second
+      // into "0ש׳".
+      detail: isTimeout(err) ? `נגמר הזמן אחרי ${formatDuration(ms)}` : String(err).slice(0, 90),
     };
   }
 }

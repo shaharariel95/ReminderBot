@@ -32,6 +32,7 @@
  */
 import { handleSlash } from '../src/slash';
 import { probeLadder, modelLadder, errorMessage } from '../src/gemini';
+import { formatDuration } from '../src/time';
 import * as db from '../src/db';
 import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 
@@ -89,7 +90,7 @@ section('it reports every rung, in ladder order, with a time on each');
   }
   // Either unit: milliseconds under a second, seconds above it. Matching only
   // one of them would make this a test of how fast the rig happens to be.
-  const TOOK = (m: string) => new RegExp(`${m} · (?:\\d+ms|[\\d.]+ש׳) ✓`);
+  const TOOK = (m: string) => new RegExp(`${m} · (?:\\d+ms|[\\d.]+s) ✓`);
   check(`the two that answered are marked ✓ — ${JSON.stringify(out)}`,
     TOOK('fast-one').test(out) && TOOK('fast-two').test(out), out);
   check('the 429 is reported as 429, not as a duration',
@@ -135,7 +136,7 @@ section('...and it reports a model that IS blocked, without asking the table');
   const out = (await withNow(NOW, () => handleSlash(rig.env, OWNER, '/models'))) ?? '';
 
   check(`fast-two still answered — ${JSON.stringify(out)}`,
-    /fast-two · (?:\d+ms|[\d.]+ש׳) ✓/.test(out), out);
+    /fast-two · (?:\d+ms|[\d.]+s) ✓/.test(out), out);
   check('and the block is stated alongside', out.includes('חסום עד'), out);
   rig.restore();
 }
@@ -231,7 +232,8 @@ section('the reason is read out of the error, not the opening brace');
     out.startsWith('You exceeded your current quota'), out);
   check('and not with the envelope', !out.includes('"error"') && !out.startsWith('{'), out);
   check('on one line', !out.includes('\n'), JSON.stringify(out));
-  check('bounded', out.length <= 140, String(out.length));
+  // 140 of message, plus the one character that says it was cut there.
+  check('bounded', out.length <= 141, String(out.length));
 
   // A short one still works — the old regex handled these, and the fix must
   // not trade one for the other.
@@ -264,7 +266,7 @@ section('a 200 with no answer in it is not a working model');
 
   const out = (await withNow(NOW, () => handleSlash(rig.env, OWNER, '/models'))) ?? '';
   check(`fast-two is not ticked — ${JSON.stringify(out)}`,
-    !/fast-two · (?:\d+ms|[\d.]+ש׳) ✓/.test(out), out);
+    !/fast-two · (?:\d+ms|[\d.]+s) ✓/.test(out), out);
   // The finishReason rides along, because 'ריק' alone was not diagnosable:
   // three rungs said it on 08.09.2026 and the cause was this probe's own token
   // ceiling, which a MAX_TOKENS here would have named on sight.
@@ -364,6 +366,103 @@ section('probeLadder returns results in ladder order even when they finish out o
   eq('in ladder order', probes.map((p) => p.model).join(','), modelLadder(rig.env).join(','));
   check('the hung one is reported as not ok', !probes[0].ok, JSON.stringify(probes[0]));
   rig.restore();
+}
+
+// ---------------------------------------------------------------------------
+section('a duration over a second does not print the abbreviation for HOURS');
+//
+// Second real run, 08.09.2026, and the report was legible in every way except
+// its units:
+//
+//   4. gemini-3.6-flash · 1.6ש׳ ✓
+//   6. gemini-3.8-flash · 4.1ש׳ ✓
+//
+// `ש׳` is שעה. This bot writes hours in that vocabulary all over — /chill,
+// /quiet, "שקט ל-4 שעות" — so the one number on the screen whose entire
+// purpose is being compared at a glance read as four hours. It was four
+// seconds.
+//
+// The fix is not a better Hebrew abbreviation. The branch under a second was
+// already printing `530ms`, so `s` is the unit that agrees with its own
+// neighbour and cannot be misread in either language.
+//
+// It shipped because the suite could not see it: `withNow` pins Date.now to a
+// constant, every probe measured 0ms, and the assertion below — which existed
+// — matched the millisecond branch every time. Hence `rig.slowModels`.
+{
+  eq('under a second, milliseconds', formatDuration(530), '530ms');
+  eq('over a second, seconds', formatDuration(1600), '1.6s');
+  eq('the boundary belongs to the second', formatDuration(1000), '1.0s');
+  eq('and 999 is still milliseconds', formatDuration(999), '999ms');
+  eq("production's own number", formatDuration(4100), '4.1s');
+}
+
+// ---------------------------------------------------------------------------
+section('...and the report renders that branch, not just the fast one');
+{
+  const rig = ladderRig();
+  queueReplies(rig);
+  rig.slowModels.set('fast-two', 4100);
+
+  const out = (await withNow(NOW, () => handleSlash(rig.env, OWNER, '/models'))) ?? '';
+
+  check(`the slow rung is reported in seconds — ${JSON.stringify(out)}`,
+    /fast-two · 4\.1s ✓/.test(out), out);
+  check('nothing in the report says ש׳', !out.includes('ש׳'), out);
+  // The summary line formats the same number a second time, at a second site.
+  check('and the fastest line agrees with it', /הכי מהיר: fast-one — \d+ms/.test(out), out);
+  rig.restore();
+}
+
+// ---------------------------------------------------------------------------
+section('a probe that timed out says so in seconds too');
+//
+// The same unit bug, one file over, and worse: `Math.round(ms / 1000)` made a
+// 12-second timeout "12ש׳" — twelve hours — and anything under 500ms "0ש׳",
+// zero hours. One helper answers this question now; the prose site does not
+// get its own arithmetic.
+{
+  const rig = ladderRig();
+  queueReplies(rig);
+  rig.hangModels.add('fast-one');
+
+  // Raced, for the reason given at the ordering test above: a probe that lost
+  // its timeout never settles, and an awaited never-settling promise hangs the
+  // suite instead of failing it.
+  const raced = await withNow(NOW, () =>
+    Promise.race([
+      probeLadder(rig.env, OWNER, 50),
+      new Promise<'hung'>((r) => setTimeout(() => r('hung'), 3000)),
+    ]),
+  );
+  check('it settled', raced !== 'hung', String(raced));
+  const detail = raced === 'hung' ? '' : (raced[0].detail ?? '');
+  check(`the timeout is worded in real units — ${JSON.stringify(detail)}`,
+    /^נגמר הזמן אחרי \d+(?:\.\d)?m?s$/.test(detail), detail);
+  check('and not in hours', !detail.includes('ש׳'), detail);
+  rig.restore();
+}
+
+// ---------------------------------------------------------------------------
+section('a truncated error message says that it was truncated');
+//
+// The 140-character cut landed mid-URL:
+//
+//   You exceeded your current quota, ... head to: https://ai.google.
+//
+// which reads as a complete address that goes nowhere. A slice with no mark
+// on it is a small false claim about where the sentence ended, and this
+// codebase has exactly one rule about those.
+{
+  const long = JSON.stringify({ error: { message: `${'א'.repeat(300)}END` } });
+  const cut = errorMessage(long);
+  eq('cut to 140 plus the mark', cut.length, 141);
+  check('and it is marked', cut.endsWith('…'), cut);
+  check('the long message was still found, not the raw body',
+    !cut.includes('{'), cut);
+
+  const short = errorMessage(JSON.stringify({ error: { message: 'quota exceeded' } }));
+  eq('a message that fits is untouched', short, 'quota exceeded');
 }
 
 done();

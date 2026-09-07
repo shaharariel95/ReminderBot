@@ -77,6 +77,8 @@ const NOT_POINTERS = new Set([
   'reminders.status',       // a column
   'rig.dbFailOn', 'rig.downModels', 'rig.geminiHang', 'rig.notFoundModels',
   'rig.rejectAnyOf', 'rig.retryDelaySeconds', 'rig.speakQueue', 'rig.emptyModels',
+  'rig.slowModels',
+  'Date.now',               // the language, discussed in the testing section
 ]);
 
 /** Anything ending in a file extension is a filename, not a symbol pointer. */
