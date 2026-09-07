@@ -400,6 +400,26 @@ export async function handleSlash(
       const nickname = tail.join(' ').trim();
       const existing = db.matchFriend(friends, first);
       if (!existing) {
+        /*
+         * With exactly one friend there is nothing to disambiguate, so a single
+         * word that is NOT his current name can only be the new one.
+         *
+         * The comment above already says this, and 0.29.0 wired it to the
+         * no-argument form only. `/rename אחי` — the obvious way to type it —
+         * fell through to matchFriend, which read "אחי" as "which friend",
+         * found nothing and answered `אין לי "אחי" ברשימה. יש: "אמנון"`
+         * (production, 07.09.2026 19:22). So repairing a name he could not type
+         * still required typing it: the exact bug 0.29.0 was written to fix,
+         * surviving one branch to the left of the fix.
+         *
+         * Only when `nickname` is empty. "/rename אחי בוקר" is genuinely
+         * ambiguous between a two-word new name and a rename of somebody
+         * called "אחי", and this must not become the one place that guesses.
+         */
+        if (friends.length === 1 && !nickname) {
+          await db.renameFriend(env, chatId, friends[0].friend_chat_id, first);
+          return `מעכשיו הוא "${first}" אצלי.`;
+        }
         return `אין לי "${first}" ברשימה. יש: ${friends.map((f) => `"${f.nickname}"`).join(', ')}`;
       }
       if (!nickname) {

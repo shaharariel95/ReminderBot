@@ -1,6 +1,7 @@
 import * as db from './db';
 import type { Context } from './brain';
 import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
+import type { Friend } from './db';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDateKey, localDayBounds, wallParts, wallString, wallToUtc } from './time';
 import { asksForNewReminder, findFutureInstant, isBareTimeWord, parseDuration } from './quickparse';
@@ -309,6 +310,112 @@ function cutSelfRepeat(title: string, userText: string): string {
   return head;
 }
 
+/**
+ * Anything that is not Hebrew, Latin, a digit, punctuation or whitespace.
+ *
+ * Not `/u` on a per-character test by accident: the flag is what makes
+ * `\p{...}` mean anything at all, and without it this is a character class of
+ * literal letters p, L, S and braces. Deliberately NOT global — a `/g` regex
+ * carries `lastIndex` across `.test()` calls and would skip every other
+ * character, which is the trap CLAUDE.md already records for CLOCK and QUOTED.
+ */
+const FOREIGN_SCRIPT = /[^\p{Script=Hebrew}\p{Script=Latin}\p{N}\p{P}\p{Z}\s]/u;
+
+/**
+ * The addressee, read from HIS sentence — but only when the router named none.
+ *
+ * This is `preferHisWords` for people instead of for clocks, and it exists for
+ * the same reason: code computed the right answer and the model's answer won
+ * anyway.
+ *
+ * Production, 07.09.2026 19:21, with the address book CORRECT and every earlier
+ * friends fix in place:
+ *
+ *   him  תזכיר לאמנון עוד שתי דקות "לשלוח לשחר שעבד"
+ *   bot  קבעתי #83: "לשלוח לשחר שעבדೊ" — פעם אחת ב-07.09 בשעה 19:23.
+ *
+ * `reminders` #83 landed with `chat_id` = HIS and `from_chat_id` = NULL. The
+ * router simply did not emit `for_friend`, `applyIntent` read that field and
+ * nothing else, and the row went to him — with a confirmation that was true
+ * about everything except who it was for.
+ *
+ * The router prompt spends five lines on that field and includes the sentence
+ * "אסור לך להשמיט for_friend... זה הכי גרוע". The prompt names this exact
+ * failure as the worst one available, and there was no code behind it. A rule
+ * that matters lives in code; this is that rule finally living here.
+ *
+ * **It FILLS a gap and never overrides.** Same exclusion discipline as
+ * `preferHisWords`: if the router named somebody, that is classification and
+ * it wins, even when this disagrees.
+ *
+ * Three deliberate narrownesses, each of which cost something to learn:
+ *
+ * - **Anchored to the addressee position**, not to the message. The obvious
+ *   implementation reuses `namesSomeoneElse`, which is right there and already
+ *   returns true for the production text. It also returns true for
+ *   "תזכיר לי לקנות מתנה לדנה", because it matches the name ANYWHERE and is
+ *   documented as over-refusing on purpose. Wiring that to a write would file
+ *   his own errand in her chat — the same failure this area exists to prevent,
+ *   reached from the other side. So the name has to sit immediately after the
+ *   verb.
+ * - **Anchored to the ADDRESS BOOK**, which is what makes the bare form safe.
+ *   "תזכיר אמנון לשלוח הודעה" (no ל — how he typed the second one, which
+ *   neither existing gate sees) can only match because "אמנון" is an accepted
+ *   nickname; "תזכיר לקנות חלב" cannot match anything, because "לקנות" is not
+ *   a person he has agreed to write reminders for.
+ * - **It returns the BOOK's spelling, and decides nothing.** The name goes to
+ *   `matchFriend`, which is exact and returns null on a tie, because sending to
+ *   the wrong friend is a message in a stranger's chat he cannot see to
+ *   correct. This function widens who gets ASKED about; it does not widen who
+ *   can be written to.
+ *
+ * The residual gap, named rather than papered over: a nickname that is also an
+ * ordinary vocative ("אחי") makes "תזכיר אחי לקנות חלב" ambiguous between an
+ * addressee and "remind me, mate". The ל form is unambiguous; the bare form is
+ * a judgement, and it is made in favour of the addressee because that is the
+ * reading that matches the words in the order he typed them.
+ */
+export function friendFromHisWords(userText: string, friends: Friend[]): string | null {
+  for (const f of friends) {
+    const n = (f.nickname ?? '').trim();
+    if (n.length < 2) continue;
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Built by concatenation, not as a template literal — an unrecognised
+    // escape in a template literal loses its backslash and `\s` reads as a
+    // plain "s", which is how namesSomeoneElse once compiled to a regex that
+    // matched nothing at all.
+    const re = new RegExp(
+      '(?:^|\\s)(?:תזכיר|תזכירי|תזכירו|הזכר|הזכירי)\\s+ל?' + esc + '(?![א-ת])',
+    );
+    if (re.test(userText)) return n;
+  }
+  return null;
+}
+
+/**
+ * Drop the addressing from a title once we know who it was addressed to.
+ *
+ * #84, the same evening: "תזכיר אמנון לשלוח הודעה ב19:25" was stored with the
+ * whole command as its title, so the errand she would have been shown at 19:25
+ * was an instruction aimed at somebody else. The router produces this — it is
+ * echoing his sentence, which `titleFromHisWords` correctly allows, since the
+ * title never grows and every letter is his.
+ *
+ * Only a LEADING match is cut, and only the addressing itself. "תזכיר לדנה
+ * לקנות מתנה לדנה" keeps the second one, because that is the errand.
+ */
+export function stripAddressee(title: string, nickname: string): string {
+  const esc = nickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    '^\\s*(?:תזכיר|תזכירי|תזכירו|הזכר|הזכירי)?\\s*ל?' + esc + '(?![א-ת])[\\s,:-]*',
+  );
+  const out = title.replace(re, '').trim();
+  // Never returns empty: a title that was ONLY the addressing tells her
+  // nothing, but so does an empty one, and the caller's UNTITLED_TITLE path
+  // is wired to ask HIM rather than to guess.
+  return out || title;
+}
+
 export function titleFromHisWords(title: string, userText: string): string {
   // Nothing to compare against: button and cron paths have no message.
   if (!userText.trim()) return title;
@@ -322,8 +429,35 @@ export function titleFromHisWords(title: string, userText: string): string {
     const spill = FILLER_RUN.exec(out);
     if (spill) out = out.slice(0, spill.index);
   }
-  if (!/[A-Za-z]/.test(userText) && /[A-Za-z]/.test(out)) {
-    out = out.replace(/[A-Za-z]+/g, '');
+  /*
+   * A script he never wrote in is not a rewording of what he said.
+   *
+   * Latin is CONDITIONAL, because he uses it: reminder #81 is
+   * "לסיים את התרגומים ולפתוח pr" and the "pr" is his. So it is cut only when
+   * his message has none.
+   *
+   * Everything else is an ALLOW-list, and that is the fix. This used to be the
+   * Latin test alone, while CLAUDE.md claimed "any SCRIPT absent from his
+   * message is stripped" — a guarantee the code did not provide. Reminder #83,
+   * 07.09.2026: the stored title is "לשלוח לשחר שעבדೊ", ending in U+0CCA,
+   * KANNADA VOWEL SIGN OO. It has no Latin, so the old test could not see it;
+   * it does not repeat, so cutSelfRepeat could not; it is shorter than his
+   * message, so "extraction cannot grow" could not. He was then read it back
+   * twice, once when it was set and once when it fired.
+   *
+   * An allow-list rather than a longer block-list of scripts, deliberately.
+   * A block-list here has exactly the shape of FILLER_RUN's character classes,
+   * and issues.md §3 already argued that class of guard out: four shapes in
+   * four days, four mops, none of them the fix. There are ~160 scripts and the
+   * model can reach all of them; there are two this bot writes in.
+   *
+   * Anything he LITERALLY typed passes regardless — an emoji in his own
+   * message is his, and stripping it would be the over-correction.
+   */
+  if (!/[A-Za-z]/.test(userText)) out = out.replace(/[A-Za-z]+/g, '');
+  if (FOREIGN_SCRIPT.test(out)) {
+    const his = new Set([...userText]);
+    out = [...out].filter((c) => !FOREIGN_SCRIPT.test(c) || his.has(c)).join('');
   }
   /*
    * Extraction cannot grow.
@@ -880,7 +1014,23 @@ export async function applyIntent(
       // the duplicate check, the inbox capture and the item split are all
       // about HIS chat, and running them against hers would be answering a
       // question nobody asked.
-      if (intent.for_friend) return friendReminder(env, chatId, ctx, intent, title, userText);
+      //
+      // The `??` is the whole of 0.30.0. Until then this read `intent.for_friend`
+      // and nothing else, so a router that omitted the field wrote the row to
+      // HIM — see friendFromHisWords for the production turn and why a prompt
+      // rule was never going to hold this.
+      const addressee =
+        intent.for_friend?.trim() || friendFromHisWords(userText, ctx.friends ?? []);
+      if (addressee) {
+        return friendReminder(
+          env,
+          chatId,
+          ctx,
+          { ...intent, for_friend: addressee },
+          stripAddressee(title, addressee),
+          userText,
+        );
+      }
 
       /*
        * A bare relative push while something is RINGING is a snooze.

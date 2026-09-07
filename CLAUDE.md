@@ -55,12 +55,27 @@ one the next change will break.
 | Never claim a write that did not happen | six rules over output true by construction | `validate.validate`, `voice.renderBaseline` |
 | A guarantee is a field's **absence**, never a constraint on it | the router schema is a union; an action reading no free text has no free-text property | `brain.TEXT_FIELDS`, `brain.NO_TEXT_ACTIONS` |
 | The model classifies; **code computes** | one time resolver, one precedence order | `when.readWhen`, `effects.preferHisWords` |
+| No model-emitted field may cause a write **outside his own chat** | his sentence fills the addressee the router dropped; `matchFriend` still decides whether it resolves | `effects.friendFromHisWords`, `db.matchFriend` |
 | A bot-side close and a decline are different words at every layer | status / event / effect kind all split | `db.closeInstance`, `db.EVENT_OF` |
 | A threshold can switch a feature off, silently and for months | `/diag` says when each feature last spoke | `slash.diag` |
 | One question has **one implementation** | *nothing* | — |
 | Every write the bot makes is visible in `events` | *nothing* — convention only | `index.sendOutcome` |
 
 **The two rows that say *nothing* are the finding, not an omission.**
+
+**And a row in this table is not an invariant until the code has been audited
+against it.** The "code computes" row was written on 06.09.2026 naming
+`when.readWhen` and `effects.preferHisWords`. It was already false: the
+ADDRESSEE of a reminder was decided by a model field and nothing else, so on
+07.09.2026 a reminder for אמנון was written into the owner's own chat with a
+confirmation that was true about everything except who it was for. Writing the
+row down did not check it. The audit that should have followed it takes ten
+minutes and is worth redoing whenever a row is added — ask, for each field the
+model emits, *what happens when it is absent or wrong, and what stops that.*
+The answer for every field is now in code: times through `preferHisWords`,
+titles through `titleFromHisWords`, the addressee through `friendFromHisWords`,
+`goal_id` scoped to his own rows, and `chill_hours` / `intensity` /
+`checkin_per_day` clamped where they are read.
 
 **"One question, one implementation"** is violated whenever the same question
 is answered in two places and only one gets fixed. It has cost, so far:
@@ -312,14 +327,36 @@ Check what it was shown before blaming the router.
   type — so the accept now ASKS, through the awaiting slot, and `/rename`
   repairs the edges written before that. → `db.Awaiting` (`fname`), `slash.ts`
   (`/rename`)
-- That was the whole of "friends does not work": the requester's side resolved
-  (he picked the nickname) and the accepter's side did not. `matchFriend` is
-  exact, so a book holding "Shahar" against an owner who types "שחר" returned
-  null every time, and `friend_unknown` reported it as a polite refusal.
+- That was **one** of the reasons "friends does not work" — 0.29.0 called it the
+  whole of it and was wrong within a day. The requester's side resolved and the
+  accepter's side did not; `matchFriend` is exact, so a book holding "Shahar"
+  against an owner who types "שחר" returned null every time and `friend_unknown`
+  reported it as a polite refusal. Fixing the address book left the routing
+  broken underneath it.
+- **The addressee is read from HIS sentence when the router names none.** With
+  the book CORRECT, 07.09.2026: "תזכיר לאמנון עוד שתי דקות …" was written to the
+  OWNER, `from_chat_id` null, because `applyIntent` read the routed `for_friend` field and
+  nothing else and the model had simply not set it. The prompt spends five lines
+  on that field, including "אסור לך להשמיט for_friend … זה הכי גרוע" — a rule
+  that matters, living in the prompt. → `effects.friendFromHisWords`
+- It **fills a gap and never overrides**, exactly like `preferHisWords`: a name
+  the router DID return wins, because that is the more conservative answer — an
+  unknown one refuses, while his words resolving would write.
+  → `effects.friendFromHisWords`
+- It is anchored to the **addressee position** and to the **address book**, and
+  both anchors are load-bearing. `namesSomeoneElse` is right there and returns
+  true for the same message — and also for "תזכיר לי לקנות מתנה לדנה", because
+  it matches the name anywhere and over-refuses on purpose. Wiring that to a
+  write files his own errand in her chat. → `quickparse.namesSomeoneElse`
+- The addressing is cut from the title she is SHOWN. #84 stored "תזכיר אמנון
+  לשלוח הודעה" as the errand, which is an instruction aimed at somebody else.
+  → `effects.stripAddressee`
 - **`/rename` must not resolve through `matchFriend` alone.** `/friend <name>
   <new>` does, which meant repairing a name he could not type required typing
-  it. With one friend `/rename` asks; with several it LISTS rather than
-  guessing. → `slash.ts` (`/rename`)
+  it. With one friend `/rename <new>` renames and a bare `/rename` asks; with
+  several it LISTS rather than guessing. 0.29.0 wired the one-friend shortcut to
+  the bare form only, so `/rename אחי` still answered "אין לי אחי ברשימה" — the
+  same bug, one branch to the left. → `slash.ts` (`/rename`)
 - The nickname is still a **guess when nobody answers**, and usually in the
   wrong script. Nothing bridges Latin and Hebrew and nothing may try — the
   provisional name is a fallback, not a resolution. → `db.matchFriend`
@@ -402,7 +439,13 @@ Check what it was shown before blaming the router.
 - Two exclusions, both **closed lists of whole words**: ל-pronouns and bare day
   words. There is no shape separating "לי" from "לימד".
 - **Any SCRIPT absent from his message is stripped** from a model-supplied title.
-  Nothing downstream can see that corruption: `validate` compares the reply
+  This line was aspirational until 0.30.0 — the code tested `[A-Za-z]` and
+  nothing else, so #83 stored "לשלוח לשחר שעבדೊ", ending in U+0CCA, and read it
+  back to him twice. It is an ALLOW-list (Hebrew, Latin, digits, punctuation)
+  plus anything he literally typed, never a longer list of scripts to block:
+  there are ~160 scripts the model can reach and two this bot writes in.
+  → `effects.FOREIGN_SCRIPT`
+- Nothing downstream can see that corruption: `validate` compares the reply
   against the effect, so a title corrupted before the effect exists is reported
   faithfully. → `effects.titleFromHisWords`
 - Rewording is the router's job and survives. Extraction may not GROW.

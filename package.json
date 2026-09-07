@@ -39,6 +39,7 @@
     "test:v27": "npx tsx test/v27.test.ts",
     "test:v28": "npx tsx test/v28.test.ts",
     "test:v29": "npx tsx test/v29.test.ts",
+    "test:v29": "npx tsx test/v29.test.ts",
     "test:docs": "npx tsx test/docs.test.ts"
   },
   "devDependencies": {

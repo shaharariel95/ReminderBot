@@ -1,273 +1,358 @@
 /**
  * Run with `npm run test:v29`.
  *
- * The accepter gets to choose what he calls the person he just accepted.
+ * The friends feature, and why fixing it six times did not fix it.
  *
- * `db.matchFriend` is exact-match on purpose — guessing puts a message in a
- * stranger's chat, and that rule is not up for negotiation. But it means the
- * name in the book has to be a name the owner of that book would actually
- * type, and on the ACCEPTER's side it never was: `acceptFriend` writes the
- * reverse edge from `requester_name`, which is the requester's Telegram
- * profile string, or failing that the raw chat_id.
+ * Production, 07.09.2026, running 0.29.0 — with the address book CORRECT
+ * (`friends` holds 5909964664 → 701531870 nicknamed "אמנון", accepted, both
+ * edges present) and every previous fix in place:
  *
- * Measured against a two-brother book:
+ *   19:21  him  תזכיר לאמנון עוד שתי דקות "לשלוח לשחר שעבד"
+ *   19:22  bot  קבעתי #83: "לשלוח לשחר שעבדೊ" — פעם אחת ב-07.09 בשעה 19:23.
+ *   19:23  bot  נו? לשלוח לשחר שעבדo.          ← rang in HIS chat
  *
- *   book=[אחי]      typed "אחי"   → אחי    the requester's side: he chose it
- *   book=[Shahar]   typed "שחר"   → NULL   the accepter's side: he never did
- *   book=[bro]      typed "אחי"   → NULL
+ * `reminders` #83: `chat_id = 5909964664`, `from_chat_id = NULL`. `events`
+ * #240: `נקבעה`. It was written to him, and he was told it was set, and the
+ * only thing wrong with the sentence is who it was about.
  *
- * So one direction of every friendship in this bot works and the other does
- * not, and the failure is silent in the way that matters: `friend_unknown`
- * is a polite refusal, so it reads as "this feature does not work" rather
- * than as "rename the row".
+ * ROOT CAUSE, and it is not a new bug — it is the same bug the last six fixes
+ * each addressed one downstream consequence of:
  *
- * And the documented repair was a catch-22. `/friend <name> <new>` resolves
- * <name> through matchFriend first, so renaming the name he cannot type
- * required typing it. `/friends` and a copy-paste was the only way through,
- * and nothing said so.
+ *   **The addressee is decided by the model, and by nothing else.**
  *
- * The fix is the one this codebase reaches for everywhere else: ASK. The
- * accept is already a message in his chat, so it can carry the question, and
- * the answer goes through the awaiting slot that exists for exactly this.
+ * `applyIntent` routes to a friend if and only if `intent.for_friend` is set.
+ * The router prompt spends five lines on that field, including the sentence
+ * "אסור לך להשמיט for_friend... זה הכי גרוע" — the prompt names this exact
+ * failure as the worst one available and there is no code behind it. This
+ * repository's first rule is that a rule which matters lives in code.
  *
- * Note what is NOT changed. `acceptFriend` still writes the provisional name,
- * because an unanswered question must leave a working edge rather than a
- * blank one — the question refines it, it is not load-bearing. And
- * matchFriend still refuses to guess.
+ * And the deterministic answer WAS ALREADY COMPUTED. `namesSomeoneElse`
+ * returns true for that message (verified against the production text). It is
+ * used to make quickparse bail, and then its answer is thrown away the moment
+ * the router returns — so the one component that knew the message was
+ * addressed to somebody else had no say in where the row went.
+ *
+ * That is precisely the shape `preferHisWords` fixed for TIME in 0.16.0: code
+ * computed the right answer, the model's answer won anyway, and the fix was a
+ * precedence flip rather than a better prompt. `friendFromHisWords` is the
+ * same flip for the addressee — it FILLS a gap and never overrides, exactly
+ * like `preferHisWords`, and it hands the name to `matchFriend`, which is
+ * still the only thing allowed to decide whether a name resolves.
+ *
+ * Two things it deliberately does NOT do, both from CLAUDE.md:
+ *   - it does not read the name from anywhere in the sentence. `namesSomeoneElse`
+ *     over-refuses on purpose and returns true for "תזכיר לי לקנות מתנה לדנה",
+ *     which is HIS errand. The name has to be in the addressee position.
+ *   - it does not resolve near-misses. `matchFriend` is exact and returns null
+ *     on a tie, because sending to the wrong friend is a message in a
+ *     stranger's chat that he cannot see to correct.
  */
 import worker from '../src/index';
+import { friendFromHisWords, titleFromHisWords } from '../src/effects';
 import { handleSlash } from '../src/slash';
-import { encode } from '../src/buttons';
 import * as db from '../src/db';
-import { check, createRig, done, eq, section, type Rig } from './harness';
+import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 
 const HIM = '12345';
 const HER = '999';
+const TZ = 'Asia/Jerusalem';
 
-async function post(rig: Rig, body: unknown): Promise<void> {
-  const pending: Promise<unknown>[] = [];
-  const ctx: any = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {} };
-  const req = new Request('https://x/tg', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
-    },
-    body: JSON.stringify(body),
+function seedFriend(rig: Rig, nickname = 'אמנון'): void {
+  rig.db
+    .prepare(
+      `INSERT INTO friends (chat_id, friend_chat_id, nickname, status, requested_by, created_at)
+       VALUES (?,?,?,'accepted',?,0)`,
+    )
+    .run(HIM, HER, nickname, HIM);
+  rig.db
+    .prepare(
+      `INSERT INTO friends (chat_id, friend_chat_id, nickname, status, requested_by, created_at)
+       VALUES (?,?,'שחר','accepted',?,0)`,
+    )
+    .run(HER, HIM, HIM);
+}
+
+function seedSettings(rig: Rig, chat: string): void {
+  rig.db
+    .prepare(
+      `INSERT INTO settings (chat_id, tz, intensity, checkins_enabled, checkin_per_day,
+        quiet_start_hour, quiet_end_hour, next_checkin_at, brief_hour, closeout_hour,
+        last_brief_on, last_closeout_on)
+       VALUES (?, ?, 2, 0, 0, 23, 8, NULL, NULL, NULL, NULL, NULL)`,
+    )
+    .run(chat, TZ);
+}
+
+async function say(rig: Rig, text: string, at: number): Promise<void> {
+  await withNow(at, async () => {
+    const pending: Promise<unknown>[] = [];
+    const ctx: any = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {} };
+    await worker.fetch(
+      new Request('https://x/tg', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-telegram-bot-api-secret-token': rig.env.TELEGRAM_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({ message: { chat: { id: Number(HIM) }, text, message_id: 11 } }),
+      }),
+      rig.env, ctx,
+    );
+    await Promise.all(pending);
   });
-  await worker.fetch(req, rig.env, ctx);
-  await Promise.all(pending);
 }
 
-async function runWebhook(rig: Rig, text: string, chatId = HIM): Promise<void> {
-  await post(rig, {
-    message: { chat: { id: Number(chatId) }, from: { id: Number(chatId) }, text, message_id: 999 },
-  });
-}
-
-async function runCallback(rig: Rig, data: string, chatId: string): Promise<void> {
-  await post(rig, {
-    callback_query: {
-      id: 'cb1',
-      from: { id: Number(chatId) },
-      message: { message_id: 555, chat: { id: Number(chatId) } },
-      data,
-    },
-  });
-}
-
-async function twoUsers(rig: Rig): Promise<void> {
-  await db.setAllowedChats(rig.env, [HER]);
-  await db.getSettings(rig.env, HIM);
-  await db.getSettings(rig.env, HER);
-}
-
-const lastTo = (rig: Rig, chat: string) =>
-  [...rig.sent].reverse().find((s) => s.chat_id === chat)?.text ?? '';
+const NOW = Date.parse('2026-09-07T16:21:38Z');
+const rows = (rig: Rig) =>
+  rig.db.prepare('SELECT id, chat_id, title, from_chat_id FROM reminders').all() as any[];
 
 // ===========================================================================
-section('accepting asks the accepter what to call him');
+section('the router drops for_friend — the row still does not land on him');
 //
-// HIM requests, under the Telegram profile name "Shahar". HER accepts. Before
-// this, HER's book silently held "Shahar" and she was done — with a name she
-// would never type.
+// The exact production turn. The router is given a create_reminder with NO
+// for_friend, which is what it actually returned.
 {
-  const rig = createRig();
-  await twoUsers(rig);
-  await handleSlash(rig.env, HIM, `/friend ${HER} דנה`, 'Shahar');
-  await runCallback(rig, encode({ t: 'facc', from: HIM }), HER);
+  const rig = createRig({ tz: TZ });
+  seedSettings(rig, HIM);
+  seedSettings(rig, HER);
+  seedFriend(rig);
 
-  check(
-    'she is asked what to call him',
-    /איך תקרא לו|איך לקרוא לו/.test(lastTo(rig, HER)),
-    `she got: ${lastTo(rig, HER)}`,
-  );
-
-  const slot = db.readAwaiting((await db.getSettings(rig.env, HER)).awaiting);
-  eq('and the question is recorded', slot?.k, 'fname');
-
-  // The provisional name still lands, so an unanswered question leaves a
-  // usable edge rather than a blank one.
-  eq(
-    'the edge exists meanwhile, under the provisional name',
-    (await db.friendEdge(rig.env, HER, HIM))?.nickname,
-    'Shahar',
-  );
-  rig.restore();
-}
-
-// ---------------------------------------------------------------------------
-section('her answer is the name, and it is the name that resolves');
-{
-  const rig = createRig();
-  await twoUsers(rig);
-  await handleSlash(rig.env, HIM, `/friend ${HER} דנה`, 'Shahar');
-  await runCallback(rig, encode({ t: 'facc', from: HIM }), HER);
-
-  // Assert the slot is OPEN first. Without this, "the slot is cleared" below
-  // passes on a slot that was never set — vacuity mode 7, and it did exactly
-  // that on the first run of this file.
-  eq(
-    'the slot is open before she answers',
-    db.readAwaiting((await db.getSettings(rig.env, HER)).awaiting)?.k,
-    'fname',
-  );
-
-  await runWebhook(rig, 'אחי', HER);
-
-  eq(
-    'the edge is renamed to what she typed',
-    (await db.friendEdge(rig.env, HER, HIM))?.nickname,
-    'אחי',
-  );
-  // The whole point: this is the lookup that used to return null.
-  check(
-    'and that name now resolves',
-    db.matchFriend(await db.friendsOf(rig.env, HER), 'אחי')?.friend_chat_id === HIM,
-    'matchFriend still cannot find him',
-  );
-  eq(
-    'the slot is cleared',
-    db.readAwaiting((await db.getSettings(rig.env, HER)).awaiting),
-    null,
-  );
-  // No model call: the answer to the bot's own question is applied by code,
-  // exactly as `time` and `title` are.
-  eq('and it cost no router call', rig.geminiCalls.filter((c) => c.kind === 'router').length, 0);
-  rig.restore();
-}
-
-// ---------------------------------------------------------------------------
-section('an open naming question does not eat a real request');
-//
-// The same guard `title` uses, and for the same reason: if she opens a new
-// request instead of answering, taking it as a nickname loses the request AND
-// writes a nonsense name. asksForNewReminder is the one gate that decides
-// this, in both places.
-{
-  const rig = createRig();
-  await twoUsers(rig);
-  await handleSlash(rig.env, HIM, `/friend ${HER} דנה`, 'Shahar');
-  await runCallback(rig, encode({ t: 'facc', from: HIM }), HER);
-
-  // It has to reach the router, which is the proof it was not eaten here.
   rig.routerQueue.push({
-    actions: [{ action: 'create_reminder', title: 'לקנות חלב', schedule_type: 'once', time: '09:00' }],
+    actions: [{ action: 'create_reminder', title: 'לשלוח לשחר שעבד', in_minutes: 2 }],
   });
-  rig.speakQueue.push('רשמתי.');
-  await runWebhook(rig, 'תזכיר לי מחר לקנות חלב', HER);
+  rig.speakQueue.push('סידרתי.');
+  await say(rig, 'תזכיר לאמנון עוד שתי דקות "לשלוח לשחר שעבד"', NOW);
 
-  eq(
-    'the provisional name is untouched',
-    (await db.friendEdge(rig.env, HER, HIM))?.nickname,
-    'Shahar',
-  );
-  check(
-    'and a reminder was actually taken',
-    (await db.listReminders(rig.env, HER)).length + (await db.listInbox(rig.env, HER)).length > 0,
-    'the request was swallowed as a nickname',
-  );
+  const all = rows(rig);
+  eq('exactly one row was written', all.length, 1);
+  check(`and it is in HER chat, not his — ${JSON.stringify(all[0])}`,
+    all[0]?.chat_id === HER, JSON.stringify(all));
+  eq('stamped with the sender so she knows who set it', String(all[0]?.from_chat_id), HIM);
+  check('the errand travelled, without the addressing',
+    all[0]?.title?.includes('לשלוח'), JSON.stringify(all[0]));
+}
+
+// ---------------------------------------------------------------------------
+section('...and without the ל, which is how he actually typed the second one');
+//
+// 19:23, the same evening: "תזכיר אמנון לשלוח הודעה ב19:25" became #84 in HIS
+// chat, titled with the whole command. Neither existing gate sees this one —
+// `namesSomeoneElse` requires a ל before the name and `addressesSomeoneElse`
+// requires one after the verb — so quickparse did not even bail.
+//
+// Anchoring to the ADDRESS BOOK is what makes the bare form safe: only an
+// exact nickname matches, so "תזכיר לקנות חלב" cannot trip it.
+{
+  const rig = createRig({ tz: TZ });
+  seedSettings(rig, HIM);
+  seedSettings(rig, HER);
+  seedFriend(rig);
+
+  // The title is the one production actually stored for #84: the whole
+  // command, addressing included. titleFromHisWords allows it — every letter
+  // is his and it does not grow — so what she would have been shown at 19:25
+  // is an instruction aimed at somebody else.
+  rig.routerQueue.push({
+    actions: [
+      { action: 'create_reminder', title: 'תזכיר אמנון לשלוח הודעה', once_at: '2026-09-07T19:25' },
+    ],
+  });
+  rig.speakQueue.push('אוקיי.');
+  await say(rig, 'תזכיר אמנון לשלוח הודעה ב19:25', NOW);
+
+  const all = rows(rig);
+  eq('one row', all.length, 1);
+  check(`in her chat — ${JSON.stringify(all[0])}`, all[0]?.chat_id === HER, JSON.stringify(all));
+  check(`and the addressing is not what she is shown — ${all[0]?.title}`,
+    !String(all[0]?.title).includes('אמנון'), String(all[0]?.title));
+  check('the errand survived it', String(all[0]?.title).includes('לשלוח הודעה'),
+    String(all[0]?.title));
+}
+
+// ---------------------------------------------------------------------------
+section('when the router DID name somebody, it wins — this only fills a gap');
+//
+// The `preferHisWords` exclusion, and the safer direction of the two. Naming
+// the addressee is classification and that is the model's job; a router that
+// names an unknown person reaches `friend_unknown` and REFUSES, whereas his
+// words resolving to a known friend would write. So the model's answer is
+// allowed to be the more conservative one.
+{
+  const rig = createRig({ tz: TZ });
+  seedSettings(rig, HIM);
+  seedSettings(rig, HER);
+  seedFriend(rig);
+
+  rig.routerQueue.push({
+    actions: [
+      { action: 'create_reminder', title: 'לקנות חלב', for_friend: 'רותי', in_minutes: 5 },
+    ],
+  });
+  rig.speakQueue.push(new Error('persona down'));
+  await say(rig, 'תזכיר לאמנון לקנות חלב', NOW);
+
+  eq('the router named somebody unknown, so nothing was written', rows(rig).length, 0);
+  const texts = rig.texts().join(' | ');
+  check(`and his words did not quietly overrule it — ${texts}`,
+    !texts.includes('קבעתי'), texts);
+}
+
+// ---------------------------------------------------------------------------
+section('"תזכיר לי" is always his, even with her name later in the sentence');
+//
+// The reason this reads the ADDRESSEE POSITION and not the whole message.
+// `namesSomeoneElse` returns TRUE for this text — it matches "לדנה" anywhere
+// and is documented as over-refusing — so using it as the backstop would file
+// his own errand in her chat, which is the failure this whole area exists to
+// prevent, arrived at from the opposite direction.
+{
+  const rig = createRig({ tz: TZ });
+  seedSettings(rig, HIM);
+  seedSettings(rig, HER);
+  seedFriend(rig, 'דנה');
+
+  rig.routerQueue.push({
+    actions: [{ action: 'create_reminder', title: 'לקנות מתנה לדנה', in_minutes: 60 }],
+  });
+  rig.speakQueue.push('רשום.');
+  await say(rig, 'תזכיר לי לקנות מתנה לדנה', NOW);
+
+  const all = rows(rig);
+  eq('one row', all.length, 1);
+  check(`and it is HIS — ${JSON.stringify(all[0])}`, all[0]?.chat_id === HIM, JSON.stringify(all));
+}
+
+// ---------------------------------------------------------------------------
+section('it FILLS a gap and never overrides — same rule as preferHisWords');
+{
+  const friends = [
+    { chat_id: HIM, friend_chat_id: HER, nickname: 'אמנון', status: 'accepted' } as any,
+  ];
+  eq('the model said nothing, so his words are read',
+    friendFromHisWords('תזכיר לאמנון לשלוח הודעה', friends), 'אמנון');
+  eq('a message that names nobody in the book yields nothing',
+    friendFromHisWords('תזכיר לי לקנות חלב', friends), null);
+  eq('and an errand that merely starts with ל is not a person',
+    friendFromHisWords('תזכיר לקנות חלב', friends), null);
+}
+
+// ---------------------------------------------------------------------------
+section('a name the book does not hold is still a refusal, never a self-write');
+//
+// friendFromHisWords only ever produces a name that is already in the book, so
+// this path is unchanged: the model names somebody unknown, matchFriend returns
+// null, and friendReminder refuses. What must never happen is the refusal
+// degrading into a row in his own chat.
+{
+  const rig = createRig({ tz: TZ });
+  seedSettings(rig, HIM);
+  seedFriend(rig);
+
+  rig.routerQueue.push({
+    actions: [{ action: 'create_reminder', title: 'לקנות חלב', for_friend: 'רותי', in_minutes: 5 }],
+  });
+  // The persona is failed on purpose so the DETERMINISTIC baseline ships. A
+  // stubbed rewrite would be asserting on the fixture: the first draft queued
+  // "מי?" and the check passed or failed on that string rather than on what
+  // voice.ts actually says about an unresolvable name.
+  rig.speakQueue.push(new Error('persona down'));
+  await say(rig, 'תזכיר לרותי לקנות חלב', NOW);
+
+  eq('nothing was written anywhere', rows(rig).length, 0);
+  const texts = rig.texts().join(' | ');
+  check(`and he is told which names exist — ${texts}`, texts.includes('אמנון'), texts);
+}
+
+// ---------------------------------------------------------------------------
+section('a script he never typed is stripped, whatever script it is');
+//
+// #83's stored title is "לשלוח לשחר שעבדೊ" — the last codepoint is U+0CCA,
+// KANNADA VOWEL SIGN OO. CLAUDE.md claims "any SCRIPT absent from his message
+// is stripped from a model-supplied title". The code only ever knew Latin:
+//
+//   if (!/[A-Za-z]/.test(userText) && /[A-Za-z]/.test(out)) ...
+//
+// so a Kannada vowel sign walked past it, past cutSelfRepeat and past the
+// filler cut, and "extraction cannot grow" did not fire because the title is
+// shorter than the message. It was then read back to him twice.
+//
+// The replacement is an ALLOW-list (Hebrew and Latin), not another block-list.
+// A block-list of scripts has the same shape as FILLER_RUN's characters, and
+// issues.md §3 already argued that class of guard does not converge.
+{
+  const his = 'תזכיר לאמנון עוד שתי דקות "לשלוח לשחר שעבד"';
+  eq('the Kannada sign is gone',
+    titleFromHisWords('לשלוח לשחר שעבדೊ', his), 'לשלוח לשחר שעבד');
+  eq('and so is anything else he did not write in',
+    titleFromHisWords('לשלוח מסמך κείμενο', his), 'לשלוח מסמך');
+  eq('Hebrew he did not literally type still survives — rewording is allowed',
+    titleFromHisWords('לשגר הודעה לשחר', his), 'לשגר הודעה לשחר');
+  eq('Latin survives when he used Latin',
+    titleFromHisWords('לפתוח pr', 'תזכיר לי לפתוח pr'), 'לפתוח pr');
+  eq('and is still cut when he did not',
+    titleFromHisWords('לשלוח note', his), 'לשלוח');
+  // The exemption, and the reason this is not a blanket script filter: an
+  // emoji he typed himself is HIS, and stripping it would be the
+  // over-correction. Same shape as the conditional Latin cut above.
+  eq('a character he typed himself survives, whatever script it is',
+    titleFromHisWords('לשלוח לשחר 🐟', 'תזכיר לי לשלוח לשחר 🐟'), 'לשלוח לשחר 🐟');
+  eq('but the same character invented by the model does not',
+    titleFromHisWords('לשלוח לשחר 🐟', 'תזכיר לי לשלוח לשחר'), 'לשלוח לשחר');
+}
+
+// ---------------------------------------------------------------------------
+section('/rename with one friend takes the new name directly');
+//
+// 19:22: `/rename אחי` answered "אין לי \"אחי\" ברשימה. יש: \"אמנון\"".
+//
+// With exactly ONE friend there is nothing to disambiguate — the comment above
+// the handler says so — but the shortcut was only wired to the NO-argument
+// form. One argument fell through to matchFriend, which read it as "which
+// friend", found nothing, and refused. The repair for a name he could not type
+// still required typing it, which is the same bug 0.29.0 was written to fix,
+// surviving in the neighbouring branch.
+{
+  const rig = createRig({ tz: TZ });
+  seedFriend(rig);
+  const out = (await handleSlash(rig.env, HIM, '/rename אחי')) ?? '';
+  check(`it renamed rather than refused — ${out}`, !out.includes('אין לי'), out);
+  check('and says the new name', out.includes('אחי'), out);
+  const f = await db.friendsOf(rig.env, HIM);
+  eq('the edge really moved', f[0]?.nickname, 'אחי');
   rig.restore();
 }
 
 // ---------------------------------------------------------------------------
-section('/rename repairs a friendship that is already misnamed');
-//
-// The edges that exist today were named before any of this, so the fix has to
-// reach them too. With ONE friend there is nothing to disambiguate, so it asks
-// the same question rather than inventing a selection UI.
+section('...but with two friends it still lists rather than guessing');
 {
-  const rig = createRig();
-  await twoUsers(rig);
-  await db.requestFriend(rig.env, HIM, HER, 'דנה');
-  await db.acceptFriend(rig.env, HER, HIM, 'Shahar');
-
-  const said = (await handleSlash(rig.env, HER, '/rename', 'Dana')) ?? '';
-  check('it asks', /איך תקרא לו|איך לקרוא לו/.test(said), `got: ${said}`);
-  eq(
-    'and records the question',
-    db.readAwaiting((await db.getSettings(rig.env, HER)).awaiting)?.k,
-    'fname',
-  );
-
-  await runWebhook(rig, 'אחי', HER);
-  eq(
-    'her answer renames it',
-    (await db.friendEdge(rig.env, HER, HIM))?.nickname,
-    'אחי',
-  );
+  const rig = createRig({ tz: TZ });
+  seedFriend(rig);
+  rig.db
+    .prepare(
+      `INSERT INTO friends (chat_id, friend_chat_id, nickname, status, requested_by, created_at)
+       VALUES (?,?,'רותי','accepted',?,0)`,
+    )
+    .run(HIM, '777', HIM);
+  const out = (await handleSlash(rig.env, HIM, '/rename אחי')) ?? '';
+  check(`it refuses to pick — ${out}`, out.includes('אמנון') && out.includes('רותי'), out);
+  const f = await db.friendsOf(rig.env, HIM);
+  check('and nothing was renamed', f.every((x) => x.nickname !== 'אחי'),
+    JSON.stringify(f.map((x) => x.nickname)));
   rig.restore();
 }
 
 // ---------------------------------------------------------------------------
-section('with more than one friend it lists them instead of guessing');
+section('renaming the one friend by his current name still asks');
 //
-// matchFriend returns null on a tie and this must not be the one place that
-// breaks that rule: picking for her is a message in the wrong chat.
+// `/rename אמנון` with one friend is genuinely ambiguous — "rename אמנון to
+// what?" or "rename him to אמנון?" — so the existing question stays. The
+// one-friend shortcut only fires when the word is NOT the name he already has.
 {
-  const rig = createRig();
-  await db.setAllowedChats(rig.env, [HER, '777']);
-  await db.getSettings(rig.env, HIM);
-  await db.getSettings(rig.env, HER);
-  await db.getSettings(rig.env, '777');
-  await db.requestFriend(rig.env, HIM, HER, 'דנה');
-  await db.acceptFriend(rig.env, HER, HIM, 'Shahar');
-  await db.requestFriend(rig.env, '777', HER, 'דנה');
-  await db.acceptFriend(rig.env, HER, '777', 'Amnon');
-
-  const said = (await handleSlash(rig.env, HER, '/rename', 'Dana')) ?? '';
-  check('both names are shown', /Shahar/.test(said) && /Amnon/.test(said), `got: ${said}`);
-  eq(
-    'and nothing is asked, because there is nothing to answer',
-    db.readAwaiting((await db.getSettings(rig.env, HER)).awaiting),
-    null,
-  );
+  const rig = createRig({ tz: TZ });
+  seedFriend(rig);
+  const out = (await handleSlash(rig.env, HIM, '/rename אמנון')) ?? '';
+  check(`it asks for the new name — ${out}`, out.includes('איך תקרא'), out);
   rig.restore();
-}
-
-// ---------------------------------------------------------------------------
-section('the slot validates like every other arm');
-//
-// readAwaiting is exhaustive with a `never` default precisely so a new arm
-// cannot be written and read back as null forever. A malformed one must still
-// be refused rather than trusted.
-{
-  const now = Date.now();
-  eq(
-    'a good one reads back',
-    db.readAwaiting(JSON.stringify({ k: 'fname', c: HIM, at: now }), now)?.k,
-    'fname',
-  );
-  eq(
-    'one with no chat id is refused',
-    db.readAwaiting(JSON.stringify({ k: 'fname', at: now }), now),
-    null,
-  );
-  eq(
-    'and a stale one is gone',
-    db.readAwaiting(JSON.stringify({ k: 'fname', c: HIM, at: now - 31 * 60_000 }), now),
-    null,
-  );
 }
 
 done();
