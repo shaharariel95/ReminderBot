@@ -73,11 +73,26 @@ section('the ladder is as deep as the free tier is wide');
     'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
   ];
   for (const m of free) {
     check(`${m} is a rung`, configured.includes(m), configured.join(' · '));
+  }
+
+  /*
+   * The 2.5 pair are NOT rungs, and this assertion is the one that changed.
+   *
+   * It used to require them, on the strength of the published free-tier list
+   * on 06.09.2026. `/models` asked them directly on 08.09.2026 and both
+   * answered `404 — This model ... is no longer available`. That is the whole
+   * of what 0.26.0 predicted: "a previous 404 is evidence and a docs page is
+   * only a claim… if they are still dead, /diag names them."
+   *
+   * Asserted as an ABSENCE so putting them back needs a deliberate edit here
+   * as well, with something better than a listing behind it.
+   */
+  for (const dead of ['gemini-2.5-flash', 'gemini-2.5-flash-lite']) {
+    check(`${dead} is retired and off the ladder`, !configured.includes(dead),
+      configured.join(' · '));
   }
   check('every rung is distinct', new Set(configured).size === configured.length,
     configured.join(' · '));
@@ -108,15 +123,12 @@ section('a newer model is not thereby a better one');
       configured.indexOf('gemini-3.6-flash') < configured.indexOf('gemini-3.8-flash'),
     configured.join(' · '),
   );
-  // The 2.5 pair 404'd in production on 19.08.2026 and were deleted for it.
-  // The published list says they are free-tier today, so they are back — LAST,
-  // because a previous 404 is evidence and a docs page is only a claim. If
-  // they 404 again, blockFor writes them off for six hours and /diag names
-  // them, which is the whole reason a stale id here is cheap.
+  // Every rung is one that has ANSWERED, which is the state this whole file
+  // was arguing towards. The 2.5 pair were the last two that had not, and
+  // /models settled them on 08.09.2026 — see the absence check above.
   check(
-    'the two that 404\'d in August sit at the bottom',
-    configured.indexOf('gemini-2.5-flash-lite') >= configured.length - 2 &&
-      configured.indexOf('gemini-2.5-flash') >= configured.length - 2,
+    'nothing on the ladder is a known-retired id',
+    !configured.some((m) => m.startsWith('gemini-2.5')),
     configured.join(' · '),
   );
 }

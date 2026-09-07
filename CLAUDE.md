@@ -529,6 +529,17 @@ Check what it was shown before blaming the router.
   stagger is the only concession, against a project-wide concurrency limit.
   → `gemini.probeLadder`
 - A 200 with no text is **not** a working model — a safety block returns
+- **The probe sends production's numbers, not cheap ones.** It shipped with
+  `maxOutputTokens: 16` and no thinkingConfig, and its first real run scored
+  3.7, 3.6 and 3.8 as empty: sixteen tokens went entirely on reasoning and the
+  answer never began. `buildBody` states the rule three lines above itself. A
+  probe measuring a different configuration measures a different thing.
+- The finishReason rides along with an empty result. ריק alone was not
+  diagnosable — the cause was the probe, and a MAX_TOKENS would have said so.
+- **A bounded run in an error regex fails on exactly the errors worth reading.**
+  `[^"]{0,120}` must find the closing quote inside the bound, so a long message
+  matched nothing and the report printed the raw pretty-printed JSON instead.
+  → `gemini.errorMessage`
   exactly that. Same rule as `finishReason`, one level out.
 - Usage IS recorded. The probe really does spend quota, and a `/diag` number
   that quietly excluded it would be wrong.

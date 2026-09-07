@@ -126,7 +126,12 @@ async function withinRateWindow(env: Env, model: string, decorative: boolean): P
  * Sending the wrong one returns a bare 400 INVALID_ARGUMENT that doesn't name
  * the offending field, so we guess from the model id and fall back below.
  */
-function thinkingConfig(model: string, opts: GenerateOpts): Record<string, unknown> {
+function thinkingConfig(
+  model: string,
+  /** Widened from GenerateOpts so the probe can ask for production's defaults
+   *  without inventing a system prompt and a contents array to carry them. */
+  opts: { thinkingLevel?: 'low' | 'high'; thinkingBudget?: number },
+): Record<string, unknown> {
   const gen = /gemini-(\d+)/.exec(model)?.[1];
   const isLegacy = gen === '1' || gen === '2';
   return isLegacy
@@ -250,6 +255,26 @@ export interface ModelProbe {
 const PROBE_TIMEOUT_MS = 12_000;
 
 /**
+ * The one sentence out of a Gemini error body, on one line.
+ *
+ * The first version was `/"message"\s*:\s*"([^"]{0,120})"/` and it failed on
+ * exactly the errors worth reading. A bounded run of non-quote characters must
+ * still find the closing quote INSIDE the bound, so a message longer than 120
+ * characters matches nothing at all and falls through to the raw body — which
+ * is pretty-printed JSON, so the report gained four lines of `{ "error": {`
+ * and lost the sentence. Production, 08.09.2026: the 429 explaining a spent
+ * daily quota rendered as its own opening brace.
+ *
+ * Unbounded run, escapes honoured, sliced afterwards. Newlines collapsed
+ * because this is printed inside an indented list.
+ */
+export function errorMessage(body: string): string {
+  const m = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
+  const raw = m ? m[1].replace(/\\n/g, ' ').replace(/\\"/g, '"') : body;
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 140);
+}
+
+/**
  * Ask one model the cheapest possible question and time it.
  *
  * Deliberately NOT `generate()`. That walks the ladder, honours the health
@@ -285,22 +310,44 @@ export async function probeModel(
       model,
       {
         contents: [{ role: 'user', parts: [{ text: 'say OK' }] }],
-        generationConfig: { maxOutputTokens: 16, temperature: 0 },
+        generationConfig: {
+          temperature: 0,
+          /*
+           * 2000, the same ceiling production uses, and NOT the 16 this
+           * shipped with in 0.34.0.
+           *
+           * `buildBody` says why three lines above itself — "reasoning tokens
+           * are drawn from this same budget" — and the probe was written past
+           * that comment. Its first real run, 08.09.2026, scored 3.7, 3.6 and
+           * 3.8 as `ריק`: HTTP 200, no candidates. They are the thinking
+           * generation, sixteen tokens went entirely on thoughts, and the
+           * answer never started. Three working models reported broken by the
+           * command whose one job is not to lie about them.
+           *
+           * The number is not a guess to be tuned. It is the number the real
+           * calls use, because a probe measuring a different budget is
+           * measuring a different thing.
+           */
+          maxOutputTokens: 2000,
+          // Same reason: 3.x models think unless told how much, and production
+          // tells them `low`. Sending no thinkingConfig at all — which is what
+          // 0.34.0 did — measures a configuration this bot never uses.
+          thinkingConfig: thinkingConfig(model, {}),
+        },
       },
       AbortSignal.timeout(Math.max(1, timeoutMs)),
     );
     const ms = Date.now() - t0;
     const body = await res.text().catch(() => '');
     if (!res.ok) {
-      // The message, not the whole envelope. Google's 404 body is 400 bytes of
-      // JSON whose useful half is one sentence.
-      const msg = /"message"\s*:\s*"([^"]{0,120})"/.exec(body)?.[1] ?? body.slice(0, 90);
-      return { model, status: res.status, ms, ok: false, detail: msg };
+      return { model, status: res.status, ms, ok: false, detail: errorMessage(body) };
     }
     await db.recordUsage(env, model, chatId).catch(() => {});
     let text = '';
+    let finish = 'unknown';
     try {
       const json = JSON.parse(body);
+      finish = json?.candidates?.[0]?.finishReason ?? 'unknown';
       text = (json?.candidates?.[0]?.content?.parts ?? [])
         .map((p: any) => p.text ?? '')
         .join('')
@@ -308,11 +355,14 @@ export async function probeModel(
     } catch {
       return { model, status: res.status, ms, ok: false, detail: 'תשובה לא תקינה' };
     }
-    // A 200 with no text is not a working model. MAX_TOKENS on a 16-token
-    // ceiling is fine and still counts as answering.
+    // A 200 with no text is not a working model — a safety block returns
+    // exactly that. The finishReason is carried into the report because
+    // "ריק" on its own was not diagnosable: three rungs said it on 08.09.2026
+    // and the cause was this probe's own token ceiling, which a MAX_TOKENS
+    // here would have named immediately.
     return text
       ? { model, status: res.status, ms, ok: true, detail: text.slice(0, 40) }
-      : { model, status: res.status, ms, ok: false, detail: 'ריק' };
+      : { model, status: res.status, ms, ok: false, detail: `ריק (${finish})` };
   } catch (err) {
     const ms = Date.now() - t0;
     return {
@@ -465,11 +515,17 @@ const TIER_DOWN = new Set([429, 503, 404]);
  *   3.1-flash-lite, 3.8-flash   published free-tier, never called here
  *   2.5-flash-lite, 2.5-flash   404'd in production on 19.08.2026
  *
- * The 2.5 pair were deleted for those 404s and are back at the bottom because
- * the published list carries them with a free tier again (checked 06.09.2026).
- * A previous 404 is evidence and a docs page is only a claim, so they go last:
- * if they are still dead, blockFor writes them off for six hours and /diag
- * names them, which is exactly what makes a stale id here cheap.
+ * `gemini-2.5-flash` and `gemini-2.5-flash-lite` ARE GONE, and this is the
+ * second and last time. They were deleted on 19.08.2026 for 404ing, put back
+ * on 06.09.2026 because the published free-tier list carried them again, and
+ * removed for good on 08.09.2026 when /models asked them directly:
+ *
+ *   7. gemini-2.5-flash-lite · 404 ✗   This model ... is no longer available
+ *   8. gemini-2.5-flash      · 404 ✗   This model ... is no longer available
+ *
+ * That is the loop 0.26.0 described closing exactly as written — "a previous
+ * 404 is evidence and a docs page is only a claim" — and the docs page lost.
+ * Do not add them back on the strength of a listing; ask them with /models.
  *
  * `gemini-3.8-flash` is the highest number published and is deliberately sixth
  * — the docs describe it as built for "long-horizon software engineering",
@@ -483,8 +539,6 @@ const DEFAULT_LADDER = [
   'gemini-3.6-flash',
   'gemini-3.1-flash-lite',
   'gemini-3.8-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash',
 ];
 
 /**

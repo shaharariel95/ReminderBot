@@ -31,7 +31,7 @@
  * report would simply never arrive.
  */
 import { handleSlash } from '../src/slash';
-import { probeLadder, modelLadder } from '../src/gemini';
+import { probeLadder, modelLadder, errorMessage } from '../src/gemini';
 import * as db from '../src/db';
 import { check, createRig, done, eq, section, withNow, type Rig } from './harness';
 
@@ -177,6 +177,79 @@ section('it says whether the rung that leads is the one that was fastest');
 }
 
 // ---------------------------------------------------------------------------
+section('the probe asks the same question production asks');
+//
+// 0.35.0, and the first real run is what found it. `/models` shipped in 0.34.0
+// sending `maxOutputTokens: 16` and no thinkingConfig at all, and on
+// 08.09.2026 it scored gemini-3.7-flash, gemini-3.6-flash and gemini-3.8-flash
+// as `ריק` — HTTP 200, no candidates. Those are the thinking generation:
+// sixteen tokens went entirely on reasoning and the answer never began.
+//
+// Three working models reported broken by the one command whose whole job is
+// not to lie about them. `buildBody` states the rule three lines above itself
+// — "reasoning tokens are drawn from this same budget" — and the probe was
+// written past it.
+//
+// So the assertion is not "2000 is a good number". It is that the probe uses
+// the SAME numbers the real calls use, because a probe measuring a different
+// configuration measures a different thing.
+{
+  const rig = ladderRig();
+  queueReplies(rig);
+  await withNow(NOW, () => handleSlash(rig.env, OWNER, '/models'));
+
+  const calls = rig.geminiCalls;
+  check(`every rung was asked — ${calls.length}`, calls.length === 4, String(calls.length));
+  for (const c of calls) {
+    eq('with production\'s token ceiling', c.generationConfig?.maxOutputTokens, 2000);
+    check('and production\'s thinking level, not the API default',
+      c.generationConfig?.thinkingConfig?.thinkingLevel === 'low' ||
+        c.generationConfig?.thinkingConfig?.thinkingBudget === 0,
+      JSON.stringify(c.generationConfig?.thinkingConfig));
+  }
+  rig.restore();
+}
+
+// ---------------------------------------------------------------------------
+section('the reason is read out of the error, not the opening brace');
+//
+// The first version was /"message"\s*:\s*"([^"]{0,120})"/, and a bounded run of
+// non-quote characters must still find the closing quote INSIDE the bound — so
+// any message longer than 120 characters matched nothing and fell through to
+// the raw body. Google pretty-prints its errors, so the report gained four
+// lines of `{ "error": {` and lost the sentence. Production, 08.09.2026: the
+// 429 explaining a spent daily quota rendered as its own opening brace.
+{
+  const long =
+    'You exceeded your current quota, please check your plan and billing details. ' +
+    'For more information on this error, visit https://ai.google.dev/gemini-api/docs/rate-limits ' +
+    'and review the free tier limits for your project.';
+  const body = JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: long } }, null, 2);
+
+  const out = errorMessage(body);
+  check(`it starts with the sentence — ${JSON.stringify(out)}`,
+    out.startsWith('You exceeded your current quota'), out);
+  check('and not with the envelope', !out.includes('"error"') && !out.startsWith('{'), out);
+  check('on one line', !out.includes('\n'), JSON.stringify(out));
+  check('bounded', out.length <= 140, String(out.length));
+
+  // A short one still works — the old regex handled these, and the fix must
+  // not trade one for the other.
+  eq('a short message is unchanged',
+    errorMessage('{"error":{"code":404,"message":"model not found"}}'), 'model not found');
+  // And a body that is not the expected shape degrades to the body itself
+  // rather than to an empty line — flattened, because THIS is the path the
+  // whitespace collapse exists for. A matched message cannot contain a real
+  // newline (JSON escapes them), so asserting the collapse on the happy path
+  // is unfalsifiable; the red-proof scored it green until it moved here.
+  const gateway = errorMessage('<html>\n  502 Bad Gateway\n  nginx\n</html>');
+  check(`an unparseable body still says something — ${JSON.stringify(gateway)}`,
+    gateway.length > 0, 'empty');
+  check('on one line, so it cannot break the list layout',
+    !gateway.includes('\n'), JSON.stringify(gateway));
+}
+
+// ---------------------------------------------------------------------------
 section('a 200 with no answer in it is not a working model');
 //
 // The shape a safety block arrives in: HTTP 200, no candidates, nothing to
@@ -192,7 +265,11 @@ section('a 200 with no answer in it is not a working model');
   const out = (await withNow(NOW, () => handleSlash(rig.env, OWNER, '/models'))) ?? '';
   check(`fast-two is not ticked — ${JSON.stringify(out)}`,
     !/fast-two · (?:\d+ms|[\d.]+ש׳) ✓/.test(out), out);
-  check('and it says the reply was empty', out.includes('ריק'), out);
+  // The finishReason rides along, because 'ריק' alone was not diagnosable:
+  // three rungs said it on 08.09.2026 and the cause was this probe's own token
+  // ceiling, which a MAX_TOKENS here would have named on sight.
+  check('and it says the reply was empty, WITH the finishReason',
+    out.includes('ריק (') && out.includes(')'), out);
   check('the others are unaffected', /ענו: 3\/4/.test(out), out);
   rig.restore();
 }
