@@ -232,7 +232,6 @@ section(
     { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
     { kind: 'pattern_kept' },
     { kind: 'distress', text: 'אני שבור' },
-    { kind: 'nothing', why: 'no_time', userText: 'תזכיר לי לקום' },
     { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' },
     { kind: 'nothing', why: 'past_time', userText: 'תזכיר לי אתמול' },
     { kind: 'nothing', why: 'bad_time', userText: 'תזכיר לי ב-99' },

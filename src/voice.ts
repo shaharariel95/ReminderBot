@@ -381,8 +381,9 @@ function one(e: Effect, tz: string): string {
       return 'אני פה. מה קורה?';
     case 'nothing':
       switch (e.why) {
-        case 'no_time':
-          return 'מתי?';
+        // `case 'no_time': return 'מתי?'` was here. See types.ts: a question
+        // with no questionAsked arm is how an answer becomes a new reminder,
+        // and the wording being reachable was the whole risk.
         case 'past_time':
           return 'הזמן הזה כבר עבר. תן לי משהו עתידי.';
         case 'bad_time':

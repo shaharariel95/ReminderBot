@@ -489,9 +489,16 @@ async function respondToOwner(
       awaiting?.k === 'forwhom' && text && !asksForNewReminder(text)
         ? (() => {
             const f = (ctx.friends ?? []).find((x) => x.friend_chat_id === awaiting.c);
-            const heard = readWhen(text, Date.now(), ctx.settings.tz);
-            const hasTime =
-              heard.kind === 'instant' || heard.kind === 'duration' || heard.kind === 'recurrence';
+            // `parseAnswerTime`, the SAME gate the `time` slot above uses, and
+            // not readWhen. Both slots ask "מתי?" and both must be equally
+            // hard to satisfy: parseAnswerTime requires the whole message to
+            // be the time, because "a wrong answer to מתי? retimes a real
+            // reminder" — and here it writes into somebody else's account.
+            // 0.31.0 shipped readWhen here, which is happy with a time buried
+            // in a sentence, so for three days one question had two
+            // strictnesses. Used as a yes/no only: the hour itself is still
+            // resolved inside friendReminder, in HER timezone.
+            const hasTime = parseAnswerTime(text, Date.now(), ctx.settings.tz) !== null;
             return f && hasTime ? { nickname: f.nickname, title: awaiting.t } : null;
           })()
         : null;

@@ -505,6 +505,42 @@ Check what it was shown before blaming the router.
 
 ---
 
+
+### Adding an Effect kind
+
+The four edits are now **three plus a compile error**. `test/v33.test.ts`
+holds `SAMPLES`, a mapped type over `Effect['kind']` — one sample per kind,
+missing keys and wrong shapes are both type errors, and `npm run typecheck`
+covers the test project. It renders every kind and round-trips it through its
+own validator.
+
+- The two hand-written sample lists in `test/voice.test.ts` and
+  `test/validate.test.ts` are no longer the completeness check. They keep their
+  targeted assertions about particular wordings; going stale no longer matters.
+- When it was written they were **nineteen kinds short of fifty**, and a
+  regex sweep found only thirteen of the nineteen. The compiler found the rest.
+  Grep is not an inventory of a union.
+- What the round-trip proves, and does not: `validate` folds the BASELINE into
+  its own allow-lists, so rules 1 and 3 are unfalsifiable there — an hour
+  invented by voice.ts is allowed by voice.ts. Rule 2 and rules 5-6 are live,
+  and rule 2 is the one that caught `evening_closeout` in 0.19.0.
+
+### Questions, and the slots behind them
+
+- **A question in `renderBaseline` needs its `questionAsked` arm, or a button.**
+  Neither means the bot asks and records nothing, and his answer becomes a new
+  reminder. → `voice.questionAsked`
+- `nothing` has no arm and never will — it is the refusal kind. So **a `why`
+  that asks a question does not belong in it.** `'no_time'` did, worded "מתי?",
+  and that is production #85: an hour for a friend's reminder written into the
+  owner's chat. Removed from the union in 0.33.0 so reaching for it again does
+  not compile. → `types.Effect` (the `nothing` reason list)
+- **Both time-answer slots use `parseAnswerTime`**, which is stricter than
+  `readWhen` on purpose: the whole message must be the time, because a wrong
+  answer to "מתי?" retimes a real reminder. `forwhom` shipped with `readWhen`
+  in 0.31.0 and had two strictnesses for one question for three days.
+  → `quickparse.parseAnswerTime`
+
 ## Testing
 
 `npm test` runs thirty-one files against a real in-memory SQLite behind a

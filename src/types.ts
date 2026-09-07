@@ -604,7 +604,23 @@ export type Effect =
   | {
       kind: 'nothing';
       why:
-        | 'no_time' | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder'
+        /*
+         * `'no_time'` USED TO BE HERE, and removing it is the fix rather than
+         * a tidy-up.
+         *
+         * voice.ts answered it with a bare "מתי?" and `nothing` has no
+         * `questionAsked` arm, so the bot asked and recorded nothing — his
+         * answer then reached the router as a fresh sentence and became a
+         * reminder of its own. That is production #85, 07.09.2026: the hour
+         * for a friend's reminder, written into the owner's chat.
+         *
+         * 0.31.0 replaced its only emitter with `friend_needs_time`, which
+         * carries the request into the awaiting slot. Leaving the `why` in the
+         * union would leave the wording reachable — a loaded trap for whoever
+         * next needs to say "when?" — so it is gone, and reaching for it again
+         * is a compile error rather than a repeat of the same bug.
+         */
+        | 'past_time' | 'bad_time' | 'no_open_task' | 'unknown_reminder'
         | 'unknown_goal' | 'unknown_note' | 'chat'
         /**
          * He named somebody the address book cannot resolve — nobody by that
