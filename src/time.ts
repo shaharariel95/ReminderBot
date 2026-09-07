@@ -291,6 +291,44 @@ export function describeSchedule(schedule: Schedule): string {
 }
 
 /**
+ * The recurrence rule and when it next lands — without saying the same thing
+ * twice.
+ *
+ * `describeSchedule` on a `once` schedule renders the full instant already
+ * ("פעם אחת ב-07.09 בשעה 20:58"), so every caller that then appended a
+ * formatted `next_fire_at` printed the same moment a second time:
+ *
+ *   קבעתי לאמנון: "להגיד לשחר שעובד" — פעם אחת ב-07.09 בשעה 20:58.
+ *   הראשונה ב-יום ב׳, 07.09.2026, 20:58.
+ *
+ *   #83 לשלוח לשחר …
+ *      פעם אחת ב-07.09 בשעה 19:23 · הבא: יום ב׳, 07.09.2026, 19:23
+ *
+ * Both from production, 07.09.2026. A one-off has no recurrence to state, so
+ * the honest rendering is the instant alone — which is also the better of the
+ * two, since `when()` carries the weekday and the year and this does not.
+ * "הראשונה"/"הבא" only mean anything when there is a second one.
+ *
+ * One function rather than the conditional written out at each site: this was
+ * FOUR copies of the same sentence shape (two in voice.ts, two in slash.ts),
+ * which is how it came to be wrong in four places at once.
+ *
+ * `next` arrives already rendered because two of the callers substitute a
+ * phrase for it — "צלצלה כבר — מחכה לדיווח" when a one-off is being chased,
+ * "לא מתוזמן" when nothing is armed — and both of those are more informative
+ * than the instant would have been.
+ */
+export function scheduleWithNext(
+  schedule: Schedule | null,
+  next: string,
+  sep: string,
+  label: string,
+): string {
+  if (!schedule || schedule.type === 'once') return next;
+  return `${describeSchedule(schedule)}${sep}${label}${next}`;
+}
+
+/**
  * When an inbox quick-schedule slot actually lands, in the reminder's own
  * timezone.
  *

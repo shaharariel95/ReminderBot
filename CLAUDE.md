@@ -463,6 +463,20 @@ Check what it was shown before blaming the router.
   faithfully. → `effects.titleFromHisWords`
 - Rewording is the router's job and survives. Extraction may not GROW.
 
+### Saying a time once
+
+- **`describeSchedule` on a `once` schedule IS the instant**, so appending a
+  formatted `next_fire_at` prints the same moment twice — "פעם אחת ב-07.09
+  בשעה 20:58. הראשונה ב-יום ב׳, 07.09.2026, 20:58". "הראשונה"/"הבא" mean
+  something only when there is a second one. → `time.scheduleWithNext`
+- That sentence shape was written out by hand at FOUR sites (voice ×2,
+  slash ×2), which is how one bug was wrong in four places at once. One helper
+  now answers "does this repeat"; do not inline the conditional again.
+- The router prompt (`brain.remindersSummary`) keeps the redundancy on
+  purpose: "פעם אחת" is what tells the model the row is NOT recurring, and
+  flattening a repeat rule is the more expensive error. A deliberate
+  difference, not a missed site.
+
 ### Things that look like bugs and are not
 
 - **`quickparse.ts` bails a lot on purpose.** A partial parse is a confident wrong

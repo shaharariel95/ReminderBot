@@ -1,6 +1,6 @@
 import type { Effect } from './types';
 import { UNTITLED_TITLE } from './types';
-import { describeSchedule, formatLocal } from './time';
+import { describeSchedule, formatLocal, scheduleWithNext } from './time';
 
 /**
  * Deterministic Hebrew for every effect.
@@ -53,7 +53,12 @@ function one(e: Effect, tz: string): string {
         // Ask now, while he still remembers. In an hour he won't.
         return `קבעתי לך משהו ל-${when(e.at, tz)}. על מה להזכיר?`;
       }
-      return `קבעתי #${e.id}: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(e.at, tz)}.${
+      return `קבעתי #${e.id}: "${e.title}" — ${scheduleWithNext(
+        e.schedule,
+        when(e.at, tz),
+        '. ',
+        'הראשונה ב-',
+      )}.${
         // The appointment itself, when he named one. Stated rather than merely
         // stored: an event hour that lives only in the database is invisible,
         // and the persona may not mention a time the baseline never said.
@@ -70,9 +75,11 @@ function one(e: Effect, tz: string): string {
       // it to him would hand him an id that names nothing he can /list, /why
       // or cancel. What he needs is her name and the hour, and both of those
       // are true from where he is sitting.
-      return `קבעתי ל${e.friend}: "${e.title}" — ${describeSchedule(e.schedule)}. הראשונה ב-${when(
-        e.at,
-        tz,
+      return `קבעתי ל${e.friend}: "${e.title}" — ${scheduleWithNext(
+        e.schedule,
+        when(e.at, tz),
+        '. ',
+        'הראשונה ב-',
       )}.${e.requiresProof ? ' דורש תמונה.' : ''}`;
     case 'reminder_captured':
       // The day, when he gave one. Asking "ולא מתי" about a message that

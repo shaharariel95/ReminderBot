@@ -1,5 +1,5 @@
 import * as db from './db';
-import { describeSchedule, formatLocal, localDayBounds } from './time';
+import { describeSchedule, formatLocal, localDayBounds, scheduleWithNext } from './time';
 import type { Env, ReminderItem, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
@@ -746,18 +746,23 @@ export async function handleSlash(
       if (!rem || rem.chat_id !== chatId) return `אין לי תזכורת #${id}.`;
 
       const tz = rem.tz || env.DEFAULT_TZ || 'Asia/Jerusalem';
-      let sched = rem.schedule;
+      let sch: Schedule | null = null;
       try {
-        sched = describeSchedule(JSON.parse(rem.schedule) as Schedule);
+        sch = JSON.parse(rem.schedule) as Schedule;
       } catch {
         /* raw */
       }
 
       const events = await db.eventsFor(env, id).catch(() => []);
+      // The status sits between the recurrence and the next fire, so the two
+      // halves are composed separately — but the "does it repeat" question is
+      // still asked in one place. See time.scheduleWithNext.
+      const nextTxt = rem.next_fire_at ? formatLocal(rem.next_fire_at, tz) : 'לא מתוזמן';
+      const recurrence = sch && sch.type !== 'once' ? `${describeSchedule(sch)} · ` : '';
       const head = [
         `#${rem.id} ${rem.title}`,
-        `${sched} · ${rem.status}${
-          rem.next_fire_at ? ` · הבא: ${formatLocal(rem.next_fire_at, tz)}` : ' · לא מתוזמן'
+        `${recurrence}${rem.status} · ${
+          rem.next_fire_at ? `הבא: ${nextTxt}` : 'לא מתוזמן'
         }`,
       ];
       if (!events.length) {
@@ -803,9 +808,13 @@ export async function handleSlash(
         .catch(() => new Map<number, ReminderItem[]>());
       return reminders
         .map((r) => {
-          let s = r.schedule;
+          // The parsed schedule, not its rendering: scheduleWithNext needs to
+          // know whether it RECURS, and a one-off's description is the same
+          // instant it would then print again as "הבא:". An unparseable row
+          // keeps the old behaviour of showing the raw column.
+          let sch: Schedule | null = null;
           try {
-            s = describeSchedule(JSON.parse(r.schedule) as Schedule);
+            sch = JSON.parse(r.schedule) as Schedule;
           } catch {
             /* raw */
           }
@@ -817,9 +826,9 @@ export async function handleSlash(
             : openIds.has(r.id)
               ? 'צלצלה כבר — מחכה לדיווח'
               : 'לא מתוזמן';
-          const head = `#${r.id} ${r.title}\n   ${s} · הבא: ${next}${
-            r.requires_proof ? ' · דורש הוכחה' : ''
-          }`;
+          const head = `#${r.id} ${r.title}\n   ${
+            sch ? scheduleWithNext(sch, next, ' · ', 'הבא: ') : `${r.schedule} · הבא: ${next}`
+          }${r.requires_proof ? ' · דורש הוכחה' : ''}`;
           const own = items.get(r.id) ?? [];
           return own.length
             ? [head, ...own.map((i) => `   ${i.done_at ? '✓' : '☐'} ${i.title}`)].join('\n')
