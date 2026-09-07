@@ -4,7 +4,7 @@ import type { Env, ReminderItem, Schedule } from './types';
 import { VERSION } from './version';
 import { sendMessage } from './telegram';
 import { keyboard } from './buttons';
-import { modelLadder } from './gemini';
+import { modelLadder, probeLadder } from './gemini';
 
 /**
  * The same commands, in the language the bot actually speaks.
@@ -127,7 +127,12 @@ function tickLine(tick: number | null, tz: string): string {
 }
 
 /** Commands only the owner may run. See the gate in handleSlash for why. */
-const OWNER_ONLY = new Set(['/diag', '/allow', '/deny', '/allowed', '/pending', '/errors']);
+const OWNER_ONLY = new Set([
+  '/diag', '/allow', '/deny', '/allowed', '/pending', '/errors',
+  // Spends real quota on the shared key — eight calls a run — and prints the
+  // shape of the whole ladder. Both are owner business.
+  '/models',
+]);
 
 /** Slash commands handled without burning an LLM call. */
 export async function handleSlash(
@@ -292,6 +297,7 @@ export async function handleSlash(
       const ownerOnly = owner
         ? [
             '/diag — בדיקת תקינות (מודל, מפתח, חיבורים, קרון)',
+        '/models — בודק כל מודל בסולם ומודד כמה זמן לקח',
             '/errors — חמש התקלות האחרונות',
             '/pending — מי מבקש להיכנס · /allow [שם] · /deny [שם] · /allowed',
           ]
@@ -708,6 +714,80 @@ export async function handleSlash(
      * didn't my reminder arrive" was that nobody could know. It is also where
      * the `נפל לי משהו באמצע` message points him.
      */
+    /**
+     * Ask every rung of the ladder the same trivial question and time it.
+     *
+     * The command exists because "promote by measuring" was a rule with no
+     * instrument behind it. 0.16.0 promoted two models on the strength of
+     * their version numbers and cost two reminders; the correction was to
+     * demote them and write "measure first" into three files. Measuring still
+     * meant deploying a model low, waiting a day, and reading the `usage`
+     * table — which only reports the rungs that were actually REACHED, so the
+     * lower ones stay unmeasured no matter how long you wait. This asks them
+     * directly.
+     *
+     * Owner-only, and it spends eight calls of real quota per run.
+     *
+     * The order printed is the LADDER order, numbered, because the answer this
+     * is run to get is "is rung 1 still the right rung 1" — and that question
+     * is about position, not about the alphabet.
+     */
+    case '/models': {
+      const probes = await probeLadder(env, chatId);
+      const health = await db.modelHealth(env).catch(() => new Map());
+      const ladder = modelLadder(env);
+      const tz = await db
+        .getSettings(env, chatId)
+        .then((s) => s.tz)
+        .catch(() => env.DEFAULT_TZ || 'Asia/Jerusalem');
+      // Milliseconds under a second, seconds above it. "0.4ש׳" and "0.0ש׳"
+      // are the same line to a tired reader, and the whole point of this
+      // command is comparing two numbers at a glance.
+      const secs = (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}ש׳`);
+
+      const lines = [`בדיקת מודלים — ${probes.length} בסולם`, ''];
+      probes.forEach((p, i) => {
+        // The two rungs that have names in the config are worth marking: they
+        // are what /diag calls "the model" and what somebody debugging at
+        // 02:00 will change.
+        const role = i === 0 ? ' ★' : i === 1 ? ' ☆' : '';
+        const blocked = (health.get(p.model)?.blocked_until ?? 0) > Date.now();
+        const head = p.ok
+          ? `${i + 1}. ${p.model} · ${secs(p.ms)} ✓${role}`
+          : `${i + 1}. ${p.model} · ${p.status ?? '—'} ✗${role}`;
+        lines.push(head);
+        if (!p.ok) lines.push(`    ${p.detail}`);
+        // Stated separately from the probe result, and it can disagree with
+        // it: a model can answer this fine while still being rested from a
+        // 429 a minute ago. Both facts matter and neither implies the other.
+        if (blocked) lines.push(`    חסום עד ${formatLocal(health.get(p.model)!.blocked_until, tz)}`);
+      });
+
+      const ok = probes.filter((p) => p.ok);
+      lines.push('', `ענו: ${ok.length}/${probes.length}`);
+      if (ok.length) {
+        const fastest = ok.reduce((a, b) => (a.ms <= b.ms ? a : b));
+        lines.push(`הכי מהיר: ${fastest.model} — ${secs(fastest.ms)}`);
+        // The actionable sentence, and the only reason to run this twice.
+        // Deliberately worded as a prompt to go and measure properly rather
+        // than as advice: one probe is one sample, and promoting on a single
+        // fast round trip is the same mistake as promoting on a version
+        // number, with a stopwatch instead of a changelog.
+        if (fastest.model !== ladder[0]) {
+          lines.push(
+            `הראשון בסולם הוא ${ladder[0]}. אם זה חוזר על עצמו כמה פעמים — שווה לשקול החלפה.`,
+          );
+        } else {
+          lines.push('הראשון בסולם הוא גם הכי מהיר.');
+        }
+      }
+      // All of them failing is much more likely to be the key, the network or
+      // this probe than eight models going down at once — say so, instead of
+      // printing eight identical error lines and letting him infer it.
+      if (!ok.length) lines.push('אף אחד לא ענה — זה נראה כמו מפתח או רשת, לא כמו המודלים.');
+      return lines.join('\n');
+    }
+
     case '/errors': {
       const rows = await db.recentErrors(env, chatId, 5).catch(() => []);
       if (!rows.length) return 'אין תקלות רשומות. זה או טוב או חדש.';

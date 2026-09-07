@@ -213,6 +213,16 @@ export interface Rig {
    */
   rejectAnyOf: false | 'once' | 'always';
   /**
+   * Models that answer HTTP 200 with no candidates at all, by exact id.
+   *
+   * A real shape, not a hypothetical: a safety block returns a 200 whose body
+   * carries `promptFeedback` and nothing else. Distinct from `downModels`
+   * because the status line says everything is fine — which is the whole
+   * reason 0.15.0's `finishReason` check exists, and the reason a probe has to
+   * look at the body rather than at `res.ok`.
+   */
+  emptyModels: Set<string>;
+  /**
    * Seconds Google's 429 body asks the caller to wait, or null for a bare
    * quota error with no advice in it. Real 429s usually carry RetryInfo, and
    * honouring it is the difference between a one-minute detour and a
@@ -288,6 +298,7 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     downModels: new Set<string>(),
     notFoundModels: new Set<string>(),
     rejectAnyOf: false as false | 'once' | 'always',
+    emptyModels: new Set<string>(),
     retryDelaySeconds: null,
     modelsCalled: [],
     get dbFailOn() {
@@ -337,6 +348,9 @@ export function createRig(opts: { tz?: string; chatId?: string } = {}): Rig {
     if (url.includes('generativelanguage.googleapis.com')) {
       const model = /models\/([^:]+):/.exec(url)?.[1] ?? '';
       rig.modelsCalled.push(model);
+      if (rig.emptyModels.has(model)) {
+        return json({ promptFeedback: { blockReason: 'SAFETY' } });
+      }
       if (rig.notFoundModels.has(model)) {
         return new Response('{"error":{"code":404,"message":"model not found"}}', { status: 404 });
       }

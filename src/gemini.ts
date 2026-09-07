@@ -234,6 +234,141 @@ async function post(
   });
 }
 
+export interface ModelProbe {
+  model: string;
+  /** HTTP status, or null when the request never completed. */
+  status: number | null;
+  /** Wall-clock milliseconds for the round trip, including a timeout. */
+  ms: number;
+  /** True only for a 200 that carried text back. */
+  ok: boolean;
+  /** Short, already-trimmed reason when it is not ok. */
+  detail: string;
+}
+
+/** Long enough for the slowest rung ever measured here (12s), and no longer. */
+const PROBE_TIMEOUT_MS = 12_000;
+
+/**
+ * Ask one model the cheapest possible question and time it.
+ *
+ * Deliberately NOT `generate()`. That walks the ladder, honours the health
+ * table, drops tiers and retries — every one of which is the thing being
+ * measured. This is one request to one named model, so the number it returns
+ * is about that model and nothing else.
+ *
+ * Three things it must not do, each for the same reason: a diagnostic that
+ * changes what it measures is worse than no diagnostic.
+ *
+ *  - **It does not write `model_health`.** A probe that 429s would otherwise
+ *    write the model off for minutes — so running the health check would
+ *    disable the ladder it was run to inspect.
+ *  - **It does not read `model_health` either.** "Blocked" is a fact about the
+ *    last few minutes, not about whether the model answers; /models states the
+ *    block separately, from the table, so both facts are visible at once.
+ *  - **It sends no system prompt and no schema.** Those change latency, and
+ *    the question here is whether the endpoint answers at all.
+ *
+ * Usage IS recorded, because the call really does spend quota against the
+ * shared key and a number in /diag that quietly excludes it is wrong.
+ */
+export async function probeModel(
+  env: Env,
+  model: string,
+  chatId?: string,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+): Promise<ModelProbe> {
+  const t0 = Date.now();
+  try {
+    const res = await post(
+      env,
+      model,
+      {
+        contents: [{ role: 'user', parts: [{ text: 'say OK' }] }],
+        generationConfig: { maxOutputTokens: 16, temperature: 0 },
+      },
+      AbortSignal.timeout(Math.max(1, timeoutMs)),
+    );
+    const ms = Date.now() - t0;
+    const body = await res.text().catch(() => '');
+    if (!res.ok) {
+      // The message, not the whole envelope. Google's 404 body is 400 bytes of
+      // JSON whose useful half is one sentence.
+      const msg = /"message"\s*:\s*"([^"]{0,120})"/.exec(body)?.[1] ?? body.slice(0, 90);
+      return { model, status: res.status, ms, ok: false, detail: msg };
+    }
+    await db.recordUsage(env, model, chatId).catch(() => {});
+    let text = '';
+    try {
+      const json = JSON.parse(body);
+      text = (json?.candidates?.[0]?.content?.parts ?? [])
+        .map((p: any) => p.text ?? '')
+        .join('')
+        .trim();
+    } catch {
+      return { model, status: res.status, ms, ok: false, detail: 'תשובה לא תקינה' };
+    }
+    // A 200 with no text is not a working model. MAX_TOKENS on a 16-token
+    // ceiling is fine and still counts as answering.
+    return text
+      ? { model, status: res.status, ms, ok: true, detail: text.slice(0, 40) }
+      : { model, status: res.status, ms, ok: false, detail: 'ריק' };
+  } catch (err) {
+    const ms = Date.now() - t0;
+    return {
+      model,
+      status: null,
+      ms,
+      ok: false,
+      detail: isTimeout(err) ? `נגמר הזמן אחרי ${Math.round(ms / 1000)}ש׳` : String(err).slice(0, 90),
+    };
+  }
+}
+
+/**
+ * Probe the whole ladder and return the results IN LADDER ORDER.
+ *
+ * Started in parallel, with a small stagger, and that is a decision worth
+ * stating because the obvious alternative — one at a time, with a pause
+ * between — is what it looks like it should do.
+ *
+ * Waiting buys nothing. The free tier meters requests per minute PER MODEL
+ * against the key, so asking each model exactly once cannot approach any
+ * model's limit; `GEMINI_RPM` is 18 and this sends one.
+ *
+ * And waiting costs everything: this runs inside a Worker invocation, whose
+ * lifetime is the thing `TURN_BUDGET_MS` exists to respect. Sequential, with
+ * two rungs that have been measured burning a full 12s each, runs past it —
+ * and an invocation killed on the wall clock does not throw, so the report
+ * would simply never arrive. Parallel makes the total the SLOWEST rung rather
+ * than the sum.
+ *
+ * The stagger is the one concession: eight simultaneous requests on one key
+ * could plausibly meet a project-wide concurrency limit, and a 429 caused by
+ * the probe is a lie about the model. 200ms apart keeps that unlikely, and if
+ * it ever happens it is visible as a pattern — every rung 429 at once — rather
+ * than as one bad number.
+ */
+export async function probeLadder(
+  env: Env,
+  chatId?: string,
+  /** Per model, not for the whole run — they overlap. Lowered by tests so a
+   *  model that never answers fails in milliseconds instead of hanging the
+   *  suite for twelve seconds, which is the trap `rig.geminiHang` exists to
+   *  set. */
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+): Promise<ModelProbe[]> {
+  const ladder = modelLadder(env);
+  return Promise.all(
+    ladder.map(
+      (m, i) =>
+        new Promise<ModelProbe>((resolve) => {
+          setTimeout(() => resolve(probeModel(env, m, chatId, timeoutMs)), i * 200);
+        }),
+    ),
+  );
+}
+
 /** One round trip, including the thinking-parameter fallback. */
 async function callOnce(
   env: Env,

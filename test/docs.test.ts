@@ -76,7 +76,7 @@ const NOT_POINTERS = new Set([
   'instances.status',       // a column
   'reminders.status',       // a column
   'rig.dbFailOn', 'rig.downModels', 'rig.geminiHang', 'rig.notFoundModels',
-  'rig.rejectAnyOf', 'rig.retryDelaySeconds', 'rig.speakQueue',
+  'rig.rejectAnyOf', 'rig.retryDelaySeconds', 'rig.speakQueue', 'rig.emptyModels',
 ]);
 
 /** Anything ending in a file extension is a filename, not a symbol pointer. */

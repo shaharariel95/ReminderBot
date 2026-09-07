@@ -506,6 +506,37 @@ Check what it was shown before blaming the router.
 ---
 
 
+
+### /models — measuring the ladder
+
+- **"Promote by measuring" had no instrument until 0.34.0.** `usage` only ever
+  reports the rungs that were REACHED, so the lower six stay unmeasured however
+  long you wait — which is how two dead ids sat on the ladder from 19.08 to
+  06.09. `/models` asks each rung directly. → `slash.ts` (`/models`)
+- Owner-only: it spends eight calls of real quota per run.
+- **It does not walk the ladder, and must not.** `generate()` drops tiers,
+  retries and honours blocks — each of which is the thing being measured.
+  → `gemini.probeModel`
+- **It neither writes nor reads `model_health`.** Writing would rest the ladder
+  it was run to inspect; reading would report a model resting from a 429 as
+  broken. The block is printed SEPARATELY, from the table, and the two are
+  allowed to disagree — that disagreement is the useful part.
+- **Parallel with a 200ms stagger, not sequential with a pause**, and this
+  looks backwards until you check the meter. The free tier bills per minute PER
+  MODEL, so one request each cannot approach any model's limit; meanwhile two
+  rungs measured at 12s apiece run a sequential probe past the invocation's
+  lifetime, and an invocation killed on the wall clock does not throw. The
+  stagger is the only concession, against a project-wide concurrency limit.
+  → `gemini.probeLadder`
+- A 200 with no text is **not** a working model — a safety block returns
+  exactly that. Same rule as `finishReason`, one level out.
+- Usage IS recorded. The probe really does spend quota, and a `/diag` number
+  that quietly excluded it would be wrong.
+- `rig.emptyModels` is how the empty-200 path is testable at all, and the hang
+  path is RACED against a timer: a probe that lost its timeout makes the suite
+  hang rather than go red, and the red-proof scored that GREEN until the race
+  was added.
+
 ### Adding an Effect kind
 
 The four edits are now **three plus a compile error**. `test/v33.test.ts`
@@ -595,6 +626,7 @@ Useful rig facts:
 | `rig.geminiHang` | never answers unless aborted — race it against a timer, or a regression hangs the suite instead of failing it |
 | `rig.downModels` / `rig.notFoundModels` / `rig.retryDelaySeconds` | shape what a named model answers; the only way the ladder is testable |
 | `rig.rejectAnyOf` | the 400 a real endpoint gives for a schema construct it refuses |
+| `rig.emptyModels` | HTTP 200 with no candidates — what a safety block looks like |
 | `deployed(rig)` | simulates a deploy |
 | a fresh rig | a bot already running the current version |
 
