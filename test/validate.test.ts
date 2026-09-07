@@ -202,6 +202,7 @@ section(
   const samples: Effect[] = [
     { kind: 'reminder_created', id: 1, title: 'לרוץ', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false },
     { kind: 'friend_reminder_created', id: 1, title: 'לקנות חלב', at: AT, schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false, friend: 'דנה', to: '999' },
+    { kind: 'friend_needs_time', friend: 'דנה', to: '999', title: 'לקנות חלב' },
     { kind: 'reminder_captured', id: 2, title: 'לקנות חלב' },
     { kind: 'reminder_scheduled', id: 2, title: 'לקנות חלב', at: AT },
     { kind: 'reminder_retimed', id: 1, title: 'לרוץ', at: AT },

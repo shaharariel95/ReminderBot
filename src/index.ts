@@ -6,6 +6,7 @@ import { buildFacts } from './facts';
 import { validate } from './validate';
 import { CHECKIN_GOAL, CONVERSATION_WINDOW_MIN, GIVE_UP, NAG_LADDER, NAG_LADDER_ITEMS, nagDelayMinutes } from './persona';
 import { addressesSomeoneElse, asksForNewReminder, findFutureInstant, namesSomeoneElse, parseAnswerTime, quickParse } from './quickparse';
+import { readWhen } from './when';
 import {
   answerCallback,
   getPhotoBase64,
@@ -456,6 +457,45 @@ async function respondToOwner(
     // Carries its target rather than reaching back for `awaiting.r` later: the
     // narrowing is done here, where the `k === 'title'` check is, so no
     // non-null assertion is needed at the use site to convince the compiler.
+    /*
+     * The hour for a reminder that is FOR SOMEBODY ELSE — the answer to
+     * "לאמנון: … באיזו שעה?".
+     *
+     * This is the carry that did not exist, and its absence is the whole of
+     * what made friends look broken. The addressee is stated once, in the
+     * first message; the write happens in the second. Nothing joined them, so
+     * "עוד שתי דקות" reached the router as a fresh request with no name in it
+     * and became reminder #85 in HIS chat (07.09.2026).
+     *
+     * The friend comes out of the SLOT, never out of this message — his answer
+     * is an hour and has no name in it, which is precisely why re-deriving the
+     * addressee at write time could never work. The nickname is looked up from
+     * the chat id so the synthesised intent goes through exactly the same
+     * create path as everything else rather than a second one.
+     *
+     * Gated on asksForNewReminder like `title` and `fname`: if he opened a new
+     * request instead of answering, that is a new request, and taking it as an
+     * hour would lose both.
+     *
+     * The hour itself is NOT resolved here, and that is deliberate. It is read
+     * inside friendReminder, in HER timezone, because "ב-8" means eight where
+     * she is — resolving it here against his clock and passing an instant down
+     * would put a second time resolver on this path, which is the bug one
+     * paragraph up. This only decides whether his message contains a time at
+     * all; if it does not, it is not an answer to this question and falls
+     * through to the router.
+     */
+    const answeredForWhom =
+      awaiting?.k === 'forwhom' && text && !asksForNewReminder(text)
+        ? (() => {
+            const f = (ctx.friends ?? []).find((x) => x.friend_chat_id === awaiting.c);
+            const heard = readWhen(text, Date.now(), ctx.settings.tz);
+            const hasTime =
+              heard.kind === 'instant' || heard.kind === 'duration' || heard.kind === 'recurrence';
+            return f && hasTime ? { nickname: f.nickname, title: awaiting.t } : null;
+          })()
+        : null;
+
     const answeredTitle =
       awaiting?.k === 'title' && text && !asksForNewReminder(text)
         ? { target: awaiting.r, title: text.slice(0, 120) }
@@ -528,6 +568,14 @@ async function respondToOwner(
               once_at: wallString(answeredAt, ctx.settings.tz),
             },
           ]
+        : answeredForWhom !== null
+          ? [
+              {
+                action: 'create_reminder',
+                for_friend: answeredForWhom.nickname,
+                title: answeredForWhom.title,
+              },
+            ]
         : answeredTitle !== null
           ? [{ action: 'rename', target_id: answeredTitle.target, title: answeredTitle.title }]
           : fast

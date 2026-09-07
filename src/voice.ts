@@ -108,6 +108,12 @@ function one(e: Effect, tz: string): string {
     // what this used to send and which reads as being nagged for saying no.
     case 'pattern_kept':
       return 'אוקיי, משאיר.';
+    // Names the friend and the errand back, because the slot is now holding
+    // both and he needs to be able to see that it did. "מתי?" on its own is
+    // what shipped before, and it read as the bot having forgotten the request
+    // it was halfway through.
+    case 'friend_needs_time':
+      return `ל${e.friend}: "${e.title}". באיזו שעה?`;
     case 'friend_unknown': {
       // Names BOTH spellings on purpose. The usual cause is a script mismatch
       // he cannot see — the book holds the Telegram profile name ("amnon"),
@@ -494,8 +500,18 @@ export function friendReminderHeadsUp(
  */
 export function questionAsked(
   e: Effect,
-): { k: 'time'; r: number } | { k: 'offer'; t: string; w: number } | { k: 'title'; r: number } | null {
+):
+  | { k: 'time'; r: number }
+  | { k: 'offer'; t: string; w: number }
+  | { k: 'title'; r: number }
+  | { k: 'forwhom'; c: string; t: string }
+  | null {
   switch (e.kind) {
+    // The friend and the errand ride in the slot for the same reason the
+    // appointment offer's title does: there is no row yet to point at, and
+    // nothing may be written until he says when.
+    case 'friend_needs_time':
+      return { k: 'forwhom', c: e.to, t: e.title };
     // "מתי לשים לך את זה?" about a reminder that exists but has no hour.
     case 'needs_time':
       return { k: 'time', r: e.id };

@@ -1974,7 +1974,26 @@ export type Awaiting =
    * the old name first, so repairing a name he could not type required typing
    * it.
    */
-  | { k: 'fname'; c: string; at: number };
+  | { k: 'fname'; c: string; at: number }
+  /**
+   * forwhom — "לאמנון: … באיזו שעה?" was asked about a reminder for chat `c`
+   * with errand `t`, and NOTHING has been written yet.
+   *
+   * This slot is the fix for the failure that made the friends feature look
+   * broken for seven versions. `friendReminder` used to answer a missing hour
+   * with `nothing: 'no_time'`, which asks "מתי?" and arms no slot — so his
+   * answer ("עוד שתי דקות") arrived at the router as a fresh sentence with no
+   * name in it, and became reminder #85 in HIS OWN chat. CLAUDE.md states the
+   * rule that catches this outright: a question written into renderBaseline
+   * needs its `questionAsked` arm in the same edit, or the bot asks and
+   * records nothing.
+   *
+   * Carries the chat id and the errand rather than a reminder id, because
+   * there is no row: creating one first would mean writing into her account
+   * before he has said when, and every refusal in `friendReminder` exists to
+   * avoid exactly that.
+   */
+  | { k: 'forwhom'; c: string; t: string; at: number };
 
 export async function setAwaiting(
   env: Env,
@@ -2015,6 +2034,13 @@ export function readAwaiting(raw: string | null, now: number = Date.now()): Awai
         // A chat id is the whole payload, so a slot without one is not half a
         // question, it is a rename with no target.
         return typeof a.c === 'string' && a.c.length > 0 ? a : null;
+      case 'forwhom':
+        // BOTH halves or nothing. A slot with a chat but no errand would write
+        // an untitled row into somebody else's account, and one with an errand
+        // but no chat has no idea whose account that is.
+        return typeof a.c === 'string' && a.c.length > 0 && typeof a.t === 'string' && a.t.length > 0
+          ? a
+          : null;
       default: {
         const _never: never = a;
         return _never ?? null;

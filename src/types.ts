@@ -441,6 +441,20 @@ export type Effect =
    */
   | { kind: 'friend_unknown'; asked: string; known: string[] }
   /**
+   * The addressee is settled and the hour is not — "לאמנון, על מה שאמרת. מתי?"
+   *
+   * A distinct kind rather than `nothing: 'no_time'`, because the difference
+   * is the entire bug it was written for: this one has a `questionAsked` arm,
+   * so the friend and the errand ride in the awaiting slot and his answer can
+   * only complete THIS request. `no_time` asked the same question and armed
+   * nothing, so the answer reached the router as a fresh sentence with no name
+   * in it and became a reminder for HIM (production #85, 07.09.2026).
+   *
+   * Nothing is written when this is emitted, so it is absent from WROTE and
+   * from EVENT_OF, on the `needs_time` precedent.
+   */
+  | { kind: 'friend_needs_time'; friend: string; to: string; title: string }
+  /**
    * complete/snooze couldn't resolve which open instance the user meant AND
    * there was more than one candidate — asking is correct here; claiming
    * "no open task" (the `nothing/no_open_task` case, kept for the genuinely

@@ -932,8 +932,48 @@ async function friendReminder(
   }
 
   const theirs = await db.getSettings(env, friend.friend_chat_id);
-  const schedule = scheduleFromIntent(intent, theirs.tz);
-  if (!schedule) return [{ kind: 'nothing', why: 'no_time', userText }];
+
+  /*
+   * THE SAME TWO LINES THE SELF PATH USES, and this is the whole of 0.31.0.
+   *
+   * This read `scheduleFromIntent(intent, theirs.tz)` and nothing else — the
+   * pre-0.16.0 behaviour, in a branch that never got the precedence flip. So
+   * "his own words beat what the model computed" held for his own reminders
+   * and not for a friend's, which is `findNamedTime` wired into one path of
+   * two for the third time in this repository.
+   *
+   * Production, 07.09.2026 17:26:15:
+   *
+   *   him  תזכיר לאמנון עוד שתי דקות לשלוח לשחר הודעה שעבד
+   *   bot  מתי?
+   *
+   * `readWhen` returns {kind:'duration',minutes:2} for that sentence — checked
+   * against the production text. The router simply had not filled a time
+   * field, `scheduleFromIntent` returned null, and the bot asked for something
+   * it had been given four words in. What he answered then became a reminder
+   * for HIMSELF, because the question armed no slot (see friend_needs_time).
+   *
+   * Read in HER timezone, deliberately, and that is why the tz is threaded
+   * into readWhen too: "תזכיר לדנה ב-8" is eight o'clock where Dana is,
+   * because she is the one it has to be useful to. A duration is unaffected.
+   */
+  const heard = readWhen(userText, Date.now(), theirs.tz);
+  const schedule = preferHisWords(heard, intent, theirs.tz);
+  if (!schedule) {
+    // NOT `nothing: 'no_time'`. That wording asks "מתי?" and arms nothing, so
+    // his answer reaches the router as a fresh request and is written to him —
+    // exactly what CLAUDE.md predicts for a question with no `questionAsked`
+    // arm, and exactly what #85 is. This carries the addressee and the errand
+    // into the awaiting slot so the answer can only complete THIS request.
+    return [
+      {
+        kind: 'friend_needs_time',
+        friend: friend.nickname,
+        to: friend.friend_chat_id,
+        title,
+      },
+    ];
+  }
 
   let next: number | null;
   try {

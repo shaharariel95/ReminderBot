@@ -364,6 +364,19 @@ Check what it was shown before blaming the router.
   `friendReminder` decides whether it resolves. The inversion is the fix — the
   old "omit it if unknown" rule silently wrote the reminder to HIM.
   → `effects.friendReminder`
+- **`friendReminder` is a SECOND create path, and that is the whole story of
+  this feature.** It re-implemented time resolution and missed 0.16.0's
+  precedence flip, so "תזכיר לאמנון עוד שתי דקות" was answered "מתי?" with the
+  time four words in. Both paths now use `readWhen` + `preferHisWords`, and
+  `test/v31.test.ts` runs one sentence down BOTH and asserts they agree on the
+  hour — the guard is against the next divergence, not this one.
+  → `effects.friendReminder`
+- The hour is read in HER timezone on that path, so the tz is threaded into
+  `readWhen` too, and the answer to "באיזו שעה?" is resolved there rather than
+  pre-resolved against his clock. → `effects.friendReminder`
+- **A missing hour ASKS, and the question carries the request.** `no_time`
+  armed no slot, so his answer reached the router as a fresh sentence with no
+  name in it and became a reminder for HIM (#85). → `db.Awaiting` (`forwhom`)
 - `friendReminder` refuses three ways and they are one refusal. An unresolvable
   name does **not** fall back to a reminder for himself; a missing time does
   **not** fall back to an inbox capture. → `effects.friendReminder`
