@@ -513,7 +513,9 @@ Check what it was shown before blaming the router.
   reports the rungs that were REACHED, so the lower six stay unmeasured however
   long you wait — which is how two dead ids sat on the ladder from 19.08 to
   06.09. `/models` asks each rung directly. → `slash.ts` (`/models`)
-- Owner-only: it spends eight calls of real quota per run.
+- Owner-only: it spends one call of real quota per rung. Stated as a rate
+  because "eight calls" went stale in three comments the day 0.35.0 left the
+  ladder at six.
 - **It does not walk the ladder, and must not.** `generate()` drops tiers,
   retries and honours blocks — each of which is the thing being measured.
   → `gemini.probeModel`

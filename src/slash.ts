@@ -129,8 +129,9 @@ function tickLine(tick: number | null, tz: string): string {
 /** Commands only the owner may run. See the gate in handleSlash for why. */
 const OWNER_ONLY = new Set([
   '/diag', '/allow', '/deny', '/allowed', '/pending', '/errors',
-  // Spends real quota on the shared key — eight calls a run — and prints the
-  // shape of the whole ladder. Both are owner business.
+  // Spends real quota on the shared key — one call per rung, so the cost is
+  // however long the ladder is — and prints the shape of the whole ladder.
+  // Both are owner business.
   '/models',
 ]);
 
@@ -726,7 +727,13 @@ export async function handleSlash(
      * lower ones stay unmeasured no matter how long you wait. This asks them
      * directly.
      *
-     * Owner-only, and it spends eight calls of real quota per run.
+     * Owner-only, and it spends one call of real quota per rung.
+     *
+     * Stated as a rate and not as a total on purpose: this said "eight calls"
+     * until 0.35.0 dropped the 2.5 pair and left the ladder at six, and the
+     * number went stale in three comments at once while the printed output —
+     * which counts `probes.length` — stayed right. A count of something the
+     * config controls is a second copy of the config.
      *
      * The order printed is the LADDER order, numbered, because the answer this
      * is run to get is "is rung 1 still the right rung 1" — and that question
@@ -778,8 +785,8 @@ export async function handleSlash(
         }
       }
       // All of them failing is much more likely to be the key, the network or
-      // this probe than eight models going down at once — say so, instead of
-      // printing eight identical error lines and letting him infer it.
+      // this probe than every model going down at once — say so, instead of
+      // printing a column of identical error lines and letting him infer it.
       if (!ok.length) lines.push('אף אחד לא ענה — זה נראה כמו מפתח או רשת, לא כמו המודלים.');
       return lines.join('\n');
     }
