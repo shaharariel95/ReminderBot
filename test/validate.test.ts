@@ -31,12 +31,19 @@ function base(effects: Effect[]): string {
   return renderBaseline(effects, TZ);
 }
 
+const AT = new Date('2026-08-05T04:05:00Z').getTime();   // 07:05 Asia/Jerusalem
+
 const CREATED: Effect = {
   kind: 'reminder_created', id: 1, title: 'לרוץ',
-  at: new Date('2026-08-05T04:05:00Z').getTime(),   // 07:05 Asia/Jerusalem
+  at: AT,
   schedule: { type: 'once', at: '2026-08-05T07:05' }, requiresProof: false,
 };
 const NOTHING: Effect = { kind: 'nothing', why: 'chat', userText: 'מה קורה' };
+
+/** A closed instance, for the close-out's `done` rows. */
+const closedInst = (id: number, title: string) =>
+  ({ id, reminder_id: 1, chat_id: '1', title, fired_at: AT, next_nag_at: null,
+     nag_count: 0, status: 'done', proof: null, closed_at: AT, granted_min: 0 }) as any;
 
 section('rule 1 — invented times are rejected');
 check('a time that matches the facts passes',
@@ -249,8 +256,8 @@ section(
     // that talks about closes in the SECOND person — so the moment CLAIM grew
     // those forms it was the baseline most likely to fail its own validator,
     // with nothing here to say so.
-    { kind: 'evening_closeout', done: 2, missed: [], dropped: [], ahead: [] },
-    { kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] },
+    { kind: 'evening_closeout', done: [closedInst(20, 'לקנות חלב'), closedInst(21, 'לרוץ')], missed: [], dropped: [], ahead: [] },
+    { kind: 'evening_closeout', done: [], missed: [], dropped: [], ahead: [] },
     { kind: 'morning_brief', rows: [], openCount: 1 },
     {
       kind: 'needs_task_choice', action: 'complete',

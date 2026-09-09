@@ -187,7 +187,7 @@ section('§2 — naming an errand makes it a new reminder, ringing or not');
 // ---------------------------------------------------------------------------
 section('§2 — with two things ringing it does not guess which');
 //
-// Same reason matchItem returns null on a tie: pushing the wrong ring leaves
+// Same reason matchByTitle returns null on a tie: pushing the wrong ring leaves
 // the other one nagging and tells him it was handled.
 {
   const rig = createRig();

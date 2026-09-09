@@ -154,11 +154,15 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 
 ### Speech and the validator
 
-- Six rules. 1–4 ask "did the model INVENT this?"; 5–6 ask the opposite, because
-  a rewrite that says LESS asserts nothing and passes all of 1–4.
+- Seven rules. 1–4 ask "did the model INVENT this?"; 5–7 ask the opposite,
+  because a rewrite that says LESS asserts nothing and passes all of 1–4.
   → `validate.validate`
-- Rules 5 and 6 are deliberately low floors, and deliberately scoped — 5 to
-  moves, 6 to fires. The persona's job is to reword.
+- Rules 5, 6 and 7 are deliberately low floors, and deliberately scoped — 5 to
+  moves, 6 to fires, 7 to the close-out's own closes. The persona's job is to
+  reword. All three share `mentions`' one-word bar where they need a name.
+- **A dropped word is invisible to all seven.** They check for facts invented,
+  never for words missing, so "סגרת 1 **היום**" losing its day is a tense
+  change nothing sees — which is how rule 7 came to exist.
 - **Rule 3 over-fires and the record says by how much**: four false positives
   against two true ones, and both true ones caught a bug fixed at its root.
   Hebrew uses quotation marks for scare-quotes as often as for naming a thing.
@@ -219,6 +223,17 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 - The discount is OFF for `checkin_goal`: a goal's span is measured in days.
 - A summary is not a nag. A close-out reports a day and names what is open; it
   may not chase it, and it says what is still **ahead**. → `index.sendEveningCloseout`
+- **It names what he CLOSED too, and `done` is rows for the same reason
+  `missed` and `dropped` are.** It was a count, and a count has no identity in
+  it: "אוקיי, המשימה נסגרה. יש לך 39 ברצף" went out eleven hours after his last
+  message, true in every word and unanswerable. → `db.doneBetween`
+- Capped at four named, **remainder counted**, never dropped. → `voice.CLOSEOUT_NAMED`
+- **Rule 7 requires the identity, not a verb.** The message said "נסגרה",
+  which is in no group in the lexicon — requiring the name needs no lexicon at
+  all, and that is the whole reason it is shaped that way. → `validate.validate`
+- The `done` titles are swept into `facts.ts` for the ones **past the cap
+  only**: the named four ride in on validate's baseline fold, because voice.ts
+  quotes them and the bullet lists do not. → `facts.buildFacts`
 - `briefDue`/`closeoutDue` are guarded by `!quiet` **and** `!chasing`, on
   identical terms. A hold, not a cancellation — `markDailySent` runs inside the
   senders. → `index.tickChat`
@@ -248,6 +263,33 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 - **An ABSOLUTE retime supersedes the ring**, closing it `superseded` so it
   cannot pay a streak point. → `effects.applyIntent`
 
+### Closing something before it rings
+
+- **`complete` resolving against `ctx.open` alone is a denial he can disprove.**
+  Nothing ringing is not nothing open: the errand may still be on the schedule,
+  and "אין לי משימה פתוחה כזאת לסגור" about a row `/list` prints the id of is
+  the one rule in the second person. → `effects.completeEarly`
+- It was reported TWICE, ten days apart, and 0.19.0 fixed only the lie —
+  validate.ts learned "סגרת" so the persona would stop inverting the refusal
+  into praise. **A validator that stops a false claim about something the bot
+  cannot do is not a way of doing it.** → `validate.CLAIM_GROUPS`
+- The write is a **real dose**, not a special case: an instance filed against
+  the slot, closed `done`, and the schedule advanced past it in the same
+  breath. Skip the advance and it rings anyway, which is half the incident.
+  → `effects.completeEarly`
+- The next fire is computed **after the DOSE, not after `now`** — he is
+  reporting early, so `now` is before the slot and a daily reminder resolves to
+  the very fire this close replaces. → `time.computeNext`
+- Its instance gets **`next_nag_at` null**: nothing was sent, so there is
+  nothing to chase. → `db.createInstance`
+- There is deliberately **no "he only has one reminder" fallback**. A ringing
+  instance is a live question the bot just asked; a row for Friday is not, and
+  a bare "סיימתי" closing it is the bot picking which of his days he meant.
+- **A ringing instance is still resolved first**, and the order is load-bearing
+  precisely where a daily reminder is in `ctx.open` and `ctx.reminders` at
+  once — try the new path first and his report closes TOMORROW while tonight
+  goes on nagging. Two tests were vacuous before one could show that.
+
 ### Items
 
 - Items hang off the REMINDER, and `resetItems` on each fire is what makes a
@@ -256,8 +298,11 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
   Over-splitting is the worse error. → `effects.splitIntoItems`
 - ל glues onto a day too; bare time words are discounted from the verb count.
   → `quickparse.isBareTimeWord`
-- `complete_item` **never** falls back to closing the whole task, and `matchItem`
-  returns null on a tie. → `effects.matchItem`
+- `complete_item` **never** falls back to closing the whole task, and
+  `matchByTitle` returns null on a tie. → `effects.matchByTitle`
+- That matcher is shared with `completeEarly` and was renamed when the second
+  caller arrived. It compares **whole words**, and Hebrew inflects every one of
+  them — "זרקתי את הזבל" hits nothing in "לזרוק זבל". → `effects.matchByTitle`
 - Items are shown to the router only under OPEN instances — the same scope
   `openItemsFor` matches against. Keep those two together.
   → `effects.openItemsFor`

@@ -585,7 +585,13 @@ export type Effect =
    * about the rest of the evening, and the persona filled the silence: chat B,
    * 25.08.2026 21:00, "זהו, אין יותר להיום" — with a 22:00 dose scheduled.
    */
-  | { kind: 'evening_closeout'; done: number; missed: Instance[]; dropped: Instance[]; ahead: Reminder[] }
+  /**
+   * `done` is rows, not a count, for exactly the reason `missed` and `dropped`
+   * are — and it was a count until 09.09.2026 21:00, when "אוקיי, המשימה
+   * נסגרה. יש לך 39 ברצף" went out eleven hours after his last message about a
+   * task the bot could not name. See db.doneBetween.
+   */
+  | { kind: 'evening_closeout'; done: Instance[]; missed: Instance[]; dropped: Instance[]; ahead: Reminder[] }
   | { kind: 'distress'; text: string }
   /** Nothing was written. `why` selects the deterministic wording. */
   /**

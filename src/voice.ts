@@ -46,6 +46,13 @@ function missNote(misses: number | undefined): string {
   return `\n\n${misses} פעמים ברצף שזה לא קורה. אולי השעה לא נכונה, אולי זה לא באמת חשוב לך — תחליט.`;
 }
 
+/**
+ * How many closed errands the evening close-out names before it starts
+ * counting. Four fits one line of a phone screen; the rest is stated as a
+ * number so nothing is silently dropped.
+ */
+const CLOSEOUT_NAMED = 4;
+
 function one(e: Effect, tz: string): string {
   switch (e.kind) {
     case 'reminder_created':
@@ -343,9 +350,37 @@ function one(e: Effect, tz: string): string {
       return `בוקר. היום יש לך ${e.rows.length}:\n${lines.join('\n')}${tail}`;
     }
     case 'evening_closeout': {
-      const closed = e.done === 0 ? 'לא סגרת כלום היום' : `סגרת ${e.done} היום`;
       const name = (i: { title: string }) =>
         `· ${untitled(i.title) ? 'משהו שלא אמרת מה זה' : i.title}`;
+      /*
+       * NAMED, not counted — the same rule `dropped` below has carried since
+       * it was written, applied to the other side of the day.
+       *
+       * `done` was a bare number here, and on 09.09.2026 21:00 a day with one
+       * close in it and nothing else in play rendered as "סגרת 1 היום. אין
+       * זנבות." The persona had no identity to state and supplied one:
+       *
+       *   אוקיי, המשימה נסגרה.
+       *   יש לך 39 ברצף. נחמד.
+       *
+       * Eleven hours after his last message, "המשימה" definite and unnamed,
+       * and the baseline's own "היום" dropped — validate.ts checks for facts
+       * invented, never for words dropped, so the tense went with it. Nothing
+       * in it is false. It is unanswerable, which is its own kind of failure:
+       * the one question he asked of it was "what task was closed?"
+       *
+       * Capped and the remainder COUNTED, never silently dropped — same rule
+       * as brain.inboxSummary. A day with eleven closes in it is a good day and
+       * a wall of eleven quoted titles is not a summary of one.
+       */
+      const shown = e.done.slice(0, CLOSEOUT_NAMED);
+      const rest = e.done.length - shown.length;
+      const which = shown
+        .map((i) => (untitled(i.title) ? 'משהו שלא אמרת מה זה' : `"${i.title}"`))
+        .join(' · ');
+      const closed = e.done.length === 0
+        ? 'לא סגרת כלום היום'
+        : `סגרת ${e.done.length} היום: ${which}${rest > 0 ? ` ועוד ${rest}` : ''}`;
       /*
        * What is still to come tonight, stated BEFORE the "אין זנבות" line can
        * be reached. The close-out runs at 21:00 and reads only backwards, so a

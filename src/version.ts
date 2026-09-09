@@ -12,4 +12,4 @@
  * should be made on purpose. It is also shown in /diag, so it is the first
  * thing to check when the bot is behaving like code you thought you replaced.
  */
-export const VERSION = '0.35.1';
+export const VERSION = '0.35.2';

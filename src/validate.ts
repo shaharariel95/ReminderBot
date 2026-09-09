@@ -473,5 +473,46 @@ export function validate(text: string, facts: Facts, baseline: string): Verdict 
     }
   }
 
+  /*
+   * Rule 7 — a close-out that closed something must NAME something it closed.
+   *
+   * Production, 09.09.2026 21:00. One instance closed that day, at 10:09,
+   * nothing else in play, so the baseline was "סגרת 1 היום. אין זנבות." What
+   * shipped was
+   *
+   *   אוקיי, המשימה נסגרה.
+   *   יש לך 39 ברצף. נחמד.
+   *
+   * — eleven hours after his last message, over an unnamed "המשימה", with the
+   * baseline's own "היום" gone. Rules 1-4 have nothing to say: no time, no
+   * quote, no number outside the allow-list, and `evening_closeout` is in the
+   * close group's kinds because a close-out really is entitled to close verbs.
+   * Rules 5 and 6 do not reach it either. It is the blind side those two were
+   * written for, one effect kind further along — a rewrite that says LESS
+   * asserts nothing checkable, and an unnamed close reads as a fresh
+   * confirmation of a write that did not happen this turn.
+   *
+   * The obvious narrower version — require the name only when the rewrite uses
+   * a close VERB — was rejected, and the production message is the argument:
+   * it says "נסגרה", which is in no group here and would have to be added,
+   * followed by the next inflection. issues.md §6 is about exactly that
+   * treadmill. Requiring the identity instead needs no lexicon at all.
+   *
+   * The bar is `mentions`, the same one-shared-word floor rule 6 uses, and it
+   * is satisfied by naming ANY of the day's closes — the persona is free to
+   * pick the interesting one and to drop the rest, which the baseline itself
+   * does past CLOSEOUT_NAMED. Untitled instances are skipped for the same
+   * reason rule 6 skips them: there is no errand in "משהו שלא אמרת מה זה" to
+   * require.
+   */
+  for (const e of facts.effects) {
+    if (e.kind !== 'evening_closeout') continue;
+    const named = e.done.map((i) => i.title).filter((t) => t && t !== UNTITLED_TITLE);
+    if (!named.length) continue;
+    if (!mentions(text, named)) {
+      return { ok: false, reason: `close-out never named what it closed ("${named[0]}")` };
+    }
+  }
+
   return { ok: true };
 }

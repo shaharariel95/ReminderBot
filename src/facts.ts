@@ -208,7 +208,25 @@ export function buildFacts(ctx: Context, effects: Effect[], tz: string): Facts {
       }
     }
     if (e.kind === 'evening_closeout') {
-      for (const i of [...e.missed, ...e.dropped]) titles.add(i.title);
+      /*
+       * `done` joined this list when it became rows, and what it buys is
+       * narrower than the usual reason — worth stating, because the usual
+       * reason does not apply and a line believed load-bearing that is not is
+       * how the next person mis-edits this.
+       *
+       * voice.ts QUOTES the closed titles, and validate() folds every quoted
+       * string in the baseline into its own allow-list, so rule 3 covers the
+       * named ones with or without this. (`missed` and `dropped` render as
+       * bare `· title` bullets with no quotes, which is why THEIR sweep is
+       * doing the whole job.)
+       *
+       * What this covers is the ones past CLOSEOUT_NAMED. The baseline names
+       * four and counts the rest, so on a six-close day two true titles exist
+       * that the baseline never quotes — and a rewrite naming one of those,
+       * which rule 7 is actively pushing the model to do, would be scored an
+       * invented task and discarded whole. Silently, as a counter in /diag.
+       */
+      for (const i of [...e.done, ...e.missed, ...e.dropped]) titles.add(i.title);
       // `ahead` states an HOUR as well as a title — it is the one part of this
       // effect that looks forward. Sweeping the time is not optional: voice.ts
       // now prints it, and CLAUDE.md's rule is that a fact the model is shown

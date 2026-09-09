@@ -47,7 +47,7 @@ const samples: Effect[] = [
   { kind: 'photo_accepted', instanceId: 9, title: 'לרוץ', reason: 'נעלי ריצה', streak: 2 },
   { kind: 'photo_rejected', instanceId: 9, title: 'לרוץ', reason: 'חתול' },
   { kind: 'morning_brief', rows: [], openCount: 0 },
-  { kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] },
+  { kind: 'evening_closeout', done: [], missed: [], dropped: [], ahead: [] },
   { kind: 'profile_noted', id: 1, note: 'אני קם ב-6' },
   { kind: 'profile_known', note: 'אני קם ב-6' },
   { kind: 'profile_forgotten', note: 'אני קם ב-6' },
@@ -226,13 +226,13 @@ section('the daily messages describe the day without claiming to have changed it
   check('an empty day still says something rather than nothing',
     renderBaseline([{ kind: 'morning_brief', rows: [], openCount: 0 }], TZ).trim().length > 0);
 
-  const inst = (id: number, title: string, status: 'open' | 'failed') => ({
+  const inst = (id: number, title: string, status: 'open' | 'failed' | 'done') => ({
     id, reminder_id: 1, chat_id: '1', title, fired_at: AT, next_nag_at: null,
     nag_count: 0, status, proof: null, closed_at: null, granted_min: 0,
   });
 
   const closeout = renderBaseline([{
-    kind: 'evening_closeout', done: 2,
+    kind: 'evening_closeout', done: [inst(20, 'לבקש מצחי את המייל', 'done'), inst(21, 'לרוץ', 'done')],
     missed: [inst(9, 'לזרוק זבל', 'open')], dropped: [], ahead: [],
   }], TZ);
   check('the close-out counts what was closed', closeout.includes('2'), closeout);
@@ -255,14 +255,14 @@ section('the daily messages describe the day without claiming to have changed it
   const FIRST_PERSON_CLAIM = /רשמתי|קבעתי|שמרתי|שמתי לך|קלטתי|סימנתי|סגרתי|סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי/;
   check('the close-out claims nothing the BOT did', !FIRST_PERSON_CLAIM.test(closeout), closeout);
   check('and "לא סגרת כלום היום" is not read as a claim either', !CLAIM.test(
-    renderBaseline([{ kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] }], TZ),
+    renderBaseline([{ kind: 'evening_closeout', done: [], missed: [], dropped: [], ahead: [] }], TZ),
   ));
 
   // The gap this section exists for: a task nagged the full ladder and given
   // up on used to be reachable only as a NUMBER. "2 נפלו" is not something he
   // can act on, and there is a button underneath it that assumes he can.
   const withDropped = renderBaseline([{
-    kind: 'evening_closeout', done: 0,
+    kind: 'evening_closeout', done: [],
     missed: [], dropped: [inst(11, 'לרוץ', 'failed'), inst(12, 'להתקשר לאמא', 'failed')], ahead: [],
   }], TZ);
   check('tasks the bot gave up on are named, not counted',
@@ -271,7 +271,7 @@ section('the daily messages describe the day without claiming to have changed it
     !withDropped.includes('עדיין פתוח'), withDropped);
 
   const both = renderBaseline([{
-    kind: 'evening_closeout', done: 1,
+    kind: 'evening_closeout', done: [inst(20, 'לקנות חלב', 'done')],
     missed: [inst(9, 'לזרוק זבל', 'open')], dropped: [inst(11, 'לרוץ', 'failed')], ahead: [],
   }], TZ);
   check('a day with both kinds lists both, separately',
@@ -283,7 +283,7 @@ section('the daily messages describe the day without claiming to have changed it
   // over a dose scheduled for 22:00 the same evening, because the baseline
   // said nothing about the rest of the night and the persona filled the gap.
   const tonight = renderBaseline([{
-    kind: 'evening_closeout', done: 1, missed: [], dropped: [],
+    kind: 'evening_closeout', done: [inst(20, 'לקנות חלב', 'done')], missed: [], dropped: [],
     ahead: [{
       id: 63, chat_id: '1', title: 'לקחת תרופה', notes: null,
       schedule: '{"type":"daily","time":"22:00"}', tz: TZ, requires_proof: 0, proof_type: 'any',
@@ -297,9 +297,13 @@ section('the daily messages describe the day without claiming to have changed it
   check('and a day with something still ahead is not "no loose ends"',
     !tonight.includes('אין זנבות'), tonight);
 
-  const clean = renderBaseline([{ kind: 'evening_closeout', done: 3, missed: [], dropped: [], ahead: [] }], TZ);
+  const clean = renderBaseline([{
+    kind: 'evening_closeout',
+    done: [inst(20, 'לקנות חלב', 'done'), inst(21, 'לרוץ', 'done'), inst(22, 'לזרוק זבל', 'done')],
+    missed: [], dropped: [], ahead: [],
+  }], TZ);
   check('a day with no loose ends says so', clean.includes('אין זנבות'), clean);
-  const nothing = renderBaseline([{ kind: 'evening_closeout', done: 0, missed: [], dropped: [], ahead: [] }], TZ);
+  const nothing = renderBaseline([{ kind: 'evening_closeout', done: [], missed: [], dropped: [], ahead: [] }], TZ);
   check('and a day with nothing closed does not pretend otherwise',
     nothing.includes('לא סגרת כלום'), nothing);
 }

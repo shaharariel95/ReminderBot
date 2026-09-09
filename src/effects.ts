@@ -817,14 +817,23 @@ async function openItemsFor(env: Env, chatId: string, ctx: Context): Promise<Rem
 }
 
 /**
- * Which open item his words are about, or null when it is not obvious.
+ * Which of these rows his words are about, or null when it is not obvious.
  *
  * Deliberately requires a real word in common — a shared "את" or "ל" is not
- * evidence of anything. Returning null when two items match equally well is
- * the whole point: the caller then ASKS, and asking is always truthful where
- * guessing is a claim about what he did.
+ * evidence of anything. Returning null when two rows match equally well is
+ * the whole point: the caller then ASKS or refuses, and both are truthful
+ * where guessing is a claim about what he did.
+ *
+ * Generic over `{ title }` because there are two rows this question gets asked
+ * about and it is one question: which OPEN ITEM "החזרתי את הראוטר" names
+ * (complete_item), and which SCHEDULED REMINDER "סגור את הבקשה מצחי" names
+ * (completeEarly, 0.35.2). It shipped as `matchItem`, and the second caller
+ * arriving is exactly the moment this codebase's own rule bites — one
+ * question, one implementation. A second word-overlap scorer beside this one
+ * is how `namesSomeoneElse`/`addressesSomeoneElse` and `DAY_OFFSET`'s number
+ * parser each became two things to fix.
  */
-function matchItem(open: ReminderItem[], text: string): ReminderItem | null {
+function matchByTitle<T extends { title: string }>(rows: T[], text: string): T | null {
   const words = new Set(
     normalizeTitle(text)
       .split(' ')
@@ -832,21 +841,123 @@ function matchItem(open: ReminderItem[], text: string): ReminderItem | null {
   );
   if (!words.size) return null;
 
-  const scored = open
-    .map((item) => {
-      const itemWords = normalizeTitle(item.title)
+  const scored = rows
+    .map((row) => {
+      const rowWords = normalizeTitle(row.title)
         .split(' ')
         .filter((w) => w.length >= 3);
-      return { item, hits: itemWords.filter((w) => words.has(w)).length };
+      return { row, hits: rowWords.filter((w) => words.has(w)).length };
     })
     .filter((s) => s.hits > 0)
     .sort((a, b) => b.hits - a.hits);
 
   if (!scored.length) return null;
-  // A tie means two errands fit his sentence equally well and nothing in it
+  // A tie means two rows fit his sentence equally well and nothing in it
   // separates them.
   if (scored.length > 1 && scored[0].hits === scored[1].hits) return null;
-  return scored[0].item;
+  return scored[0].row;
+}
+
+/**
+ * "עשיתי" about something that has not rung yet.
+ *
+ * `complete` resolves against `ctx.open`, which holds open INSTANCES — a row
+ * that exists only once the bot has actually rung. So a reminder still sitting
+ * on the schedule had no path from "I did it" to being closed at all, and
+ * every phrasing got the same answer. Production, 09.09.2026, #88 due at
+ * 10:00, done at 09:37:
+ *
+ *   09:37  סגור את המשימה עם המייל, עשיתי  →  אין לי משימה פתוחה שמתאימה לזה.
+ *   09:37  סגור את הבקשה מצחי              →  אין לי משימה פתוחה כזאת לסגור כרגע.
+ *   09:38  /list                            →  #88 לבקש מצחי את המייל שלו, 10:00
+ *   09:38  סגור את 88                       →  אין לי משימה פתוחה כזאת לסגור.
+ *   10:00  it rang, and he closed it again.
+ *
+ * Two of those refusals came back with "בטוח שפתחת אותה בכלל?" attached — the
+ * bot doubting him about a row it had printed the id of thirty seconds
+ * earlier. And this is the SECOND time: 30.08.2026, "חידשתי" over the same
+ * empty `ctx.open`, where the persona turned the refusal into "יפה שסגרת את זה
+ * מוקדם" and #68 rang twenty-four minutes later. 0.19.0 taught validate.ts the
+ * second person so the bot would stop lying about it, and left the gap — a
+ * validator that stops a false claim about something the bot cannot do is not
+ * a way of doing it.
+ *
+ * The write is a REAL DOSE, not a special case: an instance filed against the
+ * slot it belongs to and closed `done`, exactly the pair the fire path writes,
+ * so the streak, /stats, /why and patterns.ts all see one shape. And the
+ * schedule moves past that dose in the same breath, or the fix is only half of
+ * one and it rings anyway — which is the half 30.08 is a record of.
+ *
+ * It refuses whenever his sentence does not name a row, and there is
+ * deliberately NO "he only has one reminder, so that must be it" fallback of
+ * the kind `complete` uses over a lone open instance. A ringing instance is a
+ * live question the bot itself just asked; a reminder for Friday is not, and
+ * closing it on a bare "סיימתי" is the bot deciding which of his days he meant
+ * and then claiming he finished it.
+ *
+ * Returns null for "not this path" so the caller can keep its own wording.
+ */
+async function completeEarly(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  intent: Intent,
+  userText: string,
+): Promise<Effect[] | null> {
+  // ctx.reminders is his own, scoped by chat_id in the query — resolving here
+  // rather than through db.getReminder is what stops a target_id the model
+  // invented from reaching another chat's row, the same guard resolveReminder
+  // spells out by hand.
+  const candidates = ctx.reminders.filter((r) => r.next_fire_at !== null);
+  if (!candidates.length) return null;
+  // His own words are consulted even when the router named a row, but only as
+  // the fallback: an id that resolves is the more specific answer. The id may
+  // also be a stale INSTANCE id — the prompt spent a year calling target_id
+  // that on this action — which is why a miss here falls through to the words
+  // instead of refusing.
+  const r =
+    (intent.target_id ? candidates.find((x) => x.id === intent.target_id) : null) ??
+    matchByTitle(candidates, userText);
+  if (!r || r.next_fire_at === null) return null;
+
+  const now = Date.now();
+  const dueAt = r.next_fire_at;
+  let next: number | null = null;
+  try {
+    // Computed after the DOSE, not after `now`: he is reporting early, so
+    // `now` is before the slot being consumed and a daily reminder would
+    // resolve to the very fire this close is meant to replace. The max keeps
+    // it right the other way too, for a slot the cron is running late on.
+    next = computeNext(JSON.parse(r.schedule) as Schedule, r.tz, Math.max(dueAt, now));
+  } catch (err) {
+    console.error(`bad schedule on reminder ${r.id}`, err);
+  }
+
+  // Claim the slot BEFORE advancing the schedule. `due_at` is unique per
+  // reminder (migrations/017), so if the cron opened this same dose between
+  // buildContext and here, this returns null — and then the schedule has
+  // already been advanced by the cron and must not be advanced a second time,
+  // which would silently eat tomorrow's fire.
+  //
+  // `nextNagAt` is null because nothing was SENT. An instance means "he was
+  // told, and we are waiting to hear back"; a nag for a message he never
+  // received is the failure the muted-fire block in index.ts is a monument to.
+  let instanceId = await db.createInstance(env, r, now, null, dueAt);
+  if (instanceId === null) {
+    const already = (await db.openInstances(env, chatId)).find((i) => i.reminder_id === r.id);
+    // Opened and already closed by somebody else in the same second. Nothing
+    // to do and nothing true to say about it here.
+    if (!already) return null;
+    instanceId = already.id;
+  } else {
+    await db.setNextFire(env, r.id, next);
+  }
+  await db.closeInstance(env, instanceId, 'done', userText.slice(0, 500) || 'דיווח');
+  const fresh = await db.stats(env, chatId);
+  return [
+    { kind: 'instance_done', id: instanceId, title: r.title, streak: fresh.currentStreak },
+    ...(await suggestFollowup(env, chatId, ctx, instanceId, r.title)),
+  ];
 }
 
 /**
@@ -1091,7 +1202,7 @@ export async function applyIntent(
        *    is the same discriminator the ringing branch of `reschedule` does
        *    not need, because a reschedule already names its target.
        *  - EXACTLY one thing is ringing. Two, and there is no way to tell
-       *    which he meant — same answer as matchItem's null-on-tie: pushing
+       *    which he meant — same answer as matchByTitle's null-on-tie: pushing
        *    the wrong ring leaves the other one nagging and reports it handled.
        *  - the time is RELATIVE. An absolute hour on an untitled message is
        *    not a deferral of anything in particular.
@@ -1262,6 +1373,11 @@ export async function applyIntent(
         // truthful, "no open task" (below) is not — those tasks are right
         // there. The genuinely-empty case keeps its existing message.
         if (ctx.open.length > 1) return [{ kind: 'needs_task_choice', action: 'complete', open: ctx.open }];
+        // Nothing is RINGING, which is not the same as nothing being open to
+        // him: the thing he did may still be sitting on the schedule. See
+        // completeEarly for the two production transcripts this is.
+        const early = await completeEarly(env, chatId, ctx, intent, userText);
+        if (early) return early;
         return [{ kind: 'nothing', why: 'no_open_task', userText }];
       }
       await db.closeInstance(env, inst.id, 'done', userText.slice(0, 500) || 'דיווח');
@@ -1284,7 +1400,7 @@ export async function applyIntent(
       const open = await openItemsFor(env, chatId, ctx);
       const item =
         open.find((i) => i.id === intent.item_id) ??
-        matchItem(open, intent.title ?? intent.note ?? userText);
+        matchByTitle(open, intent.title ?? intent.note ?? userText);
       if (!item) {
         // Never silently falls back to closing the whole task. Getting this
         // wrong claims he did errands he did not do, which is the one thing

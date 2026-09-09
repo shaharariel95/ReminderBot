@@ -2051,8 +2051,10 @@ async function sendMorningBrief(env: Env, chatId: string, now: number, tz: strin
 async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: string): Promise<void> {
   await db.markDailySent(env, chatId, 'closeout', localDateKey(now, tz));
   const { from, to } = localDayBounds(now, tz);
-  const [tally, missed, dropped, ahead] = await Promise.all([
-    db.dayTally(env, chatId, from, now),
+  const [closed, missed, dropped, ahead] = await Promise.all([
+    // The ROWS, not dayTally's count: the close-out has to be able to name
+    // what it closed. See db.doneBetween for the 21:00 message that bought it.
+    db.doneBetween(env, chatId, from, now),
     db.openInstances(env, chatId),
     db.droppedBetween(env, chatId, from, now),
     // The rest of TONIGHT. Everything else here looks backwards, which is how
@@ -2063,11 +2065,11 @@ async function sendEveningCloseout(env: Env, chatId: string, now: number, tz: st
   // A day with something still ahead in it is worth closing out even if
   // nothing has happened yet: "nothing so far, and here is what is left" is a
   // useful message, and it is the one the old guard suppressed entirely.
-  if (!tally.done && !missed.length && !dropped.length && !ahead.length) return;
+  if (!closed.length && !missed.length && !dropped.length && !ahead.length) return;
   const ctx = await buildContext(env, chatId);
   await sendOutcome(
     env, chatId, ctx,
-    [{ kind: 'evening_closeout', done: tally.done, missed, dropped, ahead }],
+    [{ kind: 'evening_closeout', done: closed, missed, dropped, ahead }],
     /*
      * 'summarising', not the default 'chasing'.
      *

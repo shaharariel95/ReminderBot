@@ -510,6 +510,47 @@ export async function dayTally(
 }
 
 /**
+ * Instances he CLOSED inside [from, to), as rows rather than as a number.
+ *
+ * `dayTally` already counts these, and the close-out used to read that count
+ * and nothing else. Production, 09.09.2026 21:00, over a single close at 10:09:
+ *
+ *   אוקיי, המשימה נסגרה.
+ *   יש לך 39 ברצף. נחמד.
+ *
+ * Eleven hours after he last said anything, about a task it could not name,
+ * with the baseline's own "היום" gone. Every word of it is true and it reads as
+ * a confirmation of a write that had just happened — "what task?" is a question
+ * he cannot answer and neither could the bot, because a count has no identity
+ * in it.
+ *
+ * The argument for this is already written down one field over: `missed` and
+ * `dropped` are carried as rows "so the reply can NAME them — a close-out that
+ * can only say '2 נפלו' is how an ignored task quietly stops existing". The
+ * same sentence is true of the ones he did.
+ *
+ * So the count comes off `.length` here rather than out of `dayTally`: two
+ * queries answering "how many did he close today" is two things to keep
+ * agreeing, and this codebase has paid for that pattern six times over.
+ */
+export async function doneBetween(
+  env: Env,
+  chatId: string,
+  from: number,
+  to: number,
+): Promise<Instance[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM instances
+      WHERE chat_id = ? AND status = 'done'
+        AND closed_at IS NOT NULL AND closed_at >= ? AND closed_at < ?
+      ORDER BY closed_at`,
+  )
+    .bind(chatId, from, to)
+    .all<Instance>();
+  return res.results ?? [];
+}
+
+/**
  * Instances the bot gave up on inside [from, to) — nagged the full ladder and
  * never got an answer.
  *
@@ -653,8 +694,15 @@ export async function createInstance(
    * `r.nag_interval_min` because how hard to push is a persona decision, not a
    * storage one — see persona.nagDelayMinutes. The column stays as the
    * per-reminder override for anyone who sets it deliberately.
+   *
+   * `null` means "never nag about this one". Only one caller wants that, and
+   * it is not an optimisation: effects.completeEarly opens a dose for
+   * something he did BEFORE it rang, so nothing was ever sent and there is
+   * nothing to chase. An instance means "he was told, and we are waiting to
+   * hear back" — see the muted-fire block in index.ts for what a nag about a
+   * message he never received reads like.
    */
-  nextNagAt: number = firedAt + r.nag_interval_min * 60_000,
+  nextNagAt: number | null = firedAt + r.nag_interval_min * 60_000,
   /** The instant it was SUPPOSED to ring — `next_fire_at`, read before the
    *  schedule was advanced. See migrations/017. */
   dueAt: number | null = null,

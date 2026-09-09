@@ -75,9 +75,10 @@ const goalRow = () =>
      last_progress: null, last_progress_at: null, checkin_count: 0,
      created_at: 0, next_checkin_at: null }) as any;
 
-const instRow = () =>
-  ({ id: 9, reminder_id: 1, chat_id: HIM, title: 'לרוץ', status: 'open', fired_at: AT,
-     closed_at: null, nag_count: 0, next_nag_at: null, proof: null, due_at: AT, granted_min: 0 }) as any;
+const instRow = (id = 9, title = 'לרוץ', status = 'open') =>
+  ({ id, reminder_id: 1, chat_id: HIM, title, status, fired_at: AT,
+     closed_at: status === 'open' ? null : AT, nag_count: 0, next_nag_at: null,
+     proof: null, due_at: AT, granted_min: 0 }) as any;
 
 const itemRow = () =>
   ({ id: 3, reminder_id: 1, chat_id: HIM, title: 'ראוטר', position: 0, done_at: null, created_at: 0 }) as any;
@@ -133,7 +134,11 @@ const SAMPLES: { [K in Effect['kind']]: Extract<Effect, { kind: K }> } = {
   profile_forgotten: { kind: 'profile_forgotten', note: 'אוהב קפה' },
   listed_profile: { kind: 'listed_profile', rows: [{ id: 1, note: 'אוהב קפה' }] },
   morning_brief: { kind: 'morning_brief', rows: [remRow(1, 'לרוץ')], openCount: 0 },
-  evening_closeout: { kind: 'evening_closeout', done: 2, missed: [], dropped: [], ahead: [] },
+  evening_closeout: {
+    kind: 'evening_closeout',
+    done: [instRow(20, 'לקנות חלב', 'done'), instRow(21, 'לרוץ', 'done')],
+    missed: [], dropped: [], ahead: [],
+  },
   pattern_pushed: { kind: 'pattern_pushed', id: 1, title: 'לנקות', snoozes: 6, fires: 7, at: AT },
   pattern_failing: { kind: 'pattern_failing', id: 1, title: 'לנקות', dropped: 4, fires: 4 },
   pattern_kept: { kind: 'pattern_kept' },
