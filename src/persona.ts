@@ -34,6 +34,24 @@ import type { Settings, Stats } from './types';
  * while 5-7 ask whether the rewrite said LESS, and this one said strictly
  * more. Nothing was asking whether the reply was a chat message at all.
  *
+ * And it is the SECOND time, which the database knew and nobody read.
+ * `rejections` #15, 07.09.2026 20:26, over a `reminder_created`:
+ *
+ *   מה שקרה עכשיו: קבעתי #85: "לשלוח לשחר הודעה שעבד" — פעם אחת ב-07.09 …
+ *   משימה: לנסח את זה מחדש בקול שלי.
+ *   חוקים:
+ *   -  …
+ *
+ * — the same leak, a week earlier, wearing "משימה"/"חוקים" where 14.09 wore
+ * "הנחיות". It was caught, and caught by ACCIDENT: rule 3 scored the heading
+ * an invented task because that rewrite happened to put quote marks round it.
+ * Rule 3 sees a quoted invention and nothing sees an unquoted one, which is
+ * the sentence already written under `brain.speak` about a different phantom.
+ * Seven days later the same shape arrived without the quotes and shipped
+ * twice. A guard that holds only when the model decorates it is not a guard,
+ * and the label it echoes is not the part to match on — which is why the
+ * bullet scan below carries the other half.
+ *
  * The only thing standing against it was the prompt's own closing line, "רק
  * את ההודעות עצמן, בלי הקדמות". A rule that matters goes in code.
  *

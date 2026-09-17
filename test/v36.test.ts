@@ -138,6 +138,30 @@ const LEAK_NEEDS_TIME = `מה שקרה עכשיו:
 תן שעה ויום ונסגור את זה.`;
 
 /**
+ * `rejections` #15, 07.09.2026 20:26 — the same leak a week earlier, pulled
+ * out of production verbatim.
+ *
+ * It was caught, and caught by ACCIDENT: the third bullet quotes the heading,
+ * so rule 3 scored "מה שקרה עכשיו" an invented task. Nothing was looking at
+ * the shape, so when the same thing arrived on 14.09 without the quote marks
+ * it shipped. This case therefore asserts the REASON, not just the refusal —
+ * "rejected" is true of it either way, and that is exactly the trap.
+ */
+const LEAK_0709 = `מה שקרה עכשיו: קבעתי #85: "לשלוח לשחר הודעה שעבד" — פעם אחת ב-07.09 בשעה 20:28. הראשונה ב-יום ב׳, 07.09.2026, 20:28.
+
+משימה: לנסח את זה מחדש בקול שלי.
+חוקים:
+- אישור קצר = הודעה אחת.
+- בלי שקרים — תאריך ושעה בדיוק כמו ב"מה שקרה עכשיו": 07.09 בשעה 20:28 (או בספרות שצוינו).
+- מספר תזכורת: #85.
+- בלי עובדות חדשות.
+
+ניסוח:
+רשמתי.
+
+#85 — 20:28.`;
+
+/**
  * The FIRST message of the 21:00 burst on its own, exactly as he received it.
  *
  * Carried separately because the full leak above trips both halves of rule 8
@@ -190,6 +214,19 @@ async function main(): Promise<void> {
     const v3 = validate(LEAK_HEADING_ONLY, facts([CLOSEOUT]), base([CLOSEOUT]));
     check('the heading alone is enough, with no bullet under it', !v3.ok,
       `verdict: ${JSON.stringify(v3)}`);
+
+    // 07.09, which rule 3 caught by luck. The REASON is the assertion: this
+    // one is rejected with or without rule 8, and only the reason says which
+    // guard did it.
+    const created: Effect = {
+      kind: 'reminder_created', id: 85, title: 'לשלוח לשחר הודעה שעבד',
+      at: wallToUtc(2026, 9, 7, 20, 28, TZ),
+      schedule: { type: 'once', at: '2026-09-07T20:28' }, requiresProof: false,
+    };
+    const v4 = validate(LEAK_0709, facts([created]), base([created]));
+    check('the 07.09 leak is refused for being the prompt, not for a quote',
+      v4.reason?.startsWith('wrote the prompt back') === true,
+      `verdict: ${JSON.stringify(v4)}`);
   }
 
   section('the instruction block is caught by its shape, not by its words');
