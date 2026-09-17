@@ -59,21 +59,6 @@ export interface Verdict {
  * a worse outcome than nothing and a much better one than a phantom
  * confirmation, which is the trade rule 2 exists to make.
  */
-/*
- * NOTE, before you add a verb here believing you have tightened anything:
- * `validate()` does not read this. It reads CLAIM_GROUPS below, which carries
- * its own copy of every verb. This constant is the documented lexicon and a
- * test fixture, and nothing in src/ consults it.
- *
- * Demonstrated rather than assumed: deleting the 0.19.0 additions from HERE
- * alone left the whole suite green, and deleting them from the groups turned
- * it red immediately. Two lists that must agree, where only one of them bites
- * — so a verb added to one and not the other is a fix that does nothing and
- * reads in review as though it did.
- */
-export const CLAIM =
-  /רשמתי|קבעתי|שמרתי|שמתי לך|נקבע|נשמר|תזכורת נוצרה|קלטתי|סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|עדכנתי|הזזתי|דחיתי|העברתי|ביטלתי|מחקתי|סגרנו\s+על|סיכמנו|(?<!לא\s)(?:סגרת|סיימת)(?![א-ת])/;
-
 /**
  * The same verbs, grouped by WHICH write they assert — and which effects can
  * back each group up.
@@ -108,11 +93,47 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
     kinds: new Set<Effect['kind']>([
       'reminder_created', 'friend_reminder_created', 'reminder_captured',
       'reminder_scheduled', 'reminder_annotated', 'goal_created', 'profile_noted',
+      /*
+       * A mute is a write — `muted` has been in types.WROTE since it existed —
+       * and it was in no group here, so the one verb that fits it had no kind
+       * to stand on. Production `rejections` #16, 07.09.2026 21:00, over
+       * `instance_done, muted`:
+       *
+       *   רשמתי. שקט עד מחר ב-12:00.
+       *   לילה טוב.
+       *
+       * True in both sentences. `instance_done` sits in the close group, so
+       * the turn had a write and a verb for it, and still lost the message:
+       * rule 2 is per-KIND, and the kind he was actually being told about was
+       * in no group at all. It belongs with `noted` rather than `scheduled` —
+       * a mute is recorded, not put on a clock.
+       */
+      'muted',
     ]),
   },
   {
     name: 'scheduled',
-    verbs: /קבעתי|שמתי לך|נקבע|תזכורת נוצרה|סגרנו\s+על|סיכמנו/,
+    /*
+     * "נקבע" not after "ש", and the record is production `rejections` #21,
+     * 16.09.2026 21:34 — the last message he got:
+     *
+     *   כרטיס לחתונה של אופיר ירד להיום.
+     *   רוצה שנקבע את זה למחר או שאתה נותן לזה לברוח?
+     *
+     * — refused for `claimed a scheduled ("נקבע")` over a `gave_up`. It is an
+     * OFFER. "נקבע" is two words sharing a spelling: the passive "it was set"
+     * IS a claim about a row, and the first-person plural "let's set" is a
+     * question, which asserts nothing and is the one thing that might have
+     * moved a task nobody had touched in three days. He got the flat baseline
+     * instead.
+     *
+     * "ש" is the discriminator and the only one there is — a subordinating
+     * prefix puts the verb inside a proposal ("רוצה ש…", "אולי ש…"). The
+     * residual cost is a claim phrased "סגרנו שנקבע ל-8", which nobody says.
+     * Scoped exactly like "שמתי לך" against "שמתי לב": this is a lexicon of
+     * claims about the DATABASE, and the surrounding word is what decides.
+     */
+    verbs: /קבעתי|שמתי לך|(?<!ש)נקבע|תזכורת נוצרה|סגרנו\s+על|סיכמנו/,
     // reminder_captured is deliberately ABSENT. Everything else that was in
     // the old create group stays: a goal, a note and an annotation are all
     // things it is fair to say were "set", and narrowing those would discard
@@ -164,11 +185,35 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
      * sentence, and especially killing the one sentence that ships when
      * everything else has already gone wrong, is not.
      */
-    // The second-person forms sit here for the same reason their first-person
-    // twins do — "יפה שסגרת" asserts a close, whoever is credited with it —
-    // and carry the same scoping: not after "לא", and not swallowing "סגרתי".
+    /*
+     * The second-person forms sit here for the same reason their first-person
+     * twins do — "יפה שסגרת" asserts a close, whoever is credited with it —
+     * and carry the same scoping: not after "לא", and not swallowing "סגרתי".
+     *
+     * And not after a LENGTH OF TIME, which is 0.36.1 and cost three
+     * messages in four days. Production `rejections` #18, #19 and #20,
+     * 11.09 and 14.09 twice, every one of them `claimed a write with no
+     * effect (סגרת)`:
+     *
+     *   חצי דקה וסגרת את זה.
+     *   חמש דקות וסגרת את זה.
+     *   שתי דקות עבודה וסגרת את זה.
+     *
+     * Hebrew puts the future perfect in the past tense: "five minutes and
+     * you're done with it" is a promise about the next five minutes, not a
+     * report about the last. It is also, word for word, what persona.ts asks
+     * the nag ladder to produce — end on one concrete action and how little
+     * it costs — so this is the rule refusing the house style, three times,
+     * silently, in the messages whose whole job is to be small enough to act
+     * on.
+     *
+     * Anchored to a time unit rather than to the bare "ו", because "דיברנו
+     * וסגרת את זה" is a report and still has to be refused. Up to two words
+     * may sit between the unit and the verb ("שתי דקות עבודה ו…"); more than
+     * that and the two halves are no longer one clause.
+     */
     verbs:
-      /סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|(?<!לא\s)(?:סגרת|סיימת)(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))(?![א-ת])/,
+      /סימנתי|סגרתי(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))|(?<!לא\s)סיימתי|(?<!לא\s)(?<!(?:דקה|דקות|שניה|שנייה|שניות|רגע|שעה|שעות)(?:\s+\S+){0,2}\s+ו)(?:סגרת|סיימת)(?!\s*(?:איתו|איתה|איתם|איתן|עם)(?![א-ת]))(?![א-ת])/,
     // `gave_up` earns its place here by the CLAIM invariant, not by taste:
     // voice.ts words it "סגרתי את X ככישלון", so without it the deterministic
     // baseline would fail its own validator. The every-kind loop in
@@ -198,6 +243,25 @@ const CLAIM_GROUPS: { name: string; verbs: RegExp; kinds: ReadonlySet<Effect['ki
     kinds: new Set<Effect['kind']>(['goal_progress', 'reminder_annotated']),
   },
 ];
+
+/**
+ * Every claim verb there is, as one regex — DERIVED from the groups above
+ * rather than written out beside them.
+ *
+ * It used to be a hand-maintained twin, and the note on it said so outright:
+ * `validate()` does not read this, it reads CLAIM_GROUPS, so a verb added
+ * here alone is a fix that does nothing and reads in review as though it did.
+ * That was demonstrated rather than assumed — deleting the 0.19.0 additions
+ * from the twin left the whole suite green. CLAUDE.md lists it under "one
+ * question, one implementation", which is an invariant this file was violating
+ * in its own second paragraph.
+ *
+ * Deriving it costs nothing and closes that: the two can no longer disagree,
+ * and 0.36.1's three scopings are written once. Nothing in `src/` consults it
+ * — it is the documented lexicon and a test fixture (test/v08.test.ts) — so
+ * the union is exactly as strict as the groups are, verb for verb.
+ */
+export const CLAIM = new RegExp(CLAIM_GROUPS.map((g) => g.verbs.source).join('|'));
 
 const CLOCK = /\b\d{1,2}:\d{2}\b/g;
 const QUOTED = /"([^"\n]{2,80})"/g;

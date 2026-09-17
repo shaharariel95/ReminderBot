@@ -182,11 +182,25 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 - `FIXED_LABELS` is a **closed list, matched one direction only**. Make it
   bidirectional and "הכל" starts admitting "להוציא את הכלב". An INTERPOLATED
   label must never go in it. → `buttons.FIXED_LABELS`
-- **`CLAIM` is not read by `validate()`. `CLAIM_GROUPS` is**, and carries its own
-  copy of every verb. Adding to one only is a fix that does nothing and reviews
-  as though it did. → `validate.CLAIM_GROUPS`
+- **`CLAIM` is now DERIVED from `CLAIM_GROUPS`.** It was a hand-kept twin that
+  `validate()` never read, so a verb added to it alone was a fix that did
+  nothing and reviewed as though it did. One instance of "one question, two
+  implementations" closed by construction — the invariant itself is still
+  enforced by nothing. → `validate.CLAIM`
 - Writing something down is not scheduling it: `noted` and `scheduled` are
   separate groups and a capture is in the first only. → `validate.CLAIM_GROUPS`
+- **A mute is a write.** `muted` is in `WROTE` and was in no claim group, so
+  the one verb that fits it had no kind to stand on. → `validate.CLAIM_GROUPS`
+- **Rule 2 fires on grammar it cannot read, and the record says how often**:
+  four of the last five production rejections were not claims at all. Hebrew
+  puts the future perfect in the past tense, so "חמש דקות וסגרת את זה" is a
+  promise; "רוצה שנקבע" is a question. Both are scoped by the word BEFORE the
+  verb, exactly as "שמתי לך" is scoped away from "שמתי לב".
+  → `validate.CLAIM_GROUPS`
+- **Read `rejections` before adding to the lexicon, and after.** It is the only
+  place a rule's false-positive rate is visible, it is what `/diag` counts, and
+  nothing reads it on its own — the prompt leak sat in it for a week and the
+  three discarded nags for four days. → `db.recordRejection`
 - **The failed turn never reaches the model at all.** Handing failure wording to
   something licensed to rephrase invites the exact invention it was written to
   avoid. → `index.sendOutcome`
@@ -677,8 +691,10 @@ found by the red-proof rather than by review:
    exact bug it guarded, because the same title renders again further down the
    same prompt. Scope assertions to block boundaries.
 2. **Two guards, one bug.** Removing either alone proves nothing. Remove both.
-3. **Two lists, only one of which bites.** `CLAIM` is not read by `validate()`;
-   the additions were stripped from it alone and the suite stayed green.
+3. **Two lists, only one of which bites.** `CLAIM` was not read by
+   `validate()`; the additions were stripped from it alone and the suite
+   stayed green. Closed in 0.36.1 by deriving one from the other — the mode
+   stays on this list because the next pair of lists will not be these two.
 4. **A guard hiding behind a redundant-looking neighbour.** Every case had enough
    fires, so `snoozes >= MIN_SAMPLE` masked the rest.
 5. **Colliding ids in the fixture.** A fresh rig numbers the first reminder 1 and

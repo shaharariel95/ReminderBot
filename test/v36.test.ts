@@ -298,6 +298,77 @@ async function main(): Promise<void> {
     rig.restore();
   }
 
+  /*
+   * 0.36.1. Four of the last five rows in production's `rejections` table are
+   * rule 2 firing on something that is not a claim. The table is the
+   * instrument /diag exists to expose and nobody had read it — which is the
+   * same failure the 07.09 leak sat in for a week.
+   */
+  section('rule 2 — the nag ladder\'s own future tense is not a claim');
+  {
+    // rejections #18, #19, #20 — 11.09 and 14.09 twice, all `claimed a write
+    // with no effect (סגרת)`. persona.NAG_LADDER asks for exactly this shape:
+    // shrink the ask, end on one concrete action and how little it costs.
+    const NAGGED: Effect = {
+      kind: 'nagged', instanceId: 72, title: TICKET, since: NOW - 7_260_000,
+      round: 2, granted: 0,
+    };
+    const BRIEF: Effect = { kind: 'morning_brief', rows: [], openCount: 1 };
+    for (const [text, effects] of [
+      [`נו? "${TICKET}" עדיין מחכה.\n\nחמש דקות וסגרת את זה.`, [NAGGED]],
+      [`${TICKET} יושב שם.\n\nשתי דקות עבודה וסגרת את זה.`, [NAGGED]],
+      [`בוקר. היום יש לך משימה אחת.\n\nחצי דקה וסגרת את זה.`, [BRIEF]],
+    ] as [string, Effect[]][]) {
+      const v = validate(text, facts(effects), base(effects));
+      check(`"${text.split('\n').pop()}" survives`, v.ok, `verdict: ${JSON.stringify(v)}`);
+    }
+  }
+
+  section('rule 2 — an OFFER to schedule is a question, not a write');
+  {
+    // rejection #21, 16.09 21:34 — the last message he got, and he got the
+    // flat baseline instead. Day three of a task nobody had touched, and the
+    // version that asked him something was the one thrown away.
+    const GAVE_UP: Effect = { kind: 'gave_up', instanceId: 72, title: TICKET, rounds: 4 };
+    const v = validate(
+      `כרטיס לחתונה של אופיר ירד להיום.\n\nרוצה שנקבע את זה למחר או שאתה נותן לזה לברוח?`,
+      facts([GAVE_UP]), base([GAVE_UP]),
+    );
+    check('"רוצה שנקבע את זה למחר" survives a gave_up', v.ok, `verdict: ${JSON.stringify(v)}`);
+  }
+
+  section('rule 2 — a mute IS a write');
+  {
+    // rejection #16, 07.09. `muted` is in types.WROTE and was in no claim
+    // group, so the one verb that fits it was refused.
+    const MUTED: Effect = { kind: 'muted', until: NOW + 54_000_000, hours: 15 };
+    const DONE: Effect = { kind: 'instance_done', id: 72, title: TICKET, streak: 40 };
+    const v = validate('רשמתי. שקט עד מחר.\n\nלילה טוב.', facts([DONE, MUTED]), base([DONE, MUTED]));
+    check('"רשמתי" survives a mute', v.ok, `verdict: ${JSON.stringify(v)}`);
+  }
+
+  section('and rule 2 still has its teeth');
+  {
+    // The half that matters. Every one of these is the lie the rule exists
+    // for, and the three scopings above must not reach any of them.
+    const NOTHING: Effect = { kind: 'nothing', why: 'chat', userText: 'מה קורה' };
+    const NO_TASK: Effect = { kind: 'nothing', why: 'no_open_task', userText: 'סיימתי' };
+    for (const [text, effects] of [
+      // 30.08.2026, the message the second person was added for.
+      ['יפה שסגרת את זה מוקדם.', [NO_TASK]],
+      // rejection #17, 09.09.
+      ['סגרתי.\n\nלפחות צחי לא יצטרך לחכות לך שבוע.', [NOTHING]],
+      // A claim about a schedule with nothing scheduled.
+      ['נקבע ל-20:00, אל תתלונן.', [NOTHING]],
+      // "ו + סגרת" with no duration in front of it is not the ladder's idiom,
+      // it is a report. The scoping must not swallow it.
+      ['דיברנו וסגרת את זה.', [NOTHING]],
+    ] as [string, Effect[]][]) {
+      const v = validate(text, facts(effects), base(effects));
+      check(`"${text.split('\n')[0]}" is still refused`, !v.ok, `verdict: ${JSON.stringify(v)}`);
+    }
+  }
+
   section('end to end: he gets the baseline, and the rejection is on the record');
   {
     const rig = createRig({ chatId: CHAT });
