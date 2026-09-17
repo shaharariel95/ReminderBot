@@ -621,6 +621,101 @@ async function resolveReminder(
 }
 
 /**
+ * Did his sentence point at this row AT ALL — by name, or by an id he typed?
+ *
+ * The two halves are not interchangeable and both are needed. On 13.09.2026
+ * he sent "תזיז ל16:00" and then, one message later, "תזיז את 80 ל16:00".
+ * Neither names an errand; the id is the entire difference between them, and
+ * the second one was him correcting the first.
+ *
+ * The digits are compared as whole numbers against a row he HAS, so "ל16:00"
+ * points at #16 only if #16 is one of the candidates. That is a false
+ * negative in the worst case — the caller keeps the router's answer, which is
+ * what it did before any of this — and never a false positive that moves a
+ * row he did not mean.
+ */
+function pointsAt(userText: string, rem: Reminder): boolean {
+  if (matchByTitle([rem], userText)) return true;
+  const digits: string[] = userText.match(/\d+/g) ?? [];
+  return digits.includes(String(rem.id));
+}
+
+/**
+ * Which reminder a RETIME is aimed at — `resolveReminder`, plus the two
+ * things production says it cannot answer on its own.
+ *
+ * `target_id` was the last field the model emits with no code behind it. The
+ * audit CLAUDE.md prescribes asks, for each one, what happens when it is
+ * absent or wrong: times answer `preferHisWords`, titles `titleFromHisWords`,
+ * the addressee `friendFromHisWords`. The target answered nothing, and a
+ * wrong id here is a write against an errand he never mentioned.
+ *
+ * Scoped to `reschedule` deliberately. `rename` and `annotate` share
+ * `resolveReminder` and neither has a production message behind it; a ringing
+ * instance is a live question about WHEN, which is what makes it the obvious
+ * subject of "move it", and it is not the obvious subject of "call it X".
+ */
+async function retimeTarget(
+  env: Env,
+  chatId: string,
+  ctx: Context,
+  intent: Intent,
+  userText: string,
+  /** Whether this turn produced an hour at all. See the second rule below. */
+  schedule: Schedule | null,
+): Promise<Reminder | null> {
+  const named = matchByTitle(ctx.reminders, userText);
+  const routed = await resolveReminder(env, chatId, ctx, intent);
+
+  /*
+   * A ring is the live question, and "it" means the live question.
+   *
+   * Production 13.09.2026 10:56. #80 had rung at 10:26 and was on its second
+   * nag. He answered it with "תזיז ל16:00" and the bot moved #69 "לנקות את
+   * הפילטרים של המזגנים" — a row for the following week that he had not
+   * mentioned in two days. It took him three more messages to undo: /list,
+   * "תזיז את 80 ל16:00", "תבטל את 69".
+   *
+   * The same discriminator as the create-path redirect above: his sentence
+   * names no errand, and EXACTLY one thing is ringing. Two, and there is no
+   * way to tell which. The difference is that this one also has to survive
+   * the model returning a real, resolving id for the wrong row — so it is
+   * `pointsAt` rather than `!intent.target_id` that gates it, or the next
+   * message in that same transcript would break.
+   */
+  if (ctx.open.length === 1 && !(routed && pointsAt(userText, routed))) {
+    const live = ctx.reminders.find((r) => r.id === ctx.open[0].reminder_id);
+    if (live) return live;
+  }
+
+  /*
+   * A FINISHED row plus no hour is not a revival.
+   *
+   * `brain.doneSummary` shows closed reminders to the router with their ids,
+   * and it is right to: naming an hour for one is how he asks for it again,
+   * and without that block the only move available is a duplicate. But the
+   * licence it grants is conditional, in the prompt's own words — "אם הוא
+   * נוקב עכשיו בשעה, הוא רוצה אותה שוב" — and a rule that matters goes in
+   * code.
+   *
+   * Production 14.09.2026 21:02. He typed "חתונה של אופיר"; the router
+   * answered `reschedule target_id=90`, which is the cellular errand he had
+   * closed at 11:11 that morning. With no hour in the sentence the turn had
+   * nothing to write, so it asked — about the wrong errand, while the one he
+   * had actually named sat in `ctx.reminders` as the only row there.
+   *
+   * `inbox` is excluded and that exclusion is the point of the status check
+   * rather than a `next_fire_at === null` one: a capture has no hour by
+   * construction, and asking for its first one is the documented flow.
+   */
+  if (routed && !schedule && routed.status !== 'scheduled' && routed.status !== 'inbox') {
+    return named;
+  }
+
+  return routed ?? named;
+}
+
+/**
  * A task he just closed was ARRANGING something — offer the thing itself.
  *
  * "לדבר על המוסך לוודא שאני מגיע בבוקר של יום חמישי לטיפול וטסט" was closed on
@@ -1528,7 +1623,25 @@ export async function applyIntent(
     }
 
     case 'reschedule': {
-      const rem = await resolveReminder(env, chatId, ctx, intent);
+      /*
+       * Read BEFORE the target is resolved, because whether this turn carries
+       * an hour at all is one of the two things that decides WHICH row it is
+       * about — see retimeTarget. It is a pure read of his sentence and the
+       * intent, so moving it up changes nothing else.
+       *
+       * The router routinely returns a reschedule with the time field empty,
+       * even when he said the hour out loud in the same breath. Reading it off
+       * his own words is the same move parseDuration already makes for snooze,
+       * and it is the difference between one exchange and two: on 14.08.2026
+       * "בוא נזיז את התזכורת של הבשר ל15:00" was answered with "מתי?".
+       *
+       * findNamedTime refuses anything it cannot be sure of — a repeat rule, a
+       * second time in the sentence, an hour already gone — so the question
+       * below is still asked whenever asking is the honest answer.
+       */
+      const schedule = preferHisWords(readWhen(userText, Date.now(), tz), intent, tz);
+
+      const rem = await retimeTarget(env, chatId, ctx, intent, userText, schedule);
       if (!rem) {
         if (ctx.reminders.length > 1) {
           return [{ kind: 'needs_reminder_choice', action: 'reschedule', rows: ctx.reminders }];
@@ -1584,17 +1697,6 @@ export async function applyIntent(
           return snoozed;
         }
       }
-
-      // The router routinely returns a reschedule with the time field empty,
-      // even when he said the hour out loud in the same breath. Reading it off
-      // his own words is the same move parseDuration already makes for snooze,
-      // and it is the difference between one exchange and two: on 14.08.2026
-      // "בוא נזיז את התזכורת של הבשר ל15:00" was answered with "מתי?".
-      //
-      // findNamedTime refuses anything it cannot be sure of — a repeat rule, a
-      // second time in the sentence, an hour already gone — so the question
-      // below is still asked whenever asking is the honest answer.
-      const schedule = preferHisWords(readWhen(userText, Date.now(), tz), intent, tz);
 
       // Carries the reminder, unlike the `nothing: 'no_time'` this replaced.
       // The bot is about to ask "מתי?" and it has to still know what it asked

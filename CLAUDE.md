@@ -74,8 +74,14 @@ minutes and is worth redoing whenever a row is added — ask, for each field the
 model emits, *what happens when it is absent or wrong, and what stops that.*
 The answer for every field is now in code: times through `preferHisWords`,
 titles through `titleFromHisWords`, the addressee through `friendFromHisWords`,
-`goal_id` scoped to his own rows, and `chill_hours` / `intensity` /
-`checkin_per_day` clamped where they are read.
+the retime target through `retimeTarget`, `goal_id` scoped to his own rows, and
+`chill_hours` / `intensity` / `checkin_per_day` clamped where they are read.
+
+**That list said "every field" while `target_id` had nothing**, from the day it
+was written until 0.37.0 — and it cost two messages a day apart, one of them a
+retime written against an errand he had not mentioned in two days. The audit
+is ten minutes and it was not done; writing the sentence is not doing it.
+Ask the question of each field again the next time a row is added here.
 
 **"One question, one implementation"** is violated whenever the same question
 is answered in two places and only one gets fixed. It has cost, so far:
@@ -288,6 +294,20 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
   relative**. → `effects.applyIntent`
 - **An ABSOLUTE retime supersedes the ring**, closing it `superseded` so it
   cannot pay a streak point. → `effects.applyIntent`
+- **But first it has to be the right row.** `target_id` was the last field the
+  model emits with no code behind it, and a wrong id is a write against an
+  errand he never mentioned. → `effects.retimeTarget`
+- His sentence names no errand and exactly one thing is ringing → **the ring
+  wins, whatever id came back**. Same three-condition shape as the create-path
+  redirect; the difference is that it has to survive a REAL id for the wrong
+  row. → `effects.retimeTarget`
+- Gated on `pointsAt`, not on `!target_id`: "תזיז את 80" is the next message
+  in the transcript that bought this, and neither sentence names an errand —
+  **the id he typed himself is the whole difference**. → `effects.pointsAt`
+- **A finished row plus no hour is not a revival.** `doneSummary` licenses
+  reviving one only "אם הוא נוקב עכשיו בשעה", which is a rule that matters
+  living in the prompt. `inbox` is excluded — a capture has no hour by
+  construction. → `effects.retimeTarget`
 
 ### Closing something before it rings
 
@@ -665,7 +685,7 @@ own validator.
 
 ## Testing
 
-`npm test` runs thirty-seven files against a real in-memory SQLite behind a
+`npm test` runs thirty-eight files against a real in-memory SQLite behind a
 D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end,
 so "the reminder never arrived" is reproducible rather than arguable.
 
