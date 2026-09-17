@@ -52,7 +52,7 @@ one the next change will break.
 
 | Invariant | Enforced by | Where |
 |---|---|---|
-| Never claim a write that did not happen | six rules over output true by construction | `validate.validate`, `voice.renderBaseline` |
+| Never claim a write that did not happen | eight rules over output true by construction | `validate.validate`, `voice.renderBaseline` |
 | A guarantee is a field's **absence**, never a constraint on it | the router schema is a union; an action reading no free text has no free-text property | `brain.TEXT_FIELDS`, `brain.NO_TEXT_ACTIONS` |
 | The model classifies; **code computes** | one time resolver, one precedence order | `when.readWhen`, `effects.preferHisWords` |
 | No model-emitted field may cause a write **outside his own chat** | his sentence fills the addressee the router dropped; `matchFriend` still decides whether it resolves | `effects.friendFromHisWords`, `db.matchFriend` |
@@ -154,13 +154,25 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 
 ### Speech and the validator
 
-- Seven rules. 1–4 ask "did the model INVENT this?"; 5–7 ask the opposite,
+- Eight rules. 1–4 ask "did the model INVENT this?"; 5–7 ask the opposite,
   because a rewrite that says LESS asserts nothing and passes all of 1–4.
   → `validate.validate`
+- **Rule 8 asks neither, and runs first: is this a chat message, or the PROMPT
+  coming back?** An echo invents nothing and drops nothing, so it passed all
+  seven — and the bot sent him its own scaffolding, twice.
+  → `validate.scaffolding`
+- Two shapes, because the leak had two halves and only one quotes anything: a
+  line that opens with one of the prompt's own section labels, and a bulleted
+  LIST. voice.ts writes every list it has with `·`, so an ASCII bullet is
+  never something either end of this pipeline produces. → `persona.PROMPT_LABELS`
+- **The labels live with the prompt, not with the validator**, and a test
+  asserts every one is still a heading the code emits. Two copies of a heading
+  is how this guard dies: reword one and the validator goes on watching for a
+  string nothing writes.
 - Rules 5, 6 and 7 are deliberately low floors, and deliberately scoped — 5 to
   moves, 6 to fires, 7 to the close-out's own closes. The persona's job is to
   reword. All three share `mentions`' one-word bar where they need a name.
-- **A dropped word is invisible to all seven.** They check for facts invented,
+- **A dropped word is invisible to 1–7.** They check for facts invented,
   never for words missing, so "סגרת 1 **היום**" losing its day is a tense
   change nothing sees — which is how rule 7 came to exist.
 - **Rule 3 over-fires and the record says by how much**: four false positives
@@ -639,7 +651,7 @@ own validator.
 
 ## Testing
 
-`npm test` runs thirty-one files against a real in-memory SQLite behind a
+`npm test` runs thirty-seven files against a real in-memory SQLite behind a
 D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end,
 so "the reminder never arrived" is reproducible rather than arguable.
 

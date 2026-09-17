@@ -1,4 +1,5 @@
 import { FIXED_LABELS } from './buttons';
+import { PROMPT_LABELS } from './persona';
 import type { Effect, Facts } from './types';
 import { UNTITLED_TITLE, WROTE } from './types';
 import { scanDurations } from './quickparse';
@@ -319,6 +320,53 @@ function normQuote(s: string): string {
   return s.replace(/["'`״׳]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Is this reply the PROMPT rather than an answer to it?
+ *
+ * Two shapes, and they are two because the 14.09.2026 leak had two halves and
+ * only one of them quotes anything (persona.PROMPT_LABELS has the transcript):
+ *
+ *   - a line that opens with one of the prompt's own section labels, used as a
+ *     LABEL — followed by a colon, a dash, or nothing else on the line. The
+ *     anchoring is what keeps "מה שקרה עכשיו" usable as the ordinary Hebrew
+ *     phrase it also is: a sentence puts it in the middle, a heading puts it
+ *     at the start and then stops.
+ *
+ *   - a bulleted LIST. The "הנחיות:" half echoed no heading — the model coined
+ *     that word itself — so the only thing that gives it away is that it is a
+ *     document. persona.ts tells it "בלי כותרות, בלי בולטים, בלי מספור" and
+ *     voice.ts writes every list it has with "·", so an ASCII bullet is never
+ *     something either end of this pipeline produces.
+ *
+ *     TWO of them, not one. A single "- " line is a dash in ordinary Hebrew
+ *     prose and refusing it would cost whole rewrites for punctuation; two is
+ *     already a list and no longer a WhatsApp message.
+ *
+ *     One known cost, accepted: persona.ts renders his profile notes as "- x"
+ *     lines, so a rewrite that reads two of them back as a list is refused.
+ *     That rewrite was already breaking "בלי בולטים" and the baseline it loses
+ *     to is true — which is the trade the whole file makes.
+ *
+ * Markdown headings ("## …") are caught by the same bullet scan on purpose —
+ * `#` is excluded from it, because voice.ts opens lines with "#80" and a
+ * reminder id is not a heading. A hash followed by a SPACE is, and nothing
+ * here writes one.
+ */
+const BULLET_LINE = /^[ \t]*(?:[-*•]|#{1,6})[ \t]+\S/gmu;
+
+function scaffolding(text: string): string | null {
+  for (const label of PROMPT_LABELS) {
+    // Escaped for the same reason FIXED_LABELS is matched literally: these are
+    // prose strings from another file and one of them growing a "(" one day
+    // must not turn into a regex that throws inside the send path.
+    const re = new RegExp(`^[ \\t]*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*(?:[:：—–-]|$)`, 'mu');
+    if (re.test(text)) return `heading "${label}"`;
+  }
+  const bullets = text.match(BULLET_LINE);
+  if (bullets && bullets.length >= 2) return `${bullets.length} bullet lines`;
+  return null;
+}
+
 /** Normalise "7:05" and "07:05" to the same key. */
 function normTime(s: string): string {
   const [h, m] = s.split(':');
@@ -340,6 +388,15 @@ function normTime(s: string): string {
  * never make one of the two scans silently skip matches.
  */
 export function validate(text: string, facts: Facts, baseline: string): Verdict {
+  // Rule 8, and it runs first because it is not a question about facts at all:
+  // is this a chat message, or is it the prompt coming back? See
+  // persona.PROMPT_LABELS for the two messages that bought it. Deliberately
+  // NOT folded against the baseline the way rules 1, 3 and 4 are — voice.ts
+  // never writes a heading and never writes a bullet list, so there is nothing
+  // here a true baseline could legitimise.
+  const scaffold = scaffolding(text);
+  if (scaffold) return { ok: false, reason: `wrote the prompt back (${scaffold})` };
+
   const allowedTimes = new Set(facts.times.map(normTime));
   for (const m of baseline.match(CLOCK) ?? []) allowedTimes.add(normTime(m));
 

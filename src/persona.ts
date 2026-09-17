@@ -15,6 +15,57 @@ import type { Settings, Stats } from './types';
  * while shrinking the ask gets obeyed. See NAG_LADDER below.
  */
 
+/**
+ * The section labels this prompt is built out of — and the list validate.ts
+ * refuses to see in a REPLY.
+ *
+ * Production, 14.09.2026 21:00. The evening close-out went out as four
+ * messages and the first two were the scaffolding of the call that produced
+ * them: a "מה שקרה עכשיו:" heading with the baseline copied under it, then a
+ * "הנחיות:" block restating the rewrite instructions as a bulleted list.
+ * Ninety seconds later the same thing again over a `needs_time`, that time
+ * with the model's reasoning inside the instruction block. sendBurst splits on
+ * blank lines and caps at four, so the two REAL messages were the two that
+ * only just survived the cap.
+ *
+ * All seven of validate's rules passed it, and correctly: 1-4 ask whether a
+ * fact was INVENTED and an echo invents nothing — the baseline is folded into
+ * the allow-lists, so quoting it back is the most permitted thing there is —
+ * while 5-7 ask whether the rewrite said LESS, and this one said strictly
+ * more. Nothing was asking whether the reply was a chat message at all.
+ *
+ * The only thing standing against it was the prompt's own closing line, "רק
+ * את ההודעות עצמן, בלי הקדמות". A rule that matters goes in code.
+ *
+ * Kept here rather than in validate.ts because this is the file that writes
+ * the headings, and the two copies drifting apart is the ordinary way this
+ * kind of guard dies: reword a heading and the validator goes on watching for
+ * a string nothing emits any more, silently. test/v36.test.ts asserts every
+ * label below still appears in a prompt this code actually builds — the three
+ * that brain.speak owns against a real speak() call, the rest against
+ * buildSystemPrompt.
+ *
+ * Only the left-hand side of a compound heading is listed ("אמת לפני אופי",
+ * not the full "— זה גובר על כל כלל סגנון"): the model paraphrases the tail
+ * and echoes the head. Two headings are deliberately absent — "שעות" and
+ * "עקיפה" are ordinary enough Hebrew, one word each, that a line starting
+ * with one is likelier to be a sentence than a leak.
+ */
+export const PROMPT_LABELS: readonly string[] = [
+  'מה שקרה עכשיו',
+  'כמה זמן זה כבר פתוח',
+  'הנחיית טון לתשובה הזאת',
+  'מצב נוכחי',
+  'הקול שלך',
+  'מבנה ההודעה',
+  'איך אתה עובד',
+  'כללי כתיבה',
+  'התפקיד שלך בהודעה הזאת',
+  'אמת לפני אופי',
+  'הגבולות',
+  'מה שאתה יודע עליו',
+];
+
 const INTENSITY: Record<number, string> = {
   1: 'רמת עוקצנות: נמוכה. יבש, מאופק, מרים גבה. בלי לדקור.',
   2: 'רמת עוקצנות: בינונית. שנון וחד, זורק עוקץ ומיד חוזר לעניין. זאת ברירת המחדל.',
