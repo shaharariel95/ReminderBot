@@ -713,7 +713,12 @@ async function respondToOwner(
     await db
       .setAwaiting(env, chatId, { ...question, at: Date.now() })
       .catch((e) => console.error('setAwaiting', e));
-  } else if (awaiting) {
+  } else if (awaiting || db.heldAwaiting(ctx.settings.awaiting)) {
+    // `heldAwaiting` reads the COLUMN, `awaiting` is what survived the TTL.
+    // Without the second test an EXPIRED slot could never be cleared — the
+    // branch was `else if (awaiting)`, and a slot past its TTL reads as null,
+    // so the one case that needs clearing was the one case that could not
+    // reach the clear. One row sat armed for twenty-seven days in production.
     await db.setAwaiting(env, chatId, null).catch((e) => console.error('setAwaiting', e));
   }
 

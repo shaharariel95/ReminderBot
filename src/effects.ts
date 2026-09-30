@@ -322,6 +322,40 @@ function cutSelfRepeat(title: string, userText: string): string {
 const FOREIGN_SCRIPT = /[^\p{Script=Hebrew}\p{Script=Latin}\p{N}\p{P}\p{Z}\s]/u;
 
 /**
+ * Hebrew points — niqqud, dagesh, cantillation (U+0591–U+05C7).
+ *
+ * Every one of them is `Script=Hebrew`, so FOREIGN_SCRIPT's allow-list waves
+ * them all through. CLAUDE.md describes that filter as stripping "any SCRIPT
+ * absent from his message", and for this whole block it never did.
+ *
+ * Reminder #95, 30.09.2026: the stored title is "להשקות את העציץּל" — his
+ * errand, then U+05BC HEBREW POINT DAGESH, then a stray ל. He was read it back
+ * in the confirmation. This bot writes unpointed Hebrew and nothing else, so a
+ * point he did not type himself is not a rewording of anything.
+ */
+const HEBREW_POINT = /[֑-ׇ]/u;
+
+/**
+ * A Hebrew FINAL letter with another Hebrew letter after it.
+ *
+ * Hebrew spelling cannot produce this: ך ם ן ף ץ exist only word-finally. So
+ * it is a structural tell rather than a character class — which is the whole
+ * point, because issues.md §3 already argued out the character classes. It
+ * catches both shapes from the 30.09 transcript, and they are different bugs:
+ *
+ *   #95  "להשקות את העציץּל"            — ץ, a dagesh, then ל
+ *   #97  "להשקות את העציץשקות את העציץ"  — ץ then ש, a self-repeat restarting
+ *                                          mid-word, which is why cutSelfRepeat
+ *                                          could not see it: the leading run
+ *                                          does not recur WHOLE.
+ *
+ * Checked against all 95 titles in the live database: it fires on four, and
+ * all four are corrupt. The point run is inside the class because a mark
+ * between the two letters must not hide the adjacency.
+ */
+const FINAL_MIDWORD = /[ךםןףץ][֑-ׇ]*[א-ת]/u;
+
+/**
  * The addressee, read from HIS sentence — but only when the router named none.
  *
  * This is `preferHisWords` for people instead of for clocks, and it exists for
@@ -460,6 +494,39 @@ export function titleFromHisWords(title: string, userText: string): string {
     out = [...out].filter((c) => !FOREIGN_SCRIPT.test(c) || his.has(c)).join('');
   }
   /*
+   * Hebrew points, filtered the same way and for the same reason.
+   *
+   * A separate pass rather than another arm of FOREIGN_SCRIPT, because the
+   * allow-list there is about SCRIPTS and this is about one script's marks —
+   * merging them would mean writing `Script=Hebrew` minus a range into a
+   * negated class, which is the kind of expression that is wrong in a way
+   * nobody reads. Same "unless he typed it" escape: pointed Hebrew is rare but
+   * it is his if he wrote it.
+   */
+  if (HEBREW_POINT.test(out)) {
+    const his = new Set([...userText]);
+    out = [...out].filter((c) => !HEBREW_POINT.test(c) || his.has(c)).join('');
+  }
+  /*
+   * A final letter mid-word means the string was assembled, not written.
+   *
+   * EMPTIED, not repaired — the same choice the length guard below makes, and
+   * for the same reason. There is no way to know where the join happened:
+   * "העציץּל" could lose its tail and "העציץשקות את העציץ" could lose its
+   * head, and picking wrong stores an errand he did not ask for and reads it
+   * back to him every time it fires. The caller's fallback is
+   * `titleFromMessage(userText)` and then UNTITLED_TITLE, whose question
+   * voice.ts words properly — asking him beats guessing.
+   *
+   * Gated on his own text, exactly like the script rules: #92 is stored
+   * "ללכת לסופר םארם" with a final מ opening a word because that is what HE
+   * typed, and repairing his typo is not this function's business. The bigram
+   * is looked up in his message rather than the whole title, so a corruption
+   * elsewhere in the same string is still caught.
+   */
+  const joined = FINAL_MIDWORD.exec(out);
+  if (joined && !userText.includes(joined[0])) return '';
+  /*
    * Extraction cannot grow.
    *
    * The router's job is to lift the errand OUT of his sentence — CLAUDE.md is
@@ -556,6 +623,38 @@ export function titleFromHisWords(title: string, userText: string): string {
  */
 function preferHisWords(heard: TimeRef, intent: Intent, tz: string): Schedule | null {
   const routed = scheduleFromIntent(intent, tz);
+  /*
+   * HE STATED A REPEAT RULE AND THE INTENT IS A SINGLE FIRE. Refuse both.
+   *
+   * This is the only guard here that does not depend on a lexicon being
+   * complete, and it is the one that would have caught #96 on its own.
+   *
+   * The rule "a repeat rule must never be flattened into a single fire" was
+   * enforced by `RECURRING.test()` — a regex, read in two places, and correct
+   * only for the phrasings in it. `פעם בשבוע` was not, so `readWhen` returned
+   * an instant, the create path wrote a `once`, and the confirmation named a
+   * Thursday for a reminder he had asked to repeat on Mondays.
+   *
+   * Widening the regex fixes that sentence. It does not fix the NEXT sentence,
+   * because the guard is still a word list. This is the structural half: once
+   * `readWhen` can see a repeat rule at all, "he wants recurrence" and "the
+   * intent is one fire" is a contradiction decidable without knowing which
+   * phrasing produced it — and a contradiction whose only two outcomes are a
+   * recurrence that silently ends, or a question.
+   *
+   * It returns null, which the create path already handles properly: the
+   * errand is captured to the inbox and `reminder_captured` asks for the hour.
+   * So the cost of a phrasing nobody has taught `parseRecurring` yet is one
+   * extra exchange, and never a row that rings once and switches itself off.
+   *
+   * Scoped to `once`, deliberately. A router that answered `weekly` for a
+   * monthly phrase is wrong in a way this cannot see and voice.ts states out
+   * loud; a router that answered `once` is wrong in the one way that is
+   * unrecoverable, because there is no second fire to correct.
+   */
+  if (heard.kind === 'ambiguous' && heard.why === 'repeat-rule' && routed?.type === 'once') {
+    return null;
+  }
   // FILLING a gap, never overriding: `routed` wins whenever it exists, which
   // keeps the in_minutes exclusion above exactly as strict as it was.
   if (heard.kind === 'duration') {
@@ -1614,12 +1713,37 @@ export async function applyIntent(
 
     case 'delete': {
       if (!intent.target_id) return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
-      const rem = ctx.reminders.find((r) => r.id === intent.target_id);
+      /*
+       * Resolved through `resolveReminder`, not through `ctx.reminders`.
+       *
+       * `ctx.reminders` is `listReminders` (status='scheduled') plus the
+       * ringing rows. An inbox CAPTURE is in neither — it lives in
+       * `ctx.inbox`, a separate field — so `find` returned undefined and the
+       * title fell back to `String(target_id)`. Production, 30.09.2026 21:34,
+       * over the capture he had made two minutes earlier:
+       *
+       *   him  תבטל
+       *   bot  ביטלתי את #95 "95".
+       *
+       * The delete itself was real. What was invented is the quoted errand,
+       * and voice.ts quotes that field as his words — so the bot read him a
+       * title he had never written, and `events.detail` recorded it too.
+       *
+       * Same shape as `completeEarly` resolving against `ctx.open` alone:
+       * three scopes for one question, each caller picking a subset by hand.
+       * `resolveReminder` reads by id through `db.getReminder` with the
+       * chat_id check, which is documented as covering captures precisely
+       * because they never appear in `ctx.reminders`.
+       *
+       * Read BEFORE the delete, or there is nothing left to name.
+       */
+      const rem = await resolveReminder(env, chatId, ctx, intent);
       const ok = await db.deleteReminder(env, chatId, intent.target_id);
       if (!ok) return [{ kind: 'nothing', why: 'unknown_reminder', userText }];
-      return [
-        { kind: 'reminder_deleted', id: intent.target_id, title: rem?.title ?? String(intent.target_id) },
-      ];
+      // An empty title is not a hole: voice.ts drops the quoted clause
+      // entirely rather than quoting the id back at him. Saying less is the
+      // documented answer when the alternative is a false claim.
+      return [{ kind: 'reminder_deleted', id: intent.target_id, title: rem?.title ?? '' }];
     }
 
     case 'reschedule': {

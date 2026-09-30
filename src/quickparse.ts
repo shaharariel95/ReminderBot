@@ -91,8 +91,88 @@ const PERIOD = String.raw`בלילה|בבוקר|בערב|בצהריי?ם|אחה"
  * they match inside "יומיים" and "שבועיים", and "תזכיר לי עוד יומיים" was
  * being read as a recurring reminder and thrown to the router every time.
  */
-export const RECURRING =
-  /כל\s+(יום|יומיים|שבוע|שבועיים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)|כל\s+\d{1,3}\s*(דקות|דקה|שעות|שעה)|מדי\s+(יום|בוקר|ערב|שבוע)|פעמיים\s+ביום|\bevery\s+(\d{1,3}\s+)?(day|week|morning|evening|night|hour|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:יומי|שבועי)[תם]?(?![א-ת])/i;
+/*
+ * EVERY PHRASE MISSING FROM THIS REGEX WAS A CONFIDENT WRONG ANSWER, not a
+ * miss — which is why it is worth being greedy here.
+ *
+ * `readWhen` refuses anything this matches and `quickParse` routes it to
+ * `parseRecurring`. A phrase it does NOT match therefore falls through to the
+ * clock path, which reads the hour, leaves the repeat words in the title, and
+ * writes a `once`. Production, 30.09.2026 22:19:
+ *
+ *   him  תזכיר לי פעם בשבוע בימי שני בשעה 8 בערב להשקות את העציץ
+ *   bot  קבעתי #96: "פעם בשבוע בימי שני להשקות את העציץ"
+ *         — יום ה׳, 01.10.2026, 20:00.
+ *
+ * A weekly reminder became one fire, on a Thursday, with "פעם בשבוע" sitting
+ * in the title as decoration. `כל חודש` was the same shape and worse: it
+ * BEGINS with כל and still missed, because the alternation below had no
+ * `חודש` arm, so rent was set once and never again.
+ *
+ * Over-matching costs one LLM call. Under-matching ends a recurrence. So the
+ * arms below are deliberately loose — "כל ימי חייו" reaching the router is
+ * the safe direction, and the only direction that is.
+ *
+ * Note the PLURAL `ימי` arm. "בימי שני" means "on Mondays" — habitual, and a
+ * recurrence in its own right — while the singular "ביום שני" names one date
+ * and is `matchDay`'s business. That is why the plural lives here rather than
+ * in WEEKDAY_RESIDUE: as a recurrence marker it must bail unconditionally,
+ * and WEEKDAY_RESIDUE is relaxed whenever an offset word already pinned the
+ * day (see hasTimeResidue), which would have excused it in exactly the
+ * sentence it appears in.
+ */
+export const RECURRING = new RegExp(
+  [
+    // כל + a unit or a weekday. `חודש`/`שנה` are the two that cost real
+    // writes; the duals carry "כל יומיים"/"כל שבועיים".
+    String.raw`כל\s+(?:יום|יומיים|שבוע|שבועיים|חודש|חודשיים|חודשים|שנה|שנתיים|שנים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|${WEEKDAY_ALT})`,
+    // A counted interval. Minutes and hours were here; days, weeks and months
+    // were not, so "כל 3 ימים" read as a bare clock.
+    String.raw`כל\s+\S+\s*(?:דקות|דקה|שעות|שעה|ימים|יום|שבועות|שבוע|חודשים|חודש)`,
+    String.raw`מדי\s+(?:יום|בוקר|ערב|שבוע|חודש|שנה)`,
+    // "פעם בשבוע" — the #96 phrase, and the one anybody reaches for first.
+    // The unit is REQUIRED so a bare "פעם" in an errand cannot match.
+    String.raw`(?:פעם|פעמיים|שלוש\s+פעמים)\s+ב(?:יום|שבוע|שבועיים|חודש|חודשיים|שנה)`,
+    // The plural weekday — see the note above.
+    String.raw`(?:^|\s)[ובלמ]?ימי\s+(?:${WEEKDAY_ALT})(?![א-ת])`,
+    // "ימי חול" / "יום עבודה" — the working week as a unit.
+    String.raw`(?:^|\s)[ובלמ]?(?:ימי|יום)\s+(?:חול|עבודה)(?![א-ת])`,
+    // An EXCLUSION is a repeat rule by implication: nobody excludes a day
+    // from a single fire. "כל יום חוץ משבת" matched `כל יום` and was read as
+    // plain daily, so the Saturday he excluded rang anyway.
+    String.raw`(?:^|\s)(?:חוץ\s+מ|למעט|פרט\s+ל)`,
+    String.raw`\bevery\s+(?:other\s+)?(?:\d{1,3}\s+)?(?:days?|weeks?|months?|years?|morning|evening|night|hours?|minutes?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)`,
+    String.raw`\b(?:weekdays?|monthly|yearly|annually)\b`,
+    String.raw`(?:יומי|שבועי|חודשי|שנתי)[תם]?(?![א-ת])`,
+  ].join('|'),
+  'i',
+);
+
+/**
+ * A repeat rule that survived into the title, plus the fragments consuming one
+ * can LEAVE BEHIND.
+ *
+ * `RECURRING` asked of the leftovers instead of the message — the same
+ * question `hasTimeResidue` asks about clocks, and it belongs in the same
+ * place for the same reason. `parseRecurring`'s own `finish` has always tested
+ * `RECURRING.test(title)`; `parseClockTime` and the relative-time path never
+ * did, which is the asymmetry that let #96 through even once `RECURRING` was
+ * widened.
+ *
+ * The extra arm is the working-week qualifier standing ALONE. "כל יום חול
+ * בשעה 7 לקום" has its "כל יום" eaten by RE_DAILY, and what is left is
+ * "חול לקום" — the half that decides which days ring, with nothing
+ * recurrence-shaped about it any more, so neither RECURRING nor CLOCK_RESIDUE
+ * can see it and the row is written as plain daily, ringing on Saturday.
+ *
+ * `עבודה` is here because the red-proof found it: with only `חול` in this
+ * arm, "כל יום עבודה בשעה 7 לקום" still came back `daily` titled
+ * "עבודה לקום". Two words for one week, and the guard knew one of them.
+ */
+const REPEAT_RESIDUE = new RegExp(
+  [RECURRING.source, String.raw`(?:^|\s)(?:חול|עבודה)(?![א-ת])`].join('|'),
+  'i',
+);
 
 /**
  * Did he ask for a NEW reminder — as opposed to talking about one he has?
@@ -237,6 +317,20 @@ const SUBJECT_DAY = new RegExp(
 function hasTimeResidue(title: string, dayPinned: boolean): boolean {
   const t = title.replace(SUBJECT_DAY, ' ');
   if (CLOCK_RESIDUE.test(t)) return true;
+  /*
+   * A repeat rule in the title, and `dayPinned` does NOT excuse it.
+   *
+   * The relaxation above exists because a weekday cannot change an answer a
+   * מחר/היום already fixed. A repeat rule can change it completely — it says
+   * the reminder does not have one answer at all — so it is evidence whatever
+   * else is in the sentence.
+   *
+   * Checked HERE rather than at each call site, because that was the bug:
+   * `parseRecurring`'s `finish` tested it and the two non-recurring create
+   * paths did not, so one question had two implementations and only one of
+   * them bit. See REPEAT_RESIDUE.
+   */
+  if (REPEAT_RESIDUE.test(t)) return true;
   return !dayPinned && WEEKDAY_RESIDUE.test(t);
 }
 

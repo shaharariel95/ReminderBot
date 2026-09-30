@@ -153,6 +153,20 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
   for words dropped, so a hedge can vanish with its blessing.
 - A repeat rule must never be flattened into a single fire — that ENDS the
   recurrence. → `when.readWhen`
+- **That rule was enforced by a word list for nine versions, and the list was
+  short.** `פעם בשבוע` was missing, so #96 was written `once`, on a Thursday,
+  with the repeat phrase left in the title. → `quickparse.RECURRING`
+- **The structural half is a contradiction, not a lexicon**: his sentence
+  states a repeat rule AND the intent is one fire → refuse both and ask. It is
+  the only guard here that does not need the word list to be complete.
+  → `effects.preferHisWords`
+- A repeat rule in the title is residue, and a pinned day does **not** excuse
+  it the way a weekday is excused — a repeat rule says there is no single
+  answer at all. One predicate, three call sites; it used to be one.
+  → `quickparse.REPEAT_RESIDUE`
+- The PLURAL `בימי שני` is a recurrence ("on Mondays"); the singular
+  `ביום שני` is a date. That is why the plural lives in `RECURRING` and not in
+  `WEEKDAY_RESIDUE`. → `quickparse.RECURRING`
 - `event_at` is when the THING is; `next_fire_at` is when to ring. Stored as an
   instant, required not optional, and swept into `facts.ts` because it is the
   one field crossing the safety chain. → `types.Reminder`, `facts.buildFacts`
@@ -311,6 +325,13 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
 
 ### Closing something before it rings
 
+- **`delete` resolving against `ctx.reminders` alone quotes him an errand he
+  never wrote.** A capture is in `ctx.inbox`, not `ctx.reminders`, so the title
+  fell back to `String(target_id)` and the bot said `ביטלתי את #95 "95"` —
+  into `events.detail` as well. Resolve through `resolveReminder`, which reads
+  by id and is documented as covering captures for this exact reason; and an
+  unnameable row drops the quoted clause rather than inventing one.
+  → `effects.applyIntent` (`delete`), `voice.renderBaseline`
 - **`complete` resolving against `ctx.open` alone is a denial he can disprove.**
   Nothing ringing is not nothing open: the errand may still be on the schedule,
   and "אין לי משימה פתוחה כזאת לסגור" about a row `/list` prints the id of is
@@ -400,6 +421,11 @@ Check what it was shown before blaming the router.
   → `db.readAwaiting`
 - It expires **and** is cleared by any turn that does not re-ask. Both matter.
   → `db.AWAITING_TTL_MS`
+- **The second half of that was false for the only case that needs it.** The
+  clear was `else if (awaiting)`, and an expired slot reads as null — so it
+  could never reach the clear, and one row sat armed for 27 days in
+  production. Behaviour was correct throughout, which is why nothing noticed:
+  the bug is only visible in the COLUMN. → `db.heldAwaiting`
 - It is the SECOND line of defence. Both `reschedule` and `create_reminder` read
   his own sentence for a time first. → `effects.applyIntent`
 - `readAwaiting` is an exhaustive switch with a `never` default — as an `if`
@@ -542,6 +568,15 @@ Check what it was shown before blaming the router.
   "תזכיר לי עוד 5 דקות" into a title. → `effects.titleFromMessage`
 - Two exclusions, both **closed lists of whole words**: ל-pronouns and bare day
   words. There is no shape separating "לי" from "לימד".
+- **A Hebrew POINT is not a script.** Every niqqud, dagesh and cantillation
+  mark is `Script=Hebrew`, so the allow-list below waved them all through and
+  #95 stored `העציץּל` — U+05BC and a stray ל, read back to him. Same
+  "unless he typed it" escape, its own pass. → `effects.HEBREW_POINT`
+- **A final letter mid-word means the string was assembled, not written.**
+  Structure, not a character class — it catches #95 and #97's partial
+  self-repeat, fires on four of the 95 live titles and all four are corrupt.
+  Emptied, never repaired: there is no way to know where the join was.
+  → `effects.FINAL_MIDWORD`
 - **Any SCRIPT absent from his message is stripped** from a model-supplied title.
   This line was aspirational until 0.30.0 — the code tested `[A-Za-z]` and
   nothing else, so #83 stored "לשלוח לשחר שעבדೊ", ending in U+0CCA, and read it

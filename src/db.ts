@@ -2043,6 +2043,35 @@ export type Awaiting =
    */
   | { k: 'forwhom'; c: string; t: string; at: number };
 
+/**
+ * Does the COLUMN hold a question — live or not?
+ *
+ * `readAwaiting` answers "is there a question I should act on", and returns
+ * null for an expired one. That is correct, and it is also why the expired
+ * case could never be cleared: the clearing branch in index.ts is
+ * `else if (awaiting)`, and `awaiting` is what `readAwaiting` returned.
+ *
+ * Production: chat 701531870 still held `{"k":"time","r":77,...}` armed on
+ * 03.09.2026 — twenty-seven days and several turns later. Harmless today,
+ * because expiry is enforced on every read. Not harmless as a standing
+ * invitation: CLAUDE.md says the slot "expires AND is cleared by any turn
+ * that does not re-ask. Both matter", and the second half was false for
+ * exactly the case that needs it.
+ *
+ * Deliberately not `raw !== null`: a column holding unparseable junk is not a
+ * question either, and reporting it as one would make every turn write a
+ * clear for a row that is already effectively empty.
+ */
+export function heldAwaiting(raw: string | null): boolean {
+  if (!raw) return false;
+  try {
+    const a = JSON.parse(raw) as { k?: unknown };
+    return typeof a?.k === 'string';
+  } catch {
+    return false;
+  }
+}
+
 export async function setAwaiting(
   env: Env,
   chatId: string,

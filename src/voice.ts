@@ -167,7 +167,12 @@ function one(e: Effect, tz: string): string {
     case 'reminder_renamed':
       return `#${e.id} עכשיו "${e.to}" במקום "${e.from}". השעה לא זזה.`;
     case 'reminder_deleted':
-      return `ביטלתי את #${e.id} "${e.title}".`;
+      // No title means the row could not be named, which is not the same as
+      // its being called something. It used to fall back to the id, so the
+      // sentence read `ביטלתי את #95 "95"` — a quoted errand he never wrote,
+      // in the one slot voice.ts uses for his own words. See the delete arm
+      // in effects.ts for the 30.09.2026 turn.
+      return e.title ? `ביטלתי את #${e.id} "${e.title}".` : `ביטלתי את #${e.id}.`;
     case 'instance_done':
       return `נסגר: "${e.title}". רצף ${e.streak}.`;
     case 'instance_skipped':

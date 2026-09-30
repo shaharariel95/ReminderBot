@@ -70,7 +70,8 @@ const NOT_POINTERS = new Set([
   'JSON.parse',             // the language
   'e.id',                   // a field on Effect, discussed as such
   'Context.inbox',          // a field on Context
-  'ctx.open', 'ctx.reminders', // fields on the Context an intent is applied to
+  'ctx.open', 'ctx.reminders', 'ctx.inbox', // fields on the Context an intent is applied to
+  'events.detail',          // a column
   'instance_skipped.recurs', // a field on an Effect kind
   'items.properties',       // a JSON-schema path, in the testing section
   'meta.last_tick',         // a database row
