@@ -153,6 +153,34 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
   for words dropped, so a hedge can vanish with its blessing.
 - A repeat rule must never be flattened into a single fire — that ENDS the
   recurrence. → `when.readWhen`
+- **The lead-ins are the feature, not the weekday.** `כל שני ב-8` always
+  worked; he asked three times on 30.09 and reached for `פעם בשבוע בימי שני`
+  and `כל שבוע ב...` instead. Three shapes, tried in a fixed order — the
+  led form before the bare plural, or the plural eats half the phrase and
+  `finish` bails on the rest. → `quickparse.RE_WEEKLY_LED`
+- `ימי חול` is `weekly` over `WORK_WEEK`, and `כל יום חוץ מ-X` is `weekly`
+  over the complement. Both tried BEFORE `RE_DAILY`, which matches the
+  `כל יום` in front of them and read both as ringing seven days a week.
+  → `quickparse.RE_WORKWEEK`, `quickparse.RE_EXCLUDE`
+- **A day of the month is not an hour, and it has to come off first.**
+  `matchClock` reads left to right, so in "כל חודש ב-10 בשעה 9" it takes the
+  tenth as 10:00. Same correctness requirement — not an optimisation — as
+  `readWhen` stripping a numeric date before lexing. → `quickparse.RE_MONTHLY_DAY`
+- `RECURRING` is checked **before** `countTimeAnchors`, because a day of the
+  month plus an hour is two phrases composing into one schedule. Safe only
+  because `finish` holds every arm to accounting for the whole sentence.
+  → `quickparse.quickParse`
+- **`monthly` clamps short months rather than skipping them** — day 31 fires
+  on the 28th. Skipping would silently drop a payment, and it is honest only
+  because voice.ts states the instant it chose. → `types.Schedule` (`monthly`)
+- **Adding a `Schedule` arm is not one edit, and the compiler catches only
+  some of them.** `computeNext` and `describeSchedule` go red; the
+  hour-correction button does NOT, because its `once` fallback is total — so
+  0.39.0's `monthly` was one tap away from becoming a one-off, under a comment
+  already describing that exact bug. → `index.ts` (`case 'retime'`)
+- Annual and every-N-days are **deferred, not broken**: no arm, no evidence,
+  and they refuse. A test holds them to refusing rather than being rounded to
+  `weekly`/`daily`. → `test/v39.test.ts`
 - **That rule was enforced by a word list for nine versions, and the list was
   short.** `פעם בשבוע` was missing, so #96 was written `once`, on a Thursday,
   with the repeat phrase left in the title. → `quickparse.RECURRING`
@@ -720,7 +748,7 @@ own validator.
 
 ## Testing
 
-`npm test` runs thirty-eight files against a real in-memory SQLite behind a
+`npm test` runs forty files against a real in-memory SQLite behind a
 D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end,
 so "the reminder never arrived" is reproducible rather than arguable.
 
@@ -769,9 +797,26 @@ found by the red-proof rather than by review:
    passed by the easiest one.** `rig.slowModels` exists to make the other
    reachable.
 
+9. **It forbade the wrong answer it had in mind, not the wrong answers.**
+   The guard against flattening a repeat rule was asserted as "never returns
+   a one-off", which is the shape #96 took. `כל יום חוץ משבת` PASSED it by
+   returning `daily` — seven days a week, including the Saturday he had named
+   in order to exclude it. Both are the same bug and only one was named.
+   **Assert what must not happen, enumerated per case, not the one instance of
+   it you just debugged.**
+
 3 and 7 are the same failure at different times: an assertion that survives a
 change by ceasing to look at anything. 8 is its opposite and just as quiet — an
-assertion that looks at a thing the suite cannot produce.
+assertion that looks at a thing the suite cannot produce. 9 is neither: it
+looks, the thing is produced, and the assertion simply does not object to it.
+
+**And the red-proof audits COMMENTS too, not just tests.** `WEEK_LEAD`'s right
+boundary on `שבוע` was written with a rationale — without it, `כל שבועיים`
+halves into weekly — and removing the boundary left every fortnightly phrasing
+still refusing, because the dual suffix already blocks the pattern. The
+boundary stayed; the comment now says what is true. A comment asserting a
+mechanism nobody checked is the same failure as a row in the invariants table
+nobody audited, and it has the same fix: run it.
 
 Useful rig facts:
 

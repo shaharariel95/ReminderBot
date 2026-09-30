@@ -127,8 +127,11 @@ export const RECURRING = new RegExp(
     // writes; the duals carry "כל יומיים"/"כל שבועיים".
     String.raw`כל\s+(?:יום|יומיים|שבוע|שבועיים|חודש|חודשיים|חודשים|שנה|שנתיים|שנים|בוקר|צהריי?ם|ערב|לילה|שעה|שעתיים|${WEEKDAY_ALT})`,
     // A counted interval. Minutes and hours were here; days, weeks and months
-    // were not, so "כל 3 ימים" read as a bare clock.
-    String.raw`כל\s+\S+\s*(?:דקות|דקה|שעות|שעה|ימים|יום|שבועות|שבוע|חודשים|חודש)`,
+    // were not, so "כל 3 ימים" read as a bare clock. The optional ל is what
+    // lets "כל 1 לחודש" — the ordinal-first way to name a day of the month —
+    // be seen at all; without it that phrase fell through to the clock path
+    // and became a one-off titled "כל 1 לחודש לשלם שכירות".
+    String.raw`כל\s+\S+\s*ל?(?:דקות|דקה|שעות|שעה|ימים|יום|שבועות|שבוע|חודשים|חודש)`,
     String.raw`מדי\s+(?:יום|בוקר|ערב|שבוע|חודש|שנה)`,
     // "פעם בשבוע" — the #96 phrase, and the one anybody reaches for first.
     // The unit is REQUIRED so a bare "פעם" in an errand cannot match.
@@ -731,12 +734,103 @@ const RE_INTERVAL = new RegExp(
   EVERY + String.raw`(?:(?<n>\d{1,3}|\S+)\s+)?(?<unit>${UNIT_HM})` + END,
   'i',
 );
-const RE_WEEKLY = new RegExp(
-  EVERY +
-    String.raw`(?:יום\s+)?(?<days>(?:${WEEKDAY_ALT})(?:\s*(?:ו|,|\s+and\s+)\s*(?:${WEEKDAY_ALT}))*)` +
+/** "שני", "שני ורביעי", "שני, רביעי וחמישי" — one or more weekday names. */
+const DAY_LIST = String.raw`(?<days>(?:${WEEKDAY_ALT})(?:\s*(?:ו|,|\s+and\s+)\s*(?:${WEEKDAY_ALT}))*)`;
+
+const RE_WEEKLY = new RegExp(EVERY + String.raw`(?:יום\s+)?` + DAY_LIST + String.raw`(?![א-ת])`, 'i');
+
+/*
+ * THE LEAD-INS HE ACTUALLY USED, none of which is `כל <day>`.
+ *
+ * `כל שני ב-8` has worked since parseRecurring was written. On 30.09.2026 he
+ * asked for the same thing three times and reached for a different phrasing
+ * every time — "פעם בשבוע בימי שני", then "כל שבוע בים שני". RE_WEEKLY above
+ * matches neither, because both name the WEEK first and the day second.
+ *
+ * The right boundary on `שבוע` is BELT-AND-BRACES, and saying so is the point:
+ * the obvious rationale for it — that `כל\s+שבוע` otherwise matches the front
+ * of "כל שבועיים" and silently halves a fortnightly request — is what it was
+ * written for, and the red-proof disproved it. Removing the boundary leaves
+ * every `שבועיים` phrasing still refusing, because the dual suffix "יים" sits
+ * where this pattern next requires whitespace, ב/ל, ימי/יום or a weekday, and
+ * nothing here can consume it.
+ *
+ * Kept anyway: it costs nothing and it states the intent, so a later edit that
+ * loosens what follows the lead-in cannot reintroduce the halving. But it is
+ * not what makes "כל שבועיים" safe, and a comment claiming otherwise is the
+ * failure CLAUDE.md names — writing the rule down is not checking it. Same
+ * status for `חודש` in MONTH_LEAD.
+ */
+const WEEK_LEAD = String.raw`(?:[ובלמ]?כל\s+שבוע(?![א-ת])|פעם\s+בשבוע(?![א-ת])|מדי\s+שבוע(?![א-ת])|every\s+week(?![a-z]))`;
+
+/** "כל שבוע ביום שני", "פעם בשבוע בימי שני", "מדי שבוע בשני". */
+const RE_WEEKLY_LED = new RegExp(
+  String.raw`(?:^|\s)` + WEEK_LEAD + String.raw`\s*,?\s*[בל]?\s*(?:ימי|יום)?\s*` + DAY_LIST +
     String.raw`(?![א-ת])`,
   'i',
 );
+
+/**
+ * "בימי שני ורביעי" — the PLURAL day phrase carrying the recurrence on its
+ * own, with no lead-in anywhere in the sentence.
+ *
+ * Tried after RE_WEEKLY_LED, not before: "פעם בשבוע בימי שני" matches both,
+ * and this one would consume only the day half, leaving "פעם בשבוע" in the
+ * title for `finish` to bail on.
+ */
+const RE_WEEKLY_PLURAL = new RegExp(
+  String.raw`(?:^|\s)[ובלמ]?ימי\s+` + DAY_LIST + String.raw`(?![א-ת])`,
+  'i',
+);
+
+/** Sunday–Thursday. The Israeli working week, and the only one this bot serves. */
+const WORK_WEEK = [0, 1, 2, 3, 4];
+
+/**
+ * "ימי חול", "כל יום עבודה" — the working week as a single unit.
+ *
+ * It consumes its own `כל`, so the daily lead does not need stripping
+ * separately. Before this, RE_DAILY matched the "כל יום" and left the
+ * qualifier in the title: "כל יום חול בשעה 7 לקום" became plain `daily`
+ * titled "חול לקום", ringing on the Saturday that "חול" excludes.
+ */
+const RE_WORKWEEK = new RegExp(
+  String.raw`(?:^|\s)[ובלמ]?(?:כל\s+)?(?:ימי|יום)\s+(?:חול|עבודה)(?![א-ת])`,
+  'i',
+);
+
+/**
+ * "כל יום חוץ משבת", "כל יום חוץ משישי ושבת" — every day BUT these.
+ *
+ * An exclusion is a repeat rule by implication; nobody excludes a day from a
+ * single fire. It is expressed as `weekly` with the complement of the named
+ * days, so it needs no new schedule type — and it has to be tried before
+ * RE_DAILY, which matches the "כל יום" in front of it and read the whole
+ * thing as ringing seven days a week.
+ */
+const RE_EXCLUDE = new RegExp(
+  String.raw`(?:חוץ\s+מ|למעט|פרט\s+ל)\s*[בהמ]?(?:ימי\s+|יום\s+)?` + DAY_LIST +
+    String.raw`(?![א-ת])`,
+  'i',
+);
+
+/*
+ * "כל חודש ב-10", "פעם בחודש ב-15", "כל 1 לחודש", "בסוף כל חודש".
+ *
+ * Two shapes because Hebrew puts the ordinal on either side of the noun, and
+ * a third for the end of the month, which is the phrasing a standing bill
+ * actually gets asked for in.
+ */
+const MONTH_LEAD = String.raw`(?:[ובלמ]?כל\s+חודש(?![א-ת])|פעם\s+בחודש(?![א-ת])|מדי\s+חודש(?![א-ת])|every\s+month(?![a-z])|monthly)`;
+const RE_MONTHLY_DAY = new RegExp(
+  String.raw`(?:^|\s)` + MONTH_LEAD + String.raw`\s*,?\s*[בל]\s*-?\s*(?<dom>\d{1,2})(?![\d:])`,
+  'i',
+);
+const RE_MONTHLY_NTH = new RegExp(
+  String.raw`(?:^|\s)(?:[ובלמ]?כל\s+)?[בל]?\s*-?\s*(?<dom>\d{1,2})\s+לחודש(?![א-ת])`,
+  'i',
+);
+const RE_MONTH_END = new RegExp(String.raw`(?:^|\s)[ובלמ]?סוף\s+(?:כל\s+)?ה?חודש(?![א-ת])`, 'i');
 const RE_DAILY = new RegExp(
   EVERY + String.raw`(?<span>יום|בוקר|ערב|לילה|צהריי?ם|day|morning|evening|night)(?![א-ת])`,
   'i',
@@ -789,24 +883,93 @@ function parseRecurring(t: string): Intent | null {
     return null;
   }
 
+  /*
+   * MONTHLY COMES FIRST, AND READS ITS OWN CLOCK.
+   *
+   * "כל חודש ב10 בשעה 9" has two `ב`-numbers in it: the tenth and the hour.
+   * `matchClock` scans left to right and its `ב\s*-?\s*\d` alternative hits
+   * the "ב10" four words before the real "בשעה 9" — so it would return 10:00
+   * and the day of the month would vanish.
+   *
+   * That is the same failure readWhen's numeric date has, with the same fix
+   * and the same status: "not an optimisation — a correctness requirement",
+   * because a lexer that can see the same characters as two different things
+   * has to be given each of them exactly once. So the day-of-month span is
+   * removed before anything else lexes the sentence.
+   */
+  const monthEnd = RE_MONTH_END.exec(t);
+  const monthDay = RE_MONTHLY_DAY.exec(t) ?? RE_MONTHLY_NTH.exec(t);
+  if (monthEnd || monthDay) {
+    const eaten = [monthEnd?.[0], monthDay?.[0]].filter((x): x is string => Boolean(x));
+    let rest = t;
+    for (const c of eaten) rest = rest.replace(c, ' ');
+    const monthClock = matchClock(rest);
+    // No hour is not a monthly schedule — "כל חודש לשלם שכירות" names no
+    // time at all, and the router is the only thing that can ask about it.
+    if (!monthClock) return null;
+    // `monthEnd` wins when both matched: "בסוף כל חודש" is the last day
+    // whatever number happens to be elsewhere in the sentence.
+    const dom = monthEnd ? 31 : Number(monthDay!.groups!.dom);
+    if (!(dom >= 1 && dom <= 31)) return null;
+    const monthAmbiguous = !monthClock.settled && monthClock.hour <= 12;
+    return finish(
+      {
+        action: 'create_reminder', schedule_type: 'monthly',
+        day_of_month: dom, time: hhmm(monthClock),
+        ...(monthAmbiguous ? { ambiguous_hour: (monthClock.hour + 12) % 24 } : {}),
+      },
+      [...eaten, monthClock.matched],
+    );
+  }
+
   // Everything below needs a time of day: "כל יום" alone is not a schedule.
   const clock = matchClock(t);
   if (!clock) return null;
   const ambiguous = !clock.settled && clock.hour <= 12;
-
-  const weekly = RE_WEEKLY.exec(t);
-  if (weekly) {
-    const names = weekly.groups!.days.match(new RegExp(WEEKDAY_ALT, 'g')) ?? [];
-    const days = [...new Set(names.map((d) => WEEKDAYS[d]))].filter((d) => d !== undefined);
+  /** Every weekly arm below reports its days the same way. */
+  const weeklyFrom = (raw: string, days: number[], consumed: string[]): Intent | null => {
     if (!days.length) return null;
     return finish(
       {
         action: 'create_reminder', schedule_type: 'weekly', time: hhmm(clock), days,
         ...(ambiguous ? { ambiguous_hour: (clock.hour + 12) % 24 } : {}),
       },
-      [weekly[0], clock.matched],
+      consumed,
+    );
+  };
+  const dowsIn = (s: string): number[] => {
+    const names = s.match(new RegExp(WEEKDAY_ALT, 'g')) ?? [];
+    return [...new Set(names.map((d) => WEEKDAYS[d]))].filter((d) => d !== undefined);
+  };
+
+  /*
+   * An EXCLUSION, before RE_DAILY gets to the "כל יום" in front of it.
+   *
+   * "כל יום חוץ משבת בשעה 7 לקום" used to come back `daily` titled
+   * "חוץ משבת לקום" — ringing on the one day he had named in order to
+   * exclude it, with the exclusion sitting in the title as decoration.
+   */
+  const excluded = RE_EXCLUDE.exec(t);
+  if (excluded) {
+    const drop = new Set(dowsIn(excluded.groups!.days));
+    if (!drop.size) return null;
+    const lead = RE_DAILY.exec(t) ?? RE_WORKWEEK.exec(t);
+    const base = lead && RE_WORKWEEK.test(t) ? WORK_WEEK : [0, 1, 2, 3, 4, 5, 6];
+    return weeklyFrom(
+      excluded[0],
+      base.filter((d) => !drop.has(d)),
+      [excluded[0], lead?.[0] ?? '', clock.matched],
     );
   }
+
+  // The working week as a unit. Also before RE_DAILY, and for the same reason.
+  const workweek = RE_WORKWEEK.exec(t);
+  if (workweek) return weeklyFrom(workweek[0], [...WORK_WEEK], [workweek[0], clock.matched]);
+
+  // Weekly, in three shapes. RE_WEEKLY_LED before RE_WEEKLY_PLURAL — see
+  // RE_WEEKLY_PLURAL for why the order is not free.
+  const weekly = RE_WEEKLY_LED.exec(t) ?? RE_WEEKLY_PLURAL.exec(t) ?? RE_WEEKLY.exec(t);
+  if (weekly) return weeklyFrom(weekly[0], dowsIn(weekly.groups!.days), [weekly[0], clock.matched]);
 
   const daily = RE_DAILY.exec(t);
   if (daily) {
@@ -1121,14 +1284,30 @@ function quickParseOwn(
   // from the way he types it, which is the normal case for a nickname taken
   // from a Telegram profile.
   if (addressesSomeoneElse(t)) return null;
+  /*
+   * Recurring requests have their own grammar entirely — a repeat rule, not an
+   * instant. parseRecurring returns null for the shapes it cannot express, and
+   * those still reach the router.
+   *
+   * CHECKED BEFORE `countTimeAnchors`, and that ordering is the same lesson
+   * readWhen's day-offset arm records: "two phrases that compose into one
+   * moment are one time, not two". A monthly schedule is exactly that shape —
+   * "כל חודש ב-10 בשעה 9" has a day of the month AND an hour, the anchor
+   * count sees two time phrases and bails, and the whole schedule reached the
+   * router as an unparsed sentence.
+   *
+   * Safe in this order because `finish` holds every arm to accounting for the
+   * entire sentence: a second time phrase left over after the repeat rule and
+   * the clock are consumed is caught by `hasTimeResidue`, so "כל יום ב-7
+   * ובערב להתקשר" — genuinely two doses — still bails to the router. The
+   * residue check is what makes the anchor count redundant here rather than
+   * merely bypassed.
+   */
+  if (RECURRING.test(t)) return parseRecurring(t);
+
   // Two times in one message means two reminders. One Intent cannot hold both,
   // and guessing which one he meant is how a reminder goes missing.
   if (countTimeAnchors(t) > 1) return null;
-
-  // Recurring requests have their own grammar entirely — a repeat rule, not an
-  // instant. parseRecurring returns null for the shapes it cannot express, and
-  // those still reach the router.
-  if (RECURRING.test(t)) return parseRecurring(t);
 
   const rel = parseRelative(t);
   // Two months out is past the point where "in N weeks" is the phrasing anyone

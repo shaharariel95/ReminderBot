@@ -975,17 +975,30 @@ async function handleCallback(update: any, env: Env): Promise<void> {
             /* unparseable: treated as a one-off below */
           }
 
-          // Correcting the HOUR must not also change the KIND of reminder.
-          // This branch used to write a `once` schedule unconditionally, which
-          // would have turned "כל יום ב-7" into a single 19:00 reminder the
-          // moment he tapped "לא, 19:00" — ending the recurrence silently,
-          // which is the worst outcome a correction button could have.
+          /*
+           * Correcting the HOUR must not also change the KIND of reminder.
+           * This branch used to write a `once` schedule unconditionally, which
+           * would have turned "כל יום ב-7" into a single 19:00 reminder the
+           * moment he tapped "לא, 19:00" — ending the recurrence silently,
+           * which is the worst outcome a correction button could have.
+           *
+           * AND IT IS A SITE THAT A NEW `Schedule` ARM SILENTLY BREAKS. The
+           * `monthly` arm added in 0.39.0 landed straight in the `once`
+           * fallback below, so "כל חודש ב-10 בשעה 9" — whose hour is
+           * unsettled, so the button really is offered — became a one-off on
+           * the 1st at one tap. The comment above already described that bug;
+           * nothing made the code hold to it. There is no compile error here
+           * because the fallback is total, which is exactly why it needs
+           * naming: every recurring arm must be listed by hand.
+           */
           const schedule: Schedule =
             existing?.type === 'daily'
               ? { type: 'daily', time: hhmm }
               : existing?.type === 'weekly'
                 ? { type: 'weekly', time: hhmm, days: existing.days }
-                : { type: 'once', at: '' };
+                : existing?.type === 'monthly'
+                  ? { type: 'monthly', time: hhmm, day: existing.day }
+                  : { type: 'once', at: '' };
           let at: number;
           if (schedule.type === 'once') {
             const p = wallParts(Date.now(), rem.tz);

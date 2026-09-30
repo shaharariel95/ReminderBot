@@ -124,9 +124,12 @@ const CORE_FIELDS = {
   goal_id: { type: 'INTEGER' },
   checkins_enabled: { type: 'BOOLEAN' },
   checkin_per_day: { type: 'INTEGER' },
-  schedule_type: { type: 'STRING', enum: ['once', 'daily', 'weekly', 'interval'] },
+  schedule_type: { type: 'STRING', enum: ['once', 'daily', 'weekly', 'monthly', 'interval'] },
   time: { type: 'STRING' },
   days: { type: 'ARRAY', items: { type: 'INTEGER' } },
+  /** Which day of the month a `monthly` schedule lands on, 1–31. Clamped
+   *  where it is read — see scheduleFromIntent. */
+  day_of_month: { type: 'INTEGER' },
   interval_minutes: { type: 'INTEGER' },
   once_at: { type: 'STRING' },
   /** When the THING happens — never when to ring. See the rule below. */
@@ -467,8 +470,15 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
   * שעה מפורשת היום/מחר ("ב-22:36", "מחר ב-9") → schedule_type="once" + once_at="YYYY-MM-DDTHH:MM" לפי השעון שקיבלת למעלה.
   * "כל יום ב-X" → "daily" + time.
   * "כל שני ורביעי ב-X" → "weekly" + time + days (0=ראשון..6=שבת).
+    גם "פעם בשבוע בימי שני", "כל שבוע ביום שני", "מדי שבוע בשני", "בימי שני ורביעי" — כולם weekly עם days=[1] או [1,3]. "פעם בשבוע" זה לא once.
+    "ימי חול" / "כל יום עבודה" → weekly עם days=[0,1,2,3,4]. "כל יום חוץ משבת" → weekly עם כל הימים חוץ מזה: days=[0,1,2,3,4,5].
+  * "כל חודש ב-10", "כל 1 לחודש", "בסוף כל חודש" → "monthly" + time + **day_of_month** (1-31). בסוף החודש זה day_of_month=31 ואני מקצר אותו לפי אורך החודש.
   * "כל X דקות שוב ושוב" (חזרתי!) → "interval" + interval_minutes.
     שים לב: "עוד 20 דקות" זה once עם in_minutes=20, ולא interval. interval זה רק כשהוא רוצה שזה יחזור על עצמו בלי סוף.
+
+    **חזרה היא לעולם לא once.** אם הוא אמר שזה חוזר — בכל ניסוח — אסור לך להחזיר once. once מצלצל פעם אחת ונגמר, וזה מחיקה שקטה של מה שהוא ביקש.
+    יש ניסוחים שאני לא יודע לשמור: "כל יומיים", "כל שבועיים", "כל שנה", "פעמיים ביום". אל תתרגם אותם ל-once ואל תעגל אותם ל-daily/weekly — זה יצלצל בימים שהוא לא ביקש.
+    במקרה כזה החזר create_reminder עם title בלבד, בלי שום שדה זמן. אני אתפוס את זה ואשאל אותו.
 
   **מתי הדבר קורה מול מתי לצלצל**: לפעמים הוא אומר שני זמנים שונים — מתי האירוע עצמו, ומתי הוא רוצה שתזכיר לו עליו.
   "קבעתי טיפול ליום שלישי ב-8:30, תזכיר לי בשני בערב" → once_at הוא **שני בערב** (מתי לצלצל), ו-**event_at="2026-08-18T08:30"** (מתי הטיפול).
@@ -485,7 +495,7 @@ ${convo ? `השיחה האחרונה (ההודעה של "הוא" בסוף היא
 - "snooze" — דחייה של משימה שכבר צלצלה ומחכה לדיווח. target_id = instance id, snooze_minutes.
 - "on_my_way" — הוא בדרך, יצא, התחיל, עושה את זה עכשיו ("נוסע", "בדרך", "יוצא עכשיו", "על זה", תמונה של הדרך). target_id = instance id.
   זה לא complete — הוא לא סיים, והוא עוד יצטרך לדווח. זה גם לא snooze — snooze זה "לא עכשיו", וזה בדיוק ההפך.
-- "reschedule" — הזזה של תזכורת קיימת שעוד לא צלצלה, לזמן אחר ("תעביר את זה ל-8", "תדחה את הריצה למחר בבוקר", "בעצם ב-21:00"). target_id = reminder id מהרשימה למעלה, ואת הזמן החדש באותם שדות של create_reminder (in_minutes / once_at / time+days).
+- "reschedule" — הזזה של תזכורת קיימת שעוד לא צלצלה, לזמן אחר ("תעביר את זה ל-8", "תדחה את הריצה למחר בבוקר", "בעצם ב-21:00"). target_id = reminder id מהרשימה למעלה, ואת הזמן החדש באותם שדות של create_reminder (in_minutes / once_at / time+days / time+day_of_month).
   זה לא create_reminder — אל תיצור תזכורת חדשה כשהוא רק מזיז אחת קיימת, אחרת יהיו לו שתיים.
   זה גם לא snooze — snooze זה למשימה פתוחה שכבר צלצלה, reschedule זה לתזכורת שעדיין מחכה.
 - "annotate" — פרט שמסביר תזכורת קיימת: בשביל מה היא, מה להביא, את מי לשאול. בדרך כלל זו התשובה שלו לשאלה ששאלת ("מה איבדת שם?" → "בשר אחי"). target_id = reminder id + note = הפרט, קצר, במילים שלו.

@@ -684,6 +684,17 @@ function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
       return intent.time && intent.days?.length
         ? { type: 'weekly', time: intent.time, days: intent.days }
         : null;
+    case 'monthly':
+      // Clamped where it is READ, like chill_hours and intensity — a
+      // model-emitted 47 must not reach computeNext, which would silently
+      // floor it to the end of every month and report a day he never named.
+      return intent.time && intent.day_of_month
+        ? {
+            type: 'monthly',
+            time: intent.time,
+            day: Math.min(31, Math.max(1, Math.floor(intent.day_of_month))),
+          }
+        : null;
     case 'interval':
       return intent.interval_minutes ? { type: 'interval', minutes: intent.interval_minutes } : null;
     case 'once':

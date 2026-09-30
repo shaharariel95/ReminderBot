@@ -109,6 +109,38 @@ export function computeNext(schedule: Schedule, tz: string, afterMs: number): nu
       return afterMs + mins * 60_000;
     }
 
+    /*
+     * A day of the month, walked one month at a time in WALL time.
+     *
+     * Same discipline as the daily/weekly probe below and for the same reason:
+     * stepping by a fixed number of milliseconds would drag a 09:00 reminder
+     * to 08:00 or 10:00 across a DST boundary, and a month is not a constant
+     * number of days to begin with.
+     *
+     * The clamp is the whole subtlety. `Date.UTC(year, m, 0)` is the last day
+     * of month `m` (day 0 of the next one), so asking for the 31st in February
+     * fires on the 28th — or the 29th in a leap year, which that expression
+     * gets right without a leap-year rule anywhere in this file. See the
+     * `monthly` arm in types.ts for why it clamps rather than skips.
+     *
+     * Thirteen probes rather than twelve: a call made ON the fire it is
+     * advancing past has to be able to reach the same day next year.
+     */
+    case 'monthly': {
+      const [h, min] = parseHm(schedule.time);
+      const want = Math.min(31, Math.max(1, Math.floor(schedule.day)));
+      const start = wallParts(afterMs, tz);
+      for (let i = 0; i <= 13; i++) {
+        const raw = start.month + i;
+        const year = start.year + Math.floor((raw - 1) / 12);
+        const month = ((raw - 1) % 12) + 1;
+        const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+        const candidate = wallToUtc(year, month, Math.min(want, lastDay), h, min, tz);
+        if (candidate > afterMs) return candidate;
+      }
+      return null;
+    }
+
     case 'daily':
     case 'weekly': {
       const [h, min] = parseHm(schedule.time);
@@ -285,6 +317,13 @@ export function describeSchedule(schedule: Schedule): string {
       return `כל יום ב-${schedule.time}`;
     case 'weekly':
       return `כל ${schedule.days.map((d) => names[d] ?? d).join(', ')} ב-${schedule.time}`;
+    case 'monthly':
+      // 31 IS the last day, because computeNext clamps — so "כל 31 בחודש"
+      // would be a false statement in four months of the year while this one
+      // is true in all twelve. The other days say the number he asked for.
+      return schedule.day >= 31
+        ? `בסוף כל חודש ב-${schedule.time}`
+        : `כל ${schedule.day} בחודש ב-${schedule.time}`;
     case 'interval':
       return `כל ${schedule.minutes} דקות`;
   }

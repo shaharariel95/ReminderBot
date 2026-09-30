@@ -49,6 +49,24 @@ export type Schedule =
   | { type: 'once'; at: string }                      // local wall time "2026-08-03T07:30"
   | { type: 'daily'; time: string }                   // "07:30"
   | { type: 'weekly'; time: string; days: number[] }  // days: 0=Sunday .. 6=Saturday
+  /**
+   * A day of the month, 1–31, CLAMPED to the length of each month — the 31st
+   * fires on the 28th in February.
+   *
+   * Clamp rather than skip, because the phrase that produces day 31 is
+   * "בסוף כל חודש" and the row behind it is a standing bill: skipping
+   * February would silently drop a payment, which is the more expensive of
+   * the two errors. It is honest for the same reason PERIOD_HOUR's 20:00
+   * guess is — voice.ts always states the instant it chose, so he reads
+   * "28.02" back and can move it.
+   *
+   * The one new arm in 0.39.0, and it exists to avoid CREATING a dead end
+   * rather than to add a feature: "כל חודש ב-10" resolved to a single fire
+   * until 0.38.0 widened RECURRING, and a capture-and-ask is worse than what
+   * it replaced for a bill that repeats. Annual and every-N-days have no arm
+   * because nothing in the live data asks for them, and they already refused.
+   */
+  | { type: 'monthly'; day: number; time: string }
   | { type: 'interval'; minutes: number };
 
 /** `inbox` = captured with no time. Never fires, never nags, waits in /inbox. */
@@ -216,9 +234,11 @@ export interface Intent {
     | 'set_checkins'
     | 'chat';
   title?: string;
-  schedule_type?: 'once' | 'daily' | 'weekly' | 'interval';
+  schedule_type?: 'once' | 'daily' | 'weekly' | 'monthly' | 'interval';
   time?: string;
   days?: number[];
+  /** Which day of the month a `monthly` schedule lands on, 1–31. */
+  day_of_month?: number;
   interval_minutes?: number;
   once_at?: string;
   /**
