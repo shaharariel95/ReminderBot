@@ -740,6 +740,23 @@ own validator.
   and that is production #85: an hour for a friend's reminder written into the
   owner's chat. Removed from the union in 0.33.0 so reaching for it again does
   not compile. → `types.Effect` (the `nothing` reason list)
+- **A missing hour must not cost the RECURRENCE either.** He states "פעם בשבוע
+  בימי שני" in one message and "ב-8 בערב" in the next; nothing joined them, so
+  `parseAnswerTime` returned an instant and a weekly reminder was written as one
+  fire. The `time` slot carries what was already read. Same shape as `forwhom`,
+  one field over. → `db.Awaiting` (`time.rec`), `index.answeredTimeIntent`
+- A recurrence with no hour is **not a `Schedule`** and must never be one — it
+  cannot fire. `scheduleFromIntent` still refuses it, so the row is captured;
+  the parser just stops throwing away the half it read.
+  → `types.PendingRecurrence`, `effects.pendingRecurrence`
+- **The question states the recurrence it is holding.** The slot will build the
+  schedule from it without asking again, so that sentence is his only chance to
+  catch a misread before it fires. It says how often and never when, because
+  nothing is scheduled yet. → `time.describePending`
+- A recurrence that **cannot** fire is dropped and the answer falls back to a
+  one-off: losing the repeat costs one message, losing the hour swallows his
+  answer in silence. `{d:[9]}` is the case that proves it — `{d:[]}` degrades
+  on its own. → `db.readAwaiting`
 - **Both time-answer slots use `parseAnswerTime`**, which is stricter than
   `readWhen` on purpose: the whole message must be the time, because a wrong
   answer to "מתי?" retimes a real reminder. `forwhom` shipped with `readWhen`
@@ -748,7 +765,7 @@ own validator.
 
 ## Testing
 
-`npm test` runs forty files against a real in-memory SQLite behind a
+`npm test` runs forty-one files against a real in-memory SQLite behind a
 D1-shaped facade (`test/harness.ts`). The webhook and cron paths run end to end,
 so "the reminder never arrived" is reproducible rather than arguable.
 

@@ -129,8 +129,28 @@ console.log('\n--- recurring shapes this file cannot express still route ---');
 // router handles properly.
 recurring('תזכיר לי כל יומיים לשלם', null);
 recurring('תזכיר לי פעמיים ביום לקחת כדור', null);
-// A repeat rule with no clock in it is not a schedule.
-recurring('תזכיר לי כל יום לרוץ', null);
+/*
+ * A repeat rule with no clock in it is STILL not a schedule — and since 0.40.0
+ * that is no longer the same statement as "quickParse returns null".
+ *
+ * It now reports the recurrence it read with `time` absent, so
+ * `scheduleFromIntent` refuses it exactly as before and the row is captured
+ * rather than written. What changed is that the capture knows it repeats, so
+ * his answer to "באיזו שעה?" rebuilds a DAILY schedule instead of a one-off —
+ * the gap the recurrence used to die in.
+ *
+ * The assertion is therefore on the thing that must not happen: no hour, so
+ * nothing can fire. Asserting `null` again would be asserting the mechanism
+ * rather than the rule, and would forbid the fix.
+ */
+{
+  const got = quickParse('תזכיר לי כל יום לרוץ', NOW, TZ);
+  assertTrue('a repeat rule with no clock names no hour', got !== null && got.time === undefined);
+  // `scheduleFromIntent` is what turns that absence into a refusal, and it is
+  // private to effects.ts. That half is asserted where it is observable:
+  // test/v40.test.ts checks the row lands as status='inbox' with next_fire_at
+  // NULL, which is the only thing "cannot fire" can mean.
+}
 recurring('תזכורת יומית ב-8', null);
 // Still a statement of fact, recurring or not.
 recurring('כל יום ב-7 אני רץ', null);

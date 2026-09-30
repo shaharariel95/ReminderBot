@@ -69,6 +69,29 @@ export type Schedule =
   | { type: 'monthly'; day: number; time: string }
   | { type: 'interval'; minutes: number };
 
+/**
+ * A recurrence read from his words with the HOUR still missing.
+ *
+ * Not a `Schedule` — deliberately, because it cannot fire and must never be
+ * mistaken for something that can. Every arm of `Schedule` carries a time;
+ * this is the half that was read when he said how often but not when.
+ *
+ * It exists because that half used to be thrown away. "פעם בשבוע בימי שני
+ * להשקות את העציץ" was captured as a bare title, and when he answered the hour
+ * a minute later the row was written as a ONE-OFF — the recurrence dying in the
+ * gap between the question and the answer, which is the last place it could.
+ *
+ * Keys are one letter for the same reason `Awaiting`'s are: this is JSON in a
+ * column read on every message.
+ *   d — weekly, on these days (0=Sunday)
+ *   m — monthly, on this day of the month
+ *   e — every day
+ */
+export type PendingRecurrence =
+  | { d: number[] }
+  | { m: number }
+  | { e: 1 };
+
 /** `inbox` = captured with no time. Never fires, never nags, waits in /inbox. */
 export type ReminderStatus = 'scheduled' | 'inbox' | 'done' | 'cancelled';
 
@@ -341,7 +364,15 @@ export type Effect =
    * and the persona resolves that contradiction by asserting the schedule the
    * baseline just denied ("רשמתי. מחר בודקים.", over a row with no fire time).
    */
-  | { kind: 'reminder_captured'; id: number; title: string; dayHint?: string }
+  /**
+   * `rec` is the recurrence he stated without an hour — see PendingRecurrence.
+   * It rides on the effect so that `voice.questionAsked` can put it in the
+   * awaiting slot, which is the only thing that joins his "פעם בשבוע" to the
+   * "ב-8 בערב" he sends a minute later. A sibling of `dayHint`: both are
+   * halves of a time that WAS read, carried so the question can ask for the
+   * other half instead of for all of it.
+   */
+  | { kind: 'reminder_captured'; id: number; title: string; dayHint?: string; rec?: PendingRecurrence }
   | { kind: 'reminder_scheduled'; id: number; title: string; at: number }
   | { kind: 'reminder_retimed'; id: number; title: string; at: number }
   /**

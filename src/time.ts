@@ -1,4 +1,4 @@
-import type { Schedule } from './types';
+import type { PendingRecurrence, Schedule } from './types';
 
 /**
  * Timezone maths without a library. Workers ship full ICU, so Intl is reliable.
@@ -302,8 +302,27 @@ export function localDayBounds(ts: number, tz: string): { from: number; to: numb
   };
 }
 
+/** 0=Sunday. Hoisted so describePending below reads the same list — two copies
+ *  of a weekday table is how one of them comes to be wrong. */
+const DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
+/**
+ * How often, for a recurrence whose hour is still missing.
+ *
+ * Says how often and NEVER when, because nothing has been scheduled — the row
+ * behind this is an inbox capture with no `next_fire_at`. It exists so the
+ * question can show what it is holding: a bot that has silently remembered
+ * "every Monday" and asks only "מתי?" is asking him to confirm something he
+ * cannot see, and if it guessed wrong he has no way to know before it fires.
+ */
+export function describePending(rec: PendingRecurrence): string {
+  if ('d' in rec) return `כל ${rec.d.map((d) => DAY_NAMES[d] ?? d).join(', ')}`;
+  if ('m' in rec) return rec.m >= 31 ? 'בסוף כל חודש' : `כל ${rec.m} בחודש`;
+  return 'כל יום';
+}
+
 export function describeSchedule(schedule: Schedule): string {
-  const names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+  const names = DAY_NAMES;
   switch (schedule.type) {
     case 'once': {
       // `at` is a local wall string ("2026-08-14T10:00"), so it can be made

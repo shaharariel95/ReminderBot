@@ -904,36 +904,60 @@ function parseRecurring(t: string): Intent | null {
     let rest = t;
     for (const c of eaten) rest = rest.replace(c, ' ');
     const monthClock = matchClock(rest);
-    // No hour is not a monthly schedule — "כל חודש לשלם שכירות" names no
-    // time at all, and the router is the only thing that can ask about it.
-    if (!monthClock) return null;
     // `monthEnd` wins when both matched: "בסוף כל חודש" is the last day
     // whatever number happens to be elsewhere in the sentence.
     const dom = monthEnd ? 31 : Number(monthDay!.groups!.dom);
     if (!(dom >= 1 && dom <= 31)) return null;
-    const monthAmbiguous = !monthClock.settled && monthClock.hour <= 12;
+    /*
+     * NO HOUR STILL REPORTS THE RECURRENCE. It used to return null here.
+     *
+     * "כל חודש ב-10 לשלם שכירות" names how often and not when, and returning
+     * null threw away the half that WAS read — handing the whole sentence to
+     * the router, whose answer to "how often" is a guess where this is a
+     * reading. `time` is left absent, so `scheduleFromIntent` still refuses and
+     * the row is still captured rather than written; the recurrence rides along
+     * to the question instead of dying in it. See db.Awaiting (`time.rec`).
+     */
+    const monthAmbiguous = monthClock !== null && !monthClock.settled && monthClock.hour <= 12;
     return finish(
       {
-        action: 'create_reminder', schedule_type: 'monthly',
-        day_of_month: dom, time: hhmm(monthClock),
-        ...(monthAmbiguous ? { ambiguous_hour: (monthClock.hour + 12) % 24 } : {}),
+        action: 'create_reminder', schedule_type: 'monthly', day_of_month: dom,
+        ...(monthClock ? { time: hhmm(monthClock) } : {}),
+        ...(monthAmbiguous ? { ambiguous_hour: (monthClock!.hour + 12) % 24 } : {}),
       },
-      [...eaten, monthClock.matched],
+      [...eaten, monthClock?.matched ?? ''],
     );
   }
 
-  // Everything below needs a time of day: "כל יום" alone is not a schedule.
+  /*
+   * The hour is OPTIONAL from here down, and that is 0.40.0.
+   *
+   * This used to be `if (!clock) return null`, under the comment "כל יום alone
+   * is not a schedule" — true, and the wrong conclusion. "פעם בשבוע בימי שני
+   * להשקות את העציץ" names how often and not when, and returning null threw
+   * away the half that had been read: the sentence went to the router, was
+   * captured with a title and nothing else, and when he answered the hour a
+   * minute later `parseAnswerTime` produced an instant and the row was written
+   * as a ONE-OFF. The recurrence died in the gap between the question and the
+   * answer.
+   *
+   * So the arms below report the days they read and leave `time` absent.
+   * `scheduleFromIntent` still refuses an incomplete schedule, so the row is
+   * still captured rather than written — nothing is guessed and nothing fires.
+   * The difference is that the capture now knows what it is missing, and says
+   * so. See db.Awaiting (`time.rec`).
+   */
   const clock = matchClock(t);
-  if (!clock) return null;
-  const ambiguous = !clock.settled && clock.hour <= 12;
+  const ambiguous = clock !== null && !clock.settled && clock.hour <= 12;
+  /** The hour, when he gave one — and the field left off entirely when he did not. */
+  const atClock = clock
+    ? { time: hhmm(clock), ...(ambiguous ? { ambiguous_hour: (clock.hour + 12) % 24 } : {}) }
+    : {};
   /** Every weekly arm below reports its days the same way. */
   const weeklyFrom = (raw: string, days: number[], consumed: string[]): Intent | null => {
     if (!days.length) return null;
     return finish(
-      {
-        action: 'create_reminder', schedule_type: 'weekly', time: hhmm(clock), days,
-        ...(ambiguous ? { ambiguous_hour: (clock.hour + 12) % 24 } : {}),
-      },
+      { action: 'create_reminder', schedule_type: 'weekly', days, ...atClock },
       consumed,
     );
   };
@@ -958,21 +982,27 @@ function parseRecurring(t: string): Intent | null {
     return weeklyFrom(
       excluded[0],
       base.filter((d) => !drop.has(d)),
-      [excluded[0], lead?.[0] ?? '', clock.matched],
+      [excluded[0], lead?.[0] ?? '', clock?.matched ?? ''],
     );
   }
 
   // The working week as a unit. Also before RE_DAILY, and for the same reason.
   const workweek = RE_WORKWEEK.exec(t);
-  if (workweek) return weeklyFrom(workweek[0], [...WORK_WEEK], [workweek[0], clock.matched]);
+  if (workweek) return weeklyFrom(workweek[0], [...WORK_WEEK], [workweek[0], clock?.matched ?? '']);
 
   // Weekly, in three shapes. RE_WEEKLY_LED before RE_WEEKLY_PLURAL — see
   // RE_WEEKLY_PLURAL for why the order is not free.
   const weekly = RE_WEEKLY_LED.exec(t) ?? RE_WEEKLY_PLURAL.exec(t) ?? RE_WEEKLY.exec(t);
-  if (weekly) return weeklyFrom(weekly[0], dowsIn(weekly.groups!.days), [weekly[0], clock.matched]);
+  if (weekly) return weeklyFrom(weekly[0], dowsIn(weekly.groups!.days), [weekly[0], clock?.matched ?? '']);
 
   const daily = RE_DAILY.exec(t);
   if (daily) {
+    // "כל יום לשתות מים" — how often, with no hour on it. Reported rather than
+    // discarded, for the same reason as the weekly arms above: the capture can
+    // then ask for the one thing it is missing and keep the recurrence.
+    if (!clock) {
+      return finish({ action: 'create_reminder', schedule_type: 'daily' }, [daily[0]]);
+    }
     // "כל ערב ב-8" is 20:00 — the span word settles the hour just as a
     // trailing "בערב" would, so there is nothing left to offer a button for.
     const span = daily.groups!.span;

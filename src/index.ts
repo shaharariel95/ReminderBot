@@ -32,7 +32,7 @@ import {
 } from './time';
 import { TURN_FAILED, friendReminderHeadsUp, questionAsked, renderBaseline } from './voice';
 import { VERSION } from './version';
-import type { Effect, Env, Facts, Intent, Schedule } from './types';
+import type { Effect, Env, Facts, Intent, PendingRecurrence, Schedule } from './types';
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -141,6 +141,42 @@ const TURN_BUDGET_MS = 25_000;
 function turnDeadline(env: Env): number {
   const n = Number(env.GEMINI_TURN_BUDGET_MS);
   return Date.now() + (Number.isFinite(n) && n >= 0 ? n : TURN_BUDGET_MS);
+}
+
+/**
+ * The intent his answer to "מתי?" becomes.
+ *
+ * A `reschedule` either way — that part has been right since the awaiting slot
+ * existed, and `reschedule` is what promotes an inbox capture. What was wrong
+ * is that it was ALWAYS a one-off.
+ *
+ * Production shape, 30.09.2026: "תזכיר לי פעם בשבוע בימי שני להשקות את העציץ"
+ * was captured with a bare title, he answered "ב-8 בערב" a minute later,
+ * `parseAnswerTime` returned an instant, and the row was written to fire once.
+ * He had said how often in the first message and when in the second, and
+ * nothing joined them. Identical in shape to #85, where the missing half was
+ * WHO rather than HOW OFTEN, and fixed the same way: the question carries the
+ * request.
+ *
+ * The HOUR comes from his answer and the recurrence from the slot, and neither
+ * is re-derived from the other message — that re-derivation is precisely what
+ * `forwhom` exists to avoid. With no recurrence in the slot this is exactly
+ * what it always was, which is the common case and must stay untouched.
+ */
+function answeredTimeIntent(
+  awaiting: { r: number; rec?: PendingRecurrence },
+  at: number,
+  tz: string,
+): Intent {
+  const base = { action: 'reschedule' as const, target_id: awaiting.r };
+  if (!awaiting.rec) return { ...base, schedule_type: 'once', once_at: wallString(at, tz) };
+  const p = wallParts(at, tz);
+  const time = `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+  if ('d' in awaiting.rec) return { ...base, schedule_type: 'weekly', time, days: awaiting.rec.d };
+  if ('m' in awaiting.rec) {
+    return { ...base, schedule_type: 'monthly', time, day_of_month: awaiting.rec.m };
+  }
+  return { ...base, schedule_type: 'daily', time };
 }
 
 async function buildContext(env: Env, chatId: string): Promise<Context> {
@@ -567,14 +603,7 @@ async function respondToOwner(
         );
     const intents: Intent[] =
       awaiting?.k === 'time' && answeredAt !== null
-        ? [
-            {
-              action: 'reschedule',
-              target_id: awaiting.r,
-              schedule_type: 'once',
-              once_at: wallString(answeredAt, ctx.settings.tz),
-            },
-          ]
+        ? [answeredTimeIntent(awaiting, answeredAt, ctx.settings.tz)]
         : answeredForWhom !== null
           ? [
               {

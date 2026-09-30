@@ -1,6 +1,8 @@
 import * as db from './db';
 import type { Context } from './brain';
-import type { Effect, Env, Intent, Reminder, ReminderItem, Schedule } from './types';
+import type {
+  Effect, Env, Intent, PendingRecurrence, Reminder, ReminderItem, Schedule,
+} from './types';
 import type { Friend } from './db';
 import { UNTITLED_TITLE } from './types';
 import { computeNext, localDateKey, localDayBounds, wallParts, wallString, wallToUtc } from './time';
@@ -668,6 +670,38 @@ function preferHisWords(heard: TimeRef, intent: Intent, tz: string): Schedule | 
   const mayOverride = !intent.event_at && (routed === null || modelDidArithmetic);
   if (!mayOverride) return routed;
   return { type: 'once', at: wallString(heard.at, tz) };
+}
+
+/**
+ * The recurrence in an intent that could NOT become a schedule, because the
+ * hour is missing.
+ *
+ * The mirror of `scheduleFromIntent`: that function returns null for exactly
+ * these intents, and everything it discarded on the way used to be lost. A
+ * capture then asked "מתי?", `parseAnswerTime` answered with an instant, and a
+ * weekly reminder was written as a single fire.
+ *
+ * Gated on `!intent.time`, which is what keeps it to the half-read case: an
+ * intent that HAS an hour either produced a schedule already or is broken in
+ * some other way, and guessing a recurrence onto it would be inventing one.
+ */
+function pendingRecurrence(intent: Intent): PendingRecurrence | undefined {
+  if (intent.time) return undefined;
+  switch (intent.schedule_type) {
+    case 'weekly':
+      return intent.days?.length ? { d: intent.days } : undefined;
+    case 'monthly':
+      // Clamped here as well as in scheduleFromIntent — this value survives a
+      // round trip through the awaiting column and comes back as the schedule,
+      // so it is read in two places and must be safe in both.
+      return intent.day_of_month
+        ? { m: Math.min(31, Math.max(1, Math.floor(intent.day_of_month))) }
+        : undefined;
+    case 'daily':
+      return { e: 1 };
+    default:
+      return undefined;
+  }
 }
 
 function scheduleFromIntent(intent: Intent, tz: string): Schedule | null {
@@ -1460,7 +1494,16 @@ export async function applyIntent(
         // is actually missing. See readWhen's 'no-hour' arm.
         const dayHint =
           heard.kind === 'ambiguous' && heard.why === 'no-hour' ? heard.seen[0] : undefined;
-        return [{ kind: 'reminder_captured', id, title, ...(dayHint ? { dayHint } : {}) }];
+        // He named how OFTEN and no hour — the other half-read time, carried
+        // the same way and for the same reason. See pendingRecurrence.
+        const rec = pendingRecurrence(intent);
+        return [
+          {
+            kind: 'reminder_captured', id, title,
+            ...(dayHint ? { dayHint } : {}),
+            ...(rec ? { rec } : {}),
+          },
+        ];
       }
 
       let next: number | null;

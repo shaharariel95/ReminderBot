@@ -1,6 +1,6 @@
 import type { Effect } from './types';
 import { UNTITLED_TITLE } from './types';
-import { describeSchedule, formatLocal, scheduleWithNext } from './time';
+import { describePending, describeSchedule, formatLocal, scheduleWithNext } from './time';
 
 /**
  * Deterministic Hebrew for every effect.
@@ -98,6 +98,26 @@ function one(e: Effect, tz: string): string {
         return untitled(e.title)
           ? `תפסתי ל${e.dayHint}, אבל לא אמרת על מה ובאיזו שעה.`
           : `תפסתי #${e.id}: "${e.title}" ל${e.dayHint}. באיזו שעה?`;
+      }
+      /*
+       * The RECURRENCE, when he gave one. Same argument as `dayHint` above,
+       * one field over: asking "בלי שעה בינתיים" about a message that said
+       * "פעם בשבוע בימי שני" asks for something it was handed.
+       *
+       * And it has a second job the dayHint does not. The slot is now silently
+       * holding "every Monday", and it will build the schedule out of that
+       * without asking again — so if it read him wrong, this sentence is his
+       * only chance to notice before the thing starts firing. `describePending`
+       * says how often and never when, because nothing has been scheduled yet.
+       *
+       * "אמרת", not a bare statement: it attributes the recurrence to him
+       * rather than claiming the row now has one. The row is still an inbox
+       * capture with no fire time, and this must not read as a confirmation.
+       */
+      if (e.rec) {
+        return untitled(e.title)
+          ? `תפסתי ${describePending(e.rec)}, אבל לא אמרת על מה ובאיזו שעה.`
+          : `תפסתי #${e.id}: "${e.title}". אמרת ${describePending(e.rec)} — באיזו שעה?`;
       }
       return untitled(e.title)
         ? 'תפסתי, אבל לא אמרת על מה ולא מתי. שניהם.'
@@ -566,8 +586,12 @@ export function questionAsked(
     // "תפסתי #35 … בלי שעה בינתיים — תגיד לי מתי." Same question, different
     // road to it: this row is an inbox capture rather than a live reminder.
     // `reschedule` promotes it, which is why the slot kind is identical.
+    //
+    // The recurrence rides along when there is one. It is the only thing
+    // joining his "פעם בשבוע בימי שני" to the "ב-8 בערב" that arrives a minute
+    // later, and without it the answer could only ever build a one-off.
     case 'reminder_captured':
-      return { k: 'time', r: e.id };
+      return { k: 'time', r: e.id, ...(e.rec ? { rec: e.rec } : {}) };
     // The title and instant ride in the slot rather than in callback_data,
     // which has 64 bytes and no room for a title. The button just says yes.
     case 'appointment_offer':

@@ -1,4 +1,6 @@
-import type { Env, Goal, Instance, Reminder, ReminderItem, Settings, Stats } from './types';
+import type {
+  Env, Goal, Instance, PendingRecurrence, Reminder, ReminderItem, Settings, Stats,
+} from './types';
 import { localDateKey, wallParts } from './time';
 
 const DAY = 86_400_000;
@@ -1993,7 +1995,15 @@ export const AWAITING_TTL_MS = 30 * 60_000;
  *           whole point — see the appointment_offer effect.
  */
 export type Awaiting =
-  | { k: 'time'; r: number; at: number }
+  /**
+   * `rec` is the recurrence he already stated, when the hour is the only thing
+   * missing. Without it this slot could only ever answer to a one-off: his
+   * "פעם בשבוע בימי שני" was captured as a bare title, `parseAnswerTime`
+   * turned his "ב-8 בערב" into an instant, and the row was written to fire
+   * once. Same failure as `forwhom`, one field over — the request is stated in
+   * the first message and written in the second, and something has to carry it.
+   */
+  | { k: 'time'; r: number; rec?: PendingRecurrence; at: number }
   | { k: 'offer'; t: string; w: number; at: number }
   /**
    * title — "על מה להזכיר?" was asked about reminder `r`, which exists and has
@@ -2042,6 +2052,25 @@ export type Awaiting =
    * avoid exactly that.
    */
   | { k: 'forwhom'; c: string; t: string; at: number };
+
+/**
+ * Is this a recurrence the answer path can actually build a schedule from?
+ *
+ * Absent is fine — most captures have no recurrence behind them, and that case
+ * must stay a one-off. What this rejects is a PRESENT but unusable one: an
+ * empty day list would produce a `weekly` that `computeNext` returns null for,
+ * so the reminder would be written and never fire.
+ */
+function validRecurrence(rec: unknown): boolean {
+  if (rec === undefined || rec === null) return true;
+  if (typeof rec !== 'object') return false;
+  const r = rec as { d?: unknown; m?: unknown; e?: unknown };
+  if (Array.isArray(r.d)) {
+    return r.d.length > 0 && r.d.every((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+  }
+  if (r.m !== undefined) return Number.isInteger(r.m) && (r.m as number) >= 1 && (r.m as number) <= 31;
+  return r.e === 1;
+}
 
 /**
  * Does the COLUMN hold a question — live or not?
@@ -2102,7 +2131,12 @@ export function readAwaiting(raw: string | null, now: number = Date.now()): Awai
     // below turns adding an arm without a validator into a compile error.
     switch (a.k) {
       case 'time':
-        return Number.isInteger(a.r) ? a : null;
+        // The recurrence is OPTIONAL but not arbitrary: a malformed one is
+        // dropped and the slot still answers, because the hour he is about to
+        // give is worth more than the recurrence is. Returning null here would
+        // throw away the question as well as the half-read schedule.
+        if (!Number.isInteger(a.r)) return null;
+        return validRecurrence(a.rec) ? a : { k: 'time', r: a.r, at: a.at };
       case 'offer':
         return typeof a.t === 'string' && a.t.length > 0 && Number.isFinite(a.w) ? a : null;
       case 'title':
