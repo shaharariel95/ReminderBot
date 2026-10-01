@@ -199,6 +199,11 @@ nothing, and his answer becomes a new reminder. → `voice.questionAsked`
   instant, required not optional, and swept into `facts.ts` because it is the
   one field crossing the safety chain. → `types.Reminder`, `facts.buildFacts`
 - A day with no hour is **not** "no time at all". → `when.Ambiguity`
+- **"שעה ועשרים" is eighty minutes, and a tail the parser cannot read
+  REFUSES.** It knew only וחצי/ורבע, so #93 matched the shorter "עוד שעה",
+  rang 40 minutes early, and was titled "ועשרים להעביר כביסה". One tail reader
+  for lengths, clocks and validate's scan — `matchClock` had its own copy of
+  the same bug. → `quickparse.tailMinutes`, `quickparse.UNREAD_TAIL`
 
 ### Speech and the validator
 

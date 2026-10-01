@@ -343,10 +343,81 @@ function hasTimeResidue(title: string, dayPinned: boolean): boolean {
 const LEAD = String.raw`(?:^|\s)(?:[ובלמ]?(?:עוד|בעוד|תוך)|in)\s+`;
 // Longest alternatives first so "h" never wins over "hours".
 const UNIT = String.raw`(?:שעות|שעה|hours?|hrs?|h|דקות|דקה|דק['׳]?|minutes?|mins?|m|ימים|יום|days?|שבועות|שבוע|weeks?)`;
-/** "שעה וחצי", "יומיים ורבע" — a fraction of the same unit, tacked on. */
-const OPT_HALF = String.raw`(?:\s+ו(?<half>חצי|רבע))?`;
+/**
+ * The number words, longest first so "עשרים" never loses to "עשר". Spelled out
+ * rather than approximated as `[א-ת]+`: see DURATION_SCAN for what a catch-all
+ * swallows. Hebrew only for the tail, which hangs off a ו.
+ */
+const HE_NUMBER_ALT = Object.keys(HE_NUMBERS).sort((a, b) => b.length - a.length).join('|');
+const MINUTE_UNIT = String.raw`(?:דקות|דקה|דק['׳]?)`;
+
+/**
+ * What may follow a unit: "שעה וחצי", "יומיים ורבע" — or, after HOURS, the
+ * minutes: "שעה ועשרים", "שעתיים ו-10 דקות".
+ *
+ * Production #93, 22.09.2026: "תזכיר לי עוד שעה ועשרים להעביר כביסה למייבש".
+ * This knew וחצי and ורבע and nothing else, so the bare-unit pattern matched the
+ * shorter "עוד שעה", read 60, and the reminder was written for 12:18 under the
+ * title "ועשרים להעביר כביסה למייבש" — the half it could not read, read back to
+ * him as his errand. hasTimeResidue did not know "ועשרים" either.
+ *
+ * Captured broadly and judged in `tailMinutes`, which REFUSES what it cannot
+ * read rather than dropping it: a tail this pattern skips is a tail left in the
+ * title, which is #93. `p` prefixes the group names so DURATION_SCAN can hold
+ * three of these in one regex.
+ */
+function tail(p: string): string {
+  return (
+    String.raw`(?:\s+ו\s*-?\s*(?:(?<${p}half>חצי|רבע)|` +
+    String.raw`(?<${p}plus>\d{1,3}|${HE_NUMBER_ALT})(?![א-ת\d])(?:\s+(?<${p}plusUnit>${MINUTE_UNIT}))?))?`
+  );
+}
+const OPT_TAIL = tail('');
 // Right-hand boundary that works for Hebrew, unlike `\b`.
 const END = String.raw`(?=$|[\s.,!?])`;
+
+/**
+ * A second "ו<number>" straight after a phrase that already took its tail —
+ * "שעה ועשרים וחמש" — or after one that takes none ("חצי שעה ועשר"). Either way
+ * the sentence holds more length than was read, and reading the first part
+ * alone is #93 again.
+ */
+// `\s*`, not `\s+`: matchClock's trailing `\s*(?<period>)?` eats the space
+// whether or not a period follows, so the remainder starts AT the ו.
+const UNREAD_TAIL = new RegExp(String.raw`^\s*ו\s*-?\s*(?:\d|(?:${HE_NUMBER_ALT})(?![א-ת]))`);
+
+/**
+ * Minutes a tail adds to a phrase whose unit is `unit` minutes long: 0 when
+ * there is no tail, null when there is one and it cannot honestly be read.
+ *
+ * Minutes hang off hours only. "יום ועשרים" is nothing anybody means, and a
+ * guess at it is a reminder at an hour he did not say.
+ *
+ * A small BARE number is refused: "שעה ושני דברים" is a count of things, and
+ * nobody says "an hour and two" meaning minutes without saying דקות. Five is
+ * where the colloquial forms start — וחמש, ועשר, ורבע, ועשרים.
+ */
+function tailMinutes(
+  half: string | undefined,
+  plus: string | undefined,
+  plusUnit: string | undefined,
+  unit: number,
+): number | null {
+  if (half) return halfBonus(half, unit);
+  if (plus === undefined) return 0;
+  if (unit !== 60) return null;
+  const n = toNumber(plus);
+  if (n === null || n < 1 || n > 59) return null;
+  if (!plusUnit && n < 5) return null;
+  return n;
+}
+
+/** `tailMinutes` over a match built from `tail('')`, plus the UNREAD_TAIL check. */
+function readTail(m: RegExpExecArray, text: string, unit: number): number | null {
+  if (UNREAD_TAIL.test(text.slice(m.index + m[0].length))) return null;
+  const g = m.groups!;
+  return tailMinutes(g.half, g.plus, g.plusUnit, unit);
+}
 
 /** Minutes in one of `unit`, or 0 if it isn't a unit we know. */
 function unitMinutes(unit: string): number {
@@ -361,13 +432,13 @@ function unitMinutes(unit: string): number {
 /** "שעתיים" / "יומיים" / "שבועיים" — the dual, which means two without saying so. */
 const DUALS: Record<string, number> = { שעתיים: 60, יומיים: 1440, שבועיים: 10080 };
 
-const REL_DUAL = new RegExp(LEAD + String.raw`(?<dual>שעתיים|יומיים|שבועיים)` + OPT_HALF + END, 'i');
+const REL_DUAL = new RegExp(LEAD + String.raw`(?<dual>שעתיים|יומיים|שבועיים)` + OPT_TAIL + END, 'i');
 const REL_FRACTION = new RegExp(
   LEAD + String.raw`(?<frac>חצי|רבע|half|quarter)\s+(?:an?\s+)?(?:שעה|hour)` + END,
   'i',
 );
-const REL_COUNTED = new RegExp(LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` + OPT_HALF + END, 'i');
-const REL_BARE = new RegExp(LEAD + String.raw`(?<unit>${UNIT})` + OPT_HALF + END, 'i');
+const REL_COUNTED = new RegExp(LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` + OPT_TAIL + END, 'i');
+const REL_BARE = new RegExp(LEAD + String.raw`(?<unit>${UNIT})` + OPT_TAIL + END, 'i');
 
 /** How much a trailing "וחצי"/"ורבע" adds, given the unit it hangs off. */
 function halfBonus(half: string | undefined, unit: number): number {
@@ -381,23 +452,31 @@ function halfBonus(half: string | undefined, unit: number): number {
  * title. Matching the phrase precisely matters: an earlier version consumed one
  * word too many and turned "בעוד שעתיים להתקשר לאמא" into a reminder called
  * "לאמא".
+ *
+ * A phrase that matched with a tail it cannot read returns null outright, and
+ * does not fall through to a shorter pattern: the shorter reading is #93.
  */
 export function parseRelative(t: string): { minutes: number; matched: string } | null {
   const dual = REL_DUAL.exec(t);
   if (dual) {
     const unit = DUALS[dual.groups!.dual];
-    return { minutes: unit * 2 + halfBonus(dual.groups!.half, unit), matched: dual[0] };
+    const extra = readTail(dual, t, unit);
+    return extra === null ? null : { minutes: unit * 2 + extra, matched: dual[0] };
   }
 
   const frac = REL_FRACTION.exec(t);
-  if (frac) return { minutes: /חצי|half/i.test(frac.groups!.frac) ? 30 : 15, matched: frac[0] };
+  if (frac) {
+    if (UNREAD_TAIL.test(t.slice(frac.index + frac[0].length))) return null;
+    return { minutes: /חצי|half/i.test(frac.groups!.frac) ? 30 : 15, matched: frac[0] };
+  }
 
   const counted = REL_COUNTED.exec(t);
   if (counted) {
     const n = toNumber(counted.groups!.n);
     if (n !== null) {
       const unit = unitMinutes(counted.groups!.unit);
-      return { minutes: n * unit + halfBonus(counted.groups!.half, unit), matched: counted[0] };
+      const extra = readTail(counted, t, unit);
+      return extra === null ? null : { minutes: n * unit + extra, matched: counted[0] };
     }
   }
 
@@ -405,7 +484,8 @@ export function parseRelative(t: string): { minutes: number; matched: string } |
   const bare = REL_BARE.exec(t);
   if (bare) {
     const unit = unitMinutes(bare.groups!.unit);
-    return { minutes: unit + halfBonus(bare.groups!.half, unit), matched: bare[0] };
+    const extra = readTail(bare, t, unit);
+    return extra === null ? null : { minutes: unit + extra, matched: bare[0] };
   }
 
   return null;
@@ -423,8 +503,8 @@ export function parseRelative(t: string): { minutes: number; matched: string } |
  */
 const B_LEAD = String.raw`(?:^|\s)ב\s*-?\s*`;
 const B_FRACTION = new RegExp(B_LEAD + String.raw`(?<frac>חצי|רבע)\s+שעה` + END, 'i');
-const B_DUAL = new RegExp(B_LEAD + String.raw`(?<dual>שעתיים|יומיים|שבועיים)` + OPT_HALF + END, 'i');
-const B_COUNTED = new RegExp(B_LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` + OPT_HALF + END, 'i');
+const B_DUAL = new RegExp(B_LEAD + String.raw`(?<dual>שעתיים|יומיים|שבועיים)` + OPT_TAIL + END, 'i');
+const B_COUNTED = new RegExp(B_LEAD + String.raw`(?<n>\S+)\s+(?<unit>${UNIT})` + OPT_TAIL + END, 'i');
 
 /**
  * Minutes in an explicit length the user actually stated, or null when they
@@ -478,7 +558,8 @@ export function parseDuration(text: string): number | null {
   const dual = B_DUAL.exec(text);
   if (dual) {
     const unit = DUALS[dual.groups!.dual];
-    return unit * 2 + halfBonus(dual.groups!.half, unit);
+    const extra = readTail(dual, text, unit);
+    return extra === null ? null : unit * 2 + extra;
   }
 
   const counted = B_COUNTED.exec(text);
@@ -487,7 +568,10 @@ export function parseDuration(text: string): number | null {
     const unit = unitMinutes(counted.groups!.unit);
     // Both halves have to be real. A word that is not a number ("בעבודה שעות")
     // must fall through to null, not quietly become NaN minutes.
-    if (n !== null && unit > 0) return n * unit + halfBonus(counted.groups!.half, unit);
+    if (n !== null && unit > 0) {
+      const extra = readTail(counted, text, unit);
+      return extra === null ? null : n * unit + extra;
+    }
   }
 
   return null;
@@ -516,13 +600,13 @@ const NUMBER_WORD_ALT = [...Object.keys(HE_NUMBERS), ...Object.keys(EN_NUMBERS)]
 
 const DURATION_SCAN = new RegExp(
   String.raw`(?<![א-ת])(?:` +
-    String.raw`(?<dual>שעתיים|יומיים|שבועיים)(?:\s+ו(?<dualHalf>חצי|רבע))?` +
+    String.raw`(?<dual>שעתיים|יומיים|שבועיים)${tail('dual')}` +
     '|' +
     String.raw`(?<frac>חצי|רבע)\s+(?<fracUnit>שעות|שעה|דקות|דקה|ימים|יום|שבוע)` +
     '|' +
-    String.raw`(?<n>\d{1,4}|${NUMBER_WORD_ALT})\s+(?<unit>${UNIT})(?:\s+ו(?<nHalf>חצי|רבע))?` +
+    String.raw`(?<n>\d{1,4}|${NUMBER_WORD_ALT})\s+(?<unit>${UNIT})${tail('n')}` +
     '|' +
-    String.raw`(?<bare>שעה|דקה|יום|שבוע)(?:\s+ו(?<bareHalf>חצי|רבע))?` +
+    String.raw`(?<bare>שעה|דקה|יום|שבוע)${tail('bare')}` +
     ')',
   'gi',
 );
@@ -541,9 +625,18 @@ export function scanDurations(text: string): DurationHit[] {
   for (const m of text.matchAll(DURATION_SCAN)) {
     const g = m.groups!;
     let minutes: number | null = null;
+    /*
+     * The tail is read by the same `tailMinutes` parseRelative uses — this scan
+     * answering "how long is שעה ועשרים" on its own is how it read 60 while the
+     * fix taught the parser 80. Where the tail cannot be read, the scan keeps
+     * the base length rather than skipping the hit: this list is what rejects
+     * an INVENTED elapsed time, and dropping a phrase from it would let one by.
+     */
+    const plus = (p: string, unit: number) =>
+      tailMinutes(g[`${p}half`], g[`${p}plus`], g[`${p}plusUnit`], unit) ?? 0;
     if (g.dual) {
       const unit = DUALS[g.dual];
-      minutes = unit * 2 + halfBonus(g.dualHalf, unit);
+      minutes = unit * 2 + plus('dual', unit);
     } else if (g.frac) {
       const unit = unitMinutes(g.fracUnit);
       minutes = /חצי/.test(g.frac) ? unit / 2 : unit / 4;
@@ -552,10 +645,10 @@ export function scanDurations(text: string): DurationHit[] {
       const unit = unitMinutes(g.unit);
       // A word that is not a number in front of a real unit ("הטלפון שעות")
       // is not a quantity — it is a sentence that happens to contain one.
-      if (n !== null && unit > 0) minutes = n * unit + halfBonus(g.nHalf, unit);
+      if (n !== null && unit > 0) minutes = n * unit + plus('n', unit);
     } else if (g.bare) {
       const unit = unitMinutes(g.bare);
-      minutes = unit + halfBonus(g.bareHalf, unit);
+      minutes = unit + plus('bare', unit);
     }
     if (minutes === null || minutes <= 0) continue;
     hits.push({
@@ -600,13 +693,15 @@ export function matchClock(t: string): Clock | null {
 
   const num = new RegExp(
     String.raw`(?:^|\s)(?:[בל]שעה\s+|ב\s*-?\s*)(?<h>\d{1,2})(?::(?<m>\d{2}))?` +
-      String.raw`(?:\s+ו(?<half>חצי|רבע))?\s*(?<period>${PERIOD})?`,
+      OPT_TAIL + String.raw`\s*(?<period>${PERIOD})?`,
   ).exec(t);
   if (num) {
     const g = num.groups!;
     const hour = Number(g.h);
     if (hour > 23) return null;
-    const minute = g.m ? Number(g.m) : g.half ? (g.half === 'חצי' ? 30 : 15) : 0;
+    const tailMin = clockTail(num, t);
+    if (tailMin === null || (g.m && tailMin > 0)) return null;
+    const minute = g.m ? Number(g.m) : tailMin;
     if (minute > 59) return null;
     return {
       hour: applyPeriod(hour, g.period),
@@ -619,15 +714,17 @@ export function matchClock(t: string): Clock | null {
   // Hebrew, words: "בשמונה", "בשעה תשע וחצי", "בשבע בערב".
   const word = new RegExp(
     String.raw`(?:^|\s)(?:בשעה\s+|ב)(?<hw>${HOUR_NAME_ALT})(?![א-ת])` +
-      String.raw`(?:\s+ו(?<half>חצי|רבע))?\s*(?<period>${PERIOD})?`,
+      OPT_TAIL + String.raw`\s*(?<period>${PERIOD})?`,
   ).exec(t);
   if (word) {
     const g = word.groups!;
     const hour = HOUR_NAMES[g.hw.replace(/\s+/g, ' ')];
     if (hour === undefined) return null;
+    const minute = clockTail(word, t);
+    if (minute === null) return null;
     return {
       hour: applyPeriod(hour, g.period),
-      minute: g.half ? (g.half === 'חצי' ? 30 : 15) : 0,
+      minute,
       matched: word[0],
       settled: Boolean(g.period),
     };
@@ -665,6 +762,21 @@ export function matchClock(t: string): Clock | null {
   }
 
   return null;
+}
+
+/**
+ * The minutes after a clock hour — "בשמונה ועשרים", "ב-8 וחצי" — through the
+ * same `readTail` the lengths use, so "ועשרים" is not read as 08:00 with the
+ * twenty left in the title (the clock half of #93).
+ *
+ * One difference, and it is the clock's own: a DIGIT tail with no דקות
+ * refuses. "ב-8 ו-9" is as likely two times as 08:09, and the length path has
+ * no such reading — nobody says "in an hour and 20" meaning two reminders.
+ */
+function clockTail(m: RegExpExecArray, text: string): number | null {
+  const g = m.groups!;
+  if (g.plus !== undefined && /^\d/.test(g.plus) && !g.plusUnit) return null;
+  return readTail(m, text, 60);
 }
 
 function applyPeriod(hour: number, period: string | undefined): number {
